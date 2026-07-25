@@ -1209,6 +1209,12 @@
     let STALL_HL_SET = null;
     let STALL_HL_KEY = null;
     let scrollX = 0, scrollY = 0;
+    /* Scroll positions the keyboard handler just wrote, so the scroll listener
+     * can tell its own echo from a mouse or wheel scroll and keep the
+     * keyboard's cycle-accurate origin instead of re-deriving it from the
+     * device-pixel-quantised position. */
+    let kbExpectPx = null;
+    let kbExpectPy = null;
     let _cfgScrollPending = false;
     let _lblSig = '', _lblRows = null;   // label-list render signature + rows token, so a horizontal scroll does not wipe an in-progress text selection
     let minId = 1, maxId = 1;
@@ -2409,7 +2415,13 @@
        * a large scrollable region. */
       const maxY = Math.max(0, ROWS.length * getRowH() + 3 * getRowH() - tlscroll.clientHeight);
       if (tlscroll.scrollTop > maxY) tlscroll.scrollTop = maxY;
-      syncScrollFromDom();
+      /* An event echoing the keyboard handler's own write keeps the origin the
+       * handler set. Anything else (mouse, wheel, programmatic jumps)
+       * re-derives it from the position, as syncScrollFromDom does. */
+      if (tlscroll.scrollLeft === kbExpectPx) kbExpectPx = null;
+      else scrollX = Math.floor(tlscroll.scrollLeft / cellW) * cellW;
+      if (tlscroll.scrollTop === kbExpectPy) kbExpectPy = null;
+      else scrollY = Math.round(tlscroll.scrollTop / getRowH()) * getRowH();
       redraw();
     });
     window.addEventListener('resize', () => { if (DATA) { setupGeometry(); redraw(); } });
@@ -5098,14 +5110,30 @@
       else if (k === '-') {
         zoomBy(e.ctrlKey ? -1 : -4); e.preventDefault();
       }
-      else if (k === 'ArrowRight') {
-        tlscroll.scrollLeft += cellW; e.preventDefault();
-      }
-      else if (k === 'ArrowLeft') {
-        tlscroll.scrollLeft -= cellW; e.preventDefault();
-      }
-      else if (k === 'ArrowDown') { tlscroll.scrollTop += getRowH(); e.preventDefault(); }
-      else if (k === 'ArrowUp') { tlscroll.scrollTop -= getRowH(); e.preventDefault(); }
+      const devPx = 1 / (window.devicePixelRatio || 1);
+      const stepCol = dir => {
+        const cur = Math.round(scrollX / cellW);
+        const maxX = Math.max(0, Math.ceil((tlscroll.scrollWidth - tlscroll.clientWidth) / cellW));
+        const next = Math.min(maxX, Math.max(0, cur + dir));
+        scrollX = next * cellW;
+        tlscroll.scrollLeft = next * cellW + devPx / 2;
+        kbExpectPx = tlscroll.scrollLeft;
+        redraw();
+      };
+      const stepRow = dir => {
+        const rh = getRowH();
+        const cur = Math.round(scrollY / rh);
+        const maxY = Math.max(0, Math.ceil((tlscroll.scrollHeight - tlscroll.clientHeight) / rh));
+        const next = Math.min(maxY, Math.max(0, cur + dir));
+        scrollY = next * rh;
+        tlscroll.scrollTop = next * rh;
+        kbExpectPy = tlscroll.scrollTop;
+        redraw();
+      };
+      if (k === 'ArrowRight') { stepCol(+1); e.preventDefault(); }
+      else if (k === 'ArrowLeft') { stepCol(-1); e.preventDefault(); }
+      else if (k === 'ArrowDown') { stepRow(+1); e.preventDefault(); }
+      else if (k === 'ArrowUp') { stepRow(-1); e.preventDefault(); }
       else if (k === 'Home') { tlscroll.scrollLeft = 0; e.preventDefault(); }
       else if (k === 'End') { tlscroll.scrollLeft = tlscroll.scrollWidth; e.preventDefault(); }
     });
