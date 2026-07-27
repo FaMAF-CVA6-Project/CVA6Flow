@@ -17,23 +17,23 @@
 package cva6_config_pkg;
 
   // Available configurations (id : parameter cut : workload)
-  localparam int CFG_BASELINE      = 0;   // reference (sb8, D$32K/8w, BHT128, BTB32, LB8, DTLB16, MaxOS7) : all (reference)
-  localparam int CFG_DCACHE_16K    = 1;   // DcacheByteSize 32K -> 16K    : dcache_size_test
-  localparam int CFG_DCACHE_ASSOC2 = 2;   // DcacheSetAssoc 8 -> 2        : data_cache_stress_test
-  localparam int CFG_BHT_64        = 3;   // BHTEntries 128 -> 64         : bht_alias_test
-  localparam int CFG_BHT_16        = 4;   // BHTEntries 128 -> 16         : bht_alias_test
-  localparam int CFG_BHT_8         = 5;   // BHTEntries 128 -> 8          : bht_alias_test
-  localparam int CFG_BTB_4         = 6;   // BTBEntries 32 -> 4           : btb_pressure_test
-  localparam int CFG_SB_4          = 7;   // NrScoreboardEntries 8 -> 4   : daxpy
-  localparam int CFG_SB_2          = 8;   // NrScoreboardEntries 8 -> 2   : daxpy
-  localparam int CFG_LOADBUF_1     = 9;   // NrLoadBufEntries 8 -> 1      : daxpy
-  localparam int CFG_DTLB_1        = 10;  // DataTlbEntries 16 -> 1       : daxpy (TLB bypassed in M-mode, expect null)
-  localparam int CFG_MAXOS_1       = 11;  // MaxOutstandingStores 7 -> 1  : store_miss_test
-  localparam int CFG_ICACHE_4K     = 12;  // IcacheByteSize 16384 -> 4096 : icache_footprint_test
-  localparam int CFG_ICACHE_DM     = 13;  // IcacheSetAssoc 4 -> 1        : icache_footprint_test
-  localparam int CFG_COMMIT_1      = 14;  // NrCommitPorts 2 -> 1         : commit_ilp_test
-  localparam int CFG_RAS_0         = 15;  // RASDepth 2 -> 0              : fib_recursive
-  localparam int CFG_MIX           = 16;  // every swept knob at tightest : daxpy
+  localparam int CFG_BASELINE      = 1;   // reference (sb8, D$32K/8w, BHT128, BTB32, LB8, DTLB16, MaxOS7) : all (reference)
+  localparam int CFG_DCACHE_16K    = 2;   // DcacheByteSize 32K -> 16K    : dcache_size_test
+  localparam int CFG_DCACHE_ASSOC2 = 3;   // DcacheSetAssoc 8 -> 2        : data_cache_stress_test
+  localparam int CFG_BHT_64        = 4;   // BHTEntries 128 -> 64         : bht_alias_test
+  localparam int CFG_BHT_16        = 5;   // BHTEntries 128 -> 16         : bht_alias_test
+  localparam int CFG_BHT_8         = 6;   // BHTEntries 128 -> 8          : bht_alias_test
+  localparam int CFG_BTB_4         = 7;   // BTBEntries 32 -> 4           : btb_pressure_test
+  localparam int CFG_SB_4          = 8;   // NrScoreboardEntries 8 -> 4   : daxpy
+  localparam int CFG_SB_2          = 9;   // NrScoreboardEntries 8 -> 2   : daxpy
+  localparam int CFG_LOADBUF_1     = 10;  // NrLoadBufEntries 8 -> 1      : daxpy
+  localparam int CFG_DTLB_1        = 11;  // DataTlbEntries 16 -> 1       : daxpy (TLB bypassed in M-mode, expect null)
+  localparam int CFG_MAXOS_1       = 12;  // MaxOutstandingStores 7 -> 1  : store_miss_test
+  localparam int CFG_ICACHE_4K     = 13;  // IcacheByteSize 16384 -> 4096 : icache_footprint_test
+  localparam int CFG_ICACHE_DM     = 14;  // IcacheSetAssoc 4 -> 1        : icache_footprint_test
+  localparam int CFG_COMMIT_1      = 15;  // NrCommitPorts 2 -> 1         : commit_ilp_test
+  localparam int CFG_RAS_0         = 16;  // RASDepth 2 -> 0              : fib_recursive
+  localparam int CFG_MIX           = 17;  // every swept knob at tightest : daxpy
  
   // =========================================================================
   // Change this single constant to pick which variant runs
