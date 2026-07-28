@@ -14,7 +14,13 @@ Zero guesswork. The core philosophy of this tool is uncompromising: every report
 
 ## Quick start
 
-Build CVA6 with Verilator and run a test with VCD tracing enabled, then:
+Build CVA6 with Verilator and run a test with VCD tracing enabled. [`run_verilator.py`](#running-a-test-run_verilatorpy) does that in one command and hands you the VCD and the disassembly listing:
+
+```bash
+python3 run_verilator.py cv64a6_imafdc_sv39_hpdcache daxpy.S
+```
+
+Then turn the VCD into a trace:
 
 ```bash
 python3 CVA6Flow_tracer.py sim.vcd -o trace.json \
@@ -43,6 +49,36 @@ python3 CVA6Flow_tracer.py <vcd_path> [options]
 | `--disasm-list` | Path to an `objdump -dS` listing of the test ELF. Populates each record's `disasm` field by PC lookup. Records outside the listing, such as bootrom, keep `disasm=None` |
 | `--stages` | Print per-stage resolution diagnostics on stderr |
 | `--quiet` | Suppress the streaming progress indicator |
+
+## Running a test: `run_verilator.py`
+
+Getting a VCD out of CVA6 by hand means sourcing the simulation environment, picking the right `cva6.py` flags, and then digging the performance counters out of the log. `run_verilator.py` does all of it in one command, and is how every trace in [tests/](tests/) was produced.
+
+```bash
+python3 run_verilator.py <target> <test> [--lang c|asm] [--no-vcd]
+```
+
+| Argument | Meaning |
+| --- | --- |
+| `<target>` | CVA6 configuration to build, for example `cv64a6_imafdc_sv39_hpdcache` |
+| `<test>` | The test to run: C (`.c`) or assembly (`.S`, `.s`, `.asm`). The type is detected from the extension |
+| `--lang` | Force the type instead of detecting it. It selects both the overhead profile and the disassembly markers |
+| `--no-vcd` | Skip the trace and report metrics only. Use it when you only want the numbers, since the VCD is the expensive part |
+
+What it does, in order:
+
+1. **Rebuilds.** Removes `/cva6/work-ver` so Verilator recompiles the core, then sources `verif/sim/setup-env.sh` and runs `cva6.py` against `veri-testharness` with the project's linker script and the `syscalls.c` / `crt.S` runtime. Tracing is enabled through `TRACE_FAST` unless `--no-vcd` is given.
+2. **Disassembles.** Runs `objdump -d -S -l` over the compiled `.o` into `<test>.list`, the full listing the tracer wants for `--disasm-list`, and prints only the measured region, the part between the `MAIN PROGRAM` and `END OF MAIN PROGRAM` markers, saving it as `<test>_clean.txt`.
+3. **Extracts the metrics.** The test leaves its counter deltas in `s2`–`s10` (`x18`–`x26`) before exiting, and the script recovers them from the simulation log by register.
+4. **Prints the table.** Cycles, instructions, I-cache and D-cache misses and accesses, branches, mispredictions plus unpredicted, elapsed microseconds and IPC. Two columns: `OFFICIAL` as measured, and `NET` with the fixed cost of the measurement code itself subtracted, so a short kernel is not swamped by its own instrumentation. The table is appended to `<test>_clean.txt` alongside the disassembly.
+
+Outputs land under `verif/sim/out_<date>/`: the VCD and the log in `veri-testharness_sim/`, and the binary, the `.list` and the `_clean.txt` in `directed_tests/`. Feed the VCD to `CVA6Flow_tracer.py` and the `.list` to `--disasm-list`. Finally the `_clean.txt` is the readable record of what was measured, disassembly and table together.
+
+The script assumes the CVA6 checkout is at `/cva6`, which is where the Docker image below puts it.
+
+### Writing a test
+
+[benchmarks/](benchmarks/) holds the tests used to develop CVA6Flow, and `test_template.c` and `test_template.S` are the starting points. The template configures the PMU (`mhpmevent3` through `mhpmevent8` for cache misses, cache accesses, branches and mispredictions), snapshots `mcycle`, `minstret` and the counters, leaves a `MAIN PROGRAM` / `END OF MAIN PROGRAM` region for your code, and then snapshots again and moves the deltas into `s2`–`s10`. Write inside the markers and the driver measures and disassembles exactly that region.
 
 ## Configuration and parameter sweeps
 
