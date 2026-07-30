@@ -58,6 +58,11 @@ METRICS_MAP = {
 
 ORDERED_KEYS = ['x18', 'x19', 'x20', 'x21', 'x22', 'x23', 'x24', 'x25', 'x26']
 
+# Folder next to this script where each run leaves a copy of the files worth
+# keeping. The originals stay where the simulation puts them.
+RESULTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                           "run_results")
+
 CODELIST_PROFILES = {
     "c": {
         "start": ["// MAIN PROGRAM"],
@@ -203,22 +208,37 @@ def generate_and_show_codelist(binary_path, codelist):
     return clean_path
 
 
-def main():
-    # Directory configuration
-    cva6_root = "/cva6"
-    sim_dir = os.path.join(cva6_root, "verif/sim")
-    setup_script = os.path.join(sim_dir, "setup-env.sh")
+def collect_results(test_name, vcd_path, list_path, clean_path):
+    """Copy the three files worth keeping into run_results/, next to this script.
 
-    # Build folder to remove
-    work_ver_path = os.path.join(cva6_root, "work-ver")
+    The VCD is what the viewer renders, the .list is the listing its tracer
+    needs, and the _clean.txt is the measured region plus the metrics table.
+    The originals are left where the simulation put them."""
+    try:
+        os.makedirs(RESULTS_DIR, exist_ok=True)
+    except OSError as e:
+        print(f"[WARN] Could not create {RESULTS_DIR}: {e}")
+        return
 
-    # Force recompilation
-    if os.path.exists(work_ver_path):
+    copied = []
+    for source, name in ((vcd_path, f"{test_name}.vcd"),
+                         (list_path, f"{test_name}.list"),
+                         (clean_path, f"{test_name}_clean.txt")):
+        # With --no-vcd there is no trace to copy, so a missing source here is
+        # expected rather than a problem.
+        if not source or not os.path.isfile(source):
+            continue
         try:
-            shutil.rmtree(work_ver_path)
+            shutil.copy2(source, os.path.join(RESULTS_DIR, name))
+            copied.append(name)
         except OSError as e:
-            print(f"[WARN] {e}")
+            print(f"[WARN] Could not copy {source}: {e}")
 
+    if copied:
+        print(f"[INFO] Copied to {RESULTS_DIR}: {', '.join(copied)}")
+
+
+def main():
     # Parse arguments
     parser = argparse.ArgumentParser(
         description="Run a CVA6 test (C or assembly) and extract metrics.")
@@ -232,7 +252,32 @@ def main():
                              "Defaults to detection by extension.")
     parser.add_argument("--no-vcd", action="store_true",
                         help="Prevent the .vcd trace file from being generated")
+    parser.add_argument("--keep-build", action="store_true",
+                        help="Reuse the existing work-ver Verilator build "
+                             "instead of deleting it first. The model does "
+                             "not depend on the test, so this saves a full "
+                             "rebuild per run. Use it only when the target "
+                             "and the trace setting are unchanged since the "
+                             "build was made.")
     args = parser.parse_args()
+
+    # Directory configuration
+    cva6_root = "/cva6"
+    sim_dir = os.path.join(cva6_root, "verif/sim")
+    setup_script = os.path.join(sim_dir, "setup-env.sh")
+
+    # Verilator build folder. It is removed to force a full recompilation,
+    # unless the caller asked to reuse it
+    work_ver_path = os.path.join(cva6_root, "work-ver")
+
+    if args.keep_build:
+        if os.path.isdir(work_ver_path):
+            print(f"[INFO] Reusing the Verilator build in {work_ver_path}")
+    elif os.path.exists(work_ver_path):
+        try:
+            shutil.rmtree(work_ver_path)
+        except OSError as e:
+            print(f"[WARN] {e}")
 
     # Validate the source file exists
     abs_src_path = os.path.abspath(args.src_file)
@@ -416,6 +461,13 @@ def main():
             print(f"[INFO] Metrics successfully consolidated in: {clean_path}")
         except Exception as e:
             print(f"[WARN] Could not save the metrics to the file: {e}")
+
+    # Done last, so the _clean.txt copied out already carries the table.
+    collect_results(
+        test_name,
+        os.path.join(log_dir_prediction, f"{test_name}.{args.target}.vcd"),
+        os.path.join(binary_dir_compilation, f"{test_name}.list"),
+        clean_path)
 
 
 if __name__ == "__main__":
