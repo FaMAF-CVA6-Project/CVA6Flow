@@ -289,15 +289,40 @@ def collect(results_dir, test_name, config_id, out_dir, want_vcd):
     return collected
 
 
-def discard_run(results_dir):
-    """Delete what the run left behind, once it has been collected.
+def sim_run_files(test_name, target):
+    """This test's files inside the simulation tree."""
+    log_dir = os.path.join(sim_output_dir(), "veri-testharness_sim")
+    bin_dir = os.path.join(sim_output_dir(), "directed_tests")
+    return [
+        os.path.join(log_dir, f"{test_name}.{target}.vcd"),
+        os.path.join(log_dir, f"{test_name}.{target}.log"),
+        os.path.join(bin_dir, f"{test_name}.o"),
+        os.path.join(bin_dir, f"{test_name}.list"),
+        os.path.join(bin_dir, f"{test_name}_clean.txt"),
+    ]
 
-    A VCD runs to hundreds of megabytes, and a sweep produces one per run, so
-    keeping the simulation tree around would cost more disk than the whole
-    sweep is worth. Everything of value is already in the out directory."""
-    for path in (results_dir, sim_output_dir()):
-        if os.path.isdir(path):
-            shutil.rmtree(path, ignore_errors=True)
+
+def discard_run(results_dir, test_name, target):
+    """Delete what this run left behind, once it has been collected.
+
+    A VCD runs to hundreds of megabytes and one is produced per run, so
+    keeping them would cost far more disk than the sweep is worth. Only this
+    test's files are removed, so a failed run's output survives the rest of
+    the sweep."""
+    if os.path.isdir(results_dir):
+        shutil.rmtree(results_dir, ignore_errors=True)
+    for path in sim_run_files(test_name, target):
+        if os.path.isfile(path):
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
+
+def discard_sim_tree():
+    """Remove the simulation tree, once nothing in it is worth keeping."""
+    if os.path.isdir(sim_output_dir()):
+        shutil.rmtree(sim_output_dir(), ignore_errors=True)
 
 
 def clear_stale_outputs(results_dir, test_name):
@@ -497,7 +522,8 @@ def main():
                 else:
                     collect(results_dir, test_name, config_id, args.out_dir,
                             not args.no_vcd)
-                    discard_run(results_dir)
+                    discard_run(results_dir, test_name,
+                                args.target)
                 results.append((config_id, test_name, code, elapsed))
 
     except KeyboardInterrupt:
@@ -508,6 +534,13 @@ def main():
         print(f"\n[INFO] Restored {live_pkg}")
 
     failed = print_summary(results, time.time() - sweep_start)
+    print(f"[INFO] Results in {os.path.abspath(args.out_dir)}")
+    if failed:
+        print(f"[INFO] The failed run(s) left their output under "
+              f"{sim_output_dir()}")
+    else:
+        # Nothing in there is worth keeping now, so take the tree with it.
+        discard_sim_tree()
     return 1 if failed else 0
 
 

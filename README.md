@@ -126,7 +126,7 @@ For each configuration it installs the package with `CVA6_CONFIG_SEL` set to tha
 
 Results are moved out of `run_results/` into the out directory as `<test>.config<N>.vcd`, `<test>.config<N>.list` and `<test>_clean.config<N>.txt`, so one configuration never overwrites another and the VCD and its listing stay paired for the tracer.
 
-Once a run is collected its leftovers are deleted, both `run_results/` and the whole `verif/sim/out_<date>/` tree. A VCD runs to hundreds of megabytes and a full sweep is 25 runs, so keeping them would cost far more disk than the sweep is worth. A run that fails is left alone, since its output is what there is to debug with.
+Once a run is collected its leftovers are deleted: `run_results/`, and that run's VCD, log, binary, listing and `_clean.txt` in `verif/sim/out_<date>/`. A run that **fails** is the exception: nothing of its is collected or deleted, so its output survives the rest of the sweep and is still under `out_<date>/` at the end. If nothing failed, that tree goes too.
 
 Two things worth knowing:
 
