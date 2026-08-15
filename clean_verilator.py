@@ -1,0 +1,205 @@
+#!/usr/bin/env python3
+"""Remove everything the CVA6 Verilator run scripts generate.
+
+Covers the date-stamped verif/sim/out_<date>/ folders the simulation writes,
+the work-ver/ Verilator build, the batch folder, and the run_results/ each
+runner leaves next to itself.
+
+Only the fixed names listed below and the verif/sim/out_* pattern are ever
+removed, so a tests/ folder or anything else tracked in git cannot be caught
+by mistake. The folders shared by name with the gem5 flow are taken only when
+a Verilator runner sits beside them, so this never sweeps up a gem5 run's
+results.
+
+  python3 clean_verilator.py               # list, then ask
+  python3 clean_verilator.py -y            # no confirmation
+  python3 clean_verilator.py --dry-run     # list only
+  python3 clean_verilator.py --keep-build  # spare work-ver
+"""
+import os
+import sys
+import glob
+import shutil
+import argparse
+
+# Folders the flow creates at the top of the checkout, or of the directory a
+# batch was launched from. Matched only at the top of each search root.
+ROOT_DIRS = {
+    "work-ver":      "the Verilator build, remade by the next run",
+    "batch_results": "run_all_verilator_benchmarks.py",
+}
+
+# Date-stamped simulation output: logs, disassembly, binaries and VCDs.
+# Matched only at this path under a search root, so an unrelated out_* folder
+# elsewhere is left alone.
+OUT_GLOB = "verif/sim/out_*"
+OUT_REASON = "run_verilator.py: simulation output, logs and binaries"
+
+# Folders that appear beside a runner script. Matched at any depth, but only
+# when one of the Verilator runners sits in the same folder.
+SIBLING_DIRS = {
+    "run_results": "run_verilator.py: the files worth keeping",
+    "__pycache__": "left behind by python",
+}
+
+RUNNERS = {"run_verilator.py", "run_all_verilator_benchmarks.py"}
+
+# Never descended into: heavy trees that cannot hold a generated folder.
+PRUNE_DIRS = {".git", "build", "vendor", "node_modules", "install"}
+
+# This repository, two levels up from benchmarks/verilator/.
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(
+    os.path.abspath(__file__))))
+
+# Where run_verilator.py expects the checkout. Outside the container that path
+# does not exist and the repository this script lives in is used instead.
+CVA6_ROOT = "/cva6" if os.path.isdir("/cva6") else REPO_ROOT
+
+
+def search_roots():
+    """The CVA6 root, this repository, and the working directory.
+
+    A run leaves folders in all three: the simulation writes under the CVA6
+    root, run_results/ lands next to the runner script, and a batch collects
+    into the directory it was launched from."""
+    roots = []
+    seen = set()
+    for root in (CVA6_ROOT, REPO_ROOT, os.getcwd()):
+        real = os.path.realpath(root)
+        # Refuse to walk from a place where a stray match would be a disaster.
+        if real in ("/", os.path.expanduser("~")):
+            print(f"[WARN] Skipping the search root {real}: too broad.")
+            continue
+        if real not in seen and os.path.isdir(real):
+            seen.add(real)
+            roots.append(root)
+    return roots
+
+
+def find_targets(roots, keep_build):
+    """Collect every generated folder under the roots.
+
+    A match is never descended into: it is about to be deleted whole, so its
+    contents cannot add anything."""
+    found = []
+    seen = set()
+
+    def add(path, reason):
+        real = os.path.realpath(path)
+        if real not in seen and os.path.isdir(path):
+            seen.add(real)
+            found.append((path, reason))
+
+    for root in roots:
+        for name, reason in ROOT_DIRS.items():
+            if name == "work-ver" and keep_build:
+                continue
+            add(os.path.join(root, name), reason)
+
+        for path in glob.glob(os.path.join(root, OUT_GLOB)):
+            add(path, OUT_REASON)
+
+        for dirpath, dirnames, filenames in os.walk(root):
+            beside_runner = RUNNERS.intersection(filenames)
+            keep = []
+            for name in dirnames:
+                full = os.path.join(dirpath, name)
+                if os.path.realpath(full) in seen:
+                    continue          # already taken, and taken whole
+                if name == "work-ver":
+                    continue          # spared, and nothing inside is a target
+                if name in SIBLING_DIRS and beside_runner:
+                    add(full, SIBLING_DIRS[name])
+                elif name not in PRUNE_DIRS and not name.startswith("."):
+                    keep.append(name)
+            dirnames[:] = keep
+
+    return sorted(found)
+
+
+def folder_size(path):
+    """Bytes held under path. Broken links and races are counted as zero."""
+    total = 0
+    for dirpath, _, filenames in os.walk(path):
+        for name in filenames:
+            try:
+                total += os.lstat(os.path.join(dirpath, name)).st_size
+            except OSError:
+                pass
+    return total
+
+
+def human(size):
+    for unit in ("B", "KiB", "MiB", "GiB"):
+        if size < 1024 or unit == "GiB":
+            return f"{size:.0f}{unit}" if unit == "B" else f"{size:.1f}{unit}"
+        size /= 1024
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Delete the folders the CVA6 Verilator run scripts "
+                    "generate.")
+    parser.add_argument("-y", "--yes", action="store_true",
+                        help="Delete without asking for confirmation")
+    parser.add_argument("-n", "--dry-run", action="store_true",
+                        help="List what would be deleted and stop")
+    parser.add_argument("--keep-build", action="store_true",
+                        help="Spare work-ver/, so the next run can reuse it "
+                             "with run_verilator.py --keep-build instead of "
+                             "recompiling the model")
+    args = parser.parse_args()
+
+    roots = search_roots()
+    if not roots:
+        print("[ERROR] No usable search root")
+        sys.exit(1)
+
+    print("[INFO] Searching in: " + ", ".join(os.path.abspath(r)
+                                              for r in roots))
+    targets = find_targets(roots, args.keep_build)
+
+    if not targets:
+        print("[INFO] Nothing to clean")
+        return
+
+    print("\n" + "=" * 70)
+    print("TO DELETE")
+    print("=" * 70)
+    total = 0
+    for path, reason in targets:
+        size = folder_size(path)
+        total += size
+        print(f"{human(size):>10}  {os.path.abspath(path)}")
+        print(f"{'':>10}  ({reason})")
+    print("=" * 70)
+    print(f"{len(targets)} folder(s), {human(total)}\n")
+
+    if args.dry_run:
+        print("[INFO] Dry run, nothing was deleted")
+        return
+
+    if not args.yes:
+        try:
+            reply = input("Delete these? [y/N] ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print("\n[INFO] Cancelled")
+            return
+        if reply not in ("y", "yes"):
+            print("[INFO] Cancelled")
+            return
+
+    deleted = 0
+    for path, _ in targets:
+        try:
+            shutil.rmtree(path)
+            deleted += 1
+        except OSError as e:
+            print(f"[WARN] Could not delete {path}: {e}")
+
+    print(f"[INFO] Deleted {deleted} of {len(targets)} folder(s), "
+          f"{human(total)} freed")
+
+
+if __name__ == "__main__":
+    main()
