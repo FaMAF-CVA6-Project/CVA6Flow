@@ -7,7 +7,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 # ==========================================
 # Adjust this number based on your CPU cores and available RAM.
 # 4 is a good balance to avoid overloading a standard 8-core machine.
-MAX_WORKERS = 6
+MAX_WORKERS = 4
 TRACER_SCRIPT = "../CVA6Flow_tracer.py"
 
 
