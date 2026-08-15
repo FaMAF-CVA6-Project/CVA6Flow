@@ -5,13 +5,16 @@ Accepts both C (.c) and assembly (.S/.s/.asm) tests. The input type is
 detected from the extension and can be forced with --lang.
 """
 import os
-import sys
-import argparse
-import subprocess
-import datetime
 import re
+import ast
+import sys
+import glob
 import shlex
 import shutil
+import operator
+import argparse
+import datetime
+import subprocess
 
 # ==============================================================================
 # OVERHEAD PROFILES (cv64a6_imafdc_sv39_hpdcache_wb)
@@ -81,6 +84,168 @@ CODELIST_PROFILES = {
 # Extensions recognised per input type (.S handled separately, case-sensitive).
 C_EXTS = {".c"}
 ASM_EXTS = {".s", ".asm", ".sx"}
+
+
+def format_cache_size(value):
+    """Render a cache size as KiB/MiB from a byte count."""
+    text = str(value).strip()
+    if not text.isdigit():
+        return text or "?"
+    num = int(text)
+    for unit, step in (("MiB", 1024 * 1024), ("KiB", 1024)):
+        if num >= step and num % step == 0:
+            return f"{num // step}{unit}"
+    return f"{num}B"
+
+
+def find_config_pkg(cva6_root, target):
+    """Locate the target's SystemVerilog config package.
+
+    core/include/ is where it lives, under the CVA6 root the simulation used or
+    under this checkout. A target whose package sits elsewhere, or that is
+    generated into another folder, is still worth finding, so the checkout is
+    searched as a last resort. Returns None when there is no such package,
+    which is the case for a target name that is not a package name."""
+    name = f"{target}_config_pkg.sv"
+    repo_root = os.path.dirname(os.path.dirname(
+        os.path.dirname(os.path.abspath(__file__))))
+    roots = [cva6_root]
+    if os.path.realpath(repo_root) != os.path.realpath(cva6_root):
+        roots.append(repo_root)
+
+    for root in roots:
+        path = os.path.join(root, "core", "include", name)
+        if os.path.isfile(path):
+            return path
+
+    for root in roots:
+        for path in sorted(glob.glob(os.path.join(root, "**", name),
+                                     recursive=True)):
+            return path
+
+    known = {os.path.basename(p)[:-len("_config_pkg.sv")]
+             for root in roots
+             for p in glob.glob(os.path.join(root, "core", "include",
+                                             "*_config_pkg.sv"))}
+    known.discard("build")              # build_config_pkg.sv is not a target
+    print(f"[WARN] No config package '{name}' found under "
+          f"{' or '.join(roots)}. The cache geometry is reported as '?'.")
+    if known:
+        print("[WARN] Targets with a package here: " +
+              ", ".join(sorted(known)))
+    return None
+
+
+_FOLD_OPS = {ast.Mult: operator.mul, ast.Add: operator.add,
+             ast.Sub: operator.sub, ast.LShift: operator.lshift,
+             ast.Div: operator.floordiv, ast.FloorDiv: operator.floordiv}
+
+
+def _fold(node):
+    """Constant-fold an arithmetic tree, or None if it is not one."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, int):
+        return node.value
+    if isinstance(node, ast.BinOp) and type(node.op) in _FOLD_OPS:
+        left, right = _fold(node.left), _fold(node.right)
+        if left is not None and right is not None:
+            return _FOLD_OPS[type(node.op)](left, right)
+    return None
+
+
+def sv_int(text):
+    """Turn a SystemVerilog integer expression into a Python int.
+
+    Covers a plain literal, a sized literal such as 32'd16384, and the small
+    arithmetic a config package may use, such as 16 * 1024. An identifier or
+    anything else is reported as unknown rather than guessed at. The tree is
+    folded by hand instead of evaluated, so nothing in the file can run."""
+    text = text.strip().rstrip(";").strip()
+    if not text:
+        return None
+
+    sized = re.fullmatch(r"(?:\d+)?\s*'\s*[sS]?([bodhBODH])([0-9a-fA-F_]+)",
+                         text)
+    if sized:
+        base = {"b": 2, "o": 8, "d": 10, "h": 16}[sized.group(1).lower()]
+        try:
+            return int(sized.group(2).replace("_", ""), base)
+        except ValueError:
+            return None
+
+    try:
+        return _fold(ast.parse(text, mode="eval").body)
+    except (SyntaxError, ValueError, TypeError):
+        return None
+
+
+def read_cache_geometry(cva6_root, target):
+    """Read the L1 geometry from the target's config package.
+
+    Two forms are accepted, because packages use both: the field of the
+    config struct the core is built from, whose value is either a literal or
+    the name of a localparam declared above it, and the CVA6Config<field>
+    localparam on its own. An unreadable package leaves the geometry unknown
+    rather than failing the run."""
+    path = find_config_pkg(cva6_root, target)
+    if not path:
+        return {}
+    try:
+        with open(path) as f:
+            text = f.read()
+    except OSError as e:
+        print(f"[WARN] Could not read {path}: {e}")
+        return {}
+
+    def localparam(name):
+        """The value of a localparam, whatever type qualifiers it carries."""
+        match = re.search(rf"localparam\b[^=;\n]*?\b{re.escape(name)}\s*=\s*"
+                          rf"([^;]+);", text)
+        return sv_int(match.group(1)) if match else None
+
+    def resolve(field):
+        match = re.search(rf"\b{field}\s*:\s*([^,\n]+)", text)
+        if match:
+            # Drop an 'unsigned'(...)' style cast, then the parentheses, to
+            # leave either a literal or the name of a localparam.
+            token = re.sub(r"^\w+\s*'\s*(?=\()", "", match.group(1).strip())
+            # Several fields may share a line, so the tail of the struct can
+            # come along with the value. Trim the punctuation off both ends.
+            token = token.strip("(){}; \t")
+            value = sv_int(token)
+            if value is None:
+                value = localparam(token)
+            if value is not None:
+                return value
+        # Packages that declare the parameter but do not spell the struct
+        # field out the same way are still readable through the localparam.
+        for name in (f"CVA6Config{field}", field):
+            value = localparam(name)
+            if value is not None:
+                return value
+        return None
+
+    geometry = {}
+    missing = []
+    for name, prefix in (("icache", "Icache"), ("dcache", "Dcache")):
+        fields = {"size": f"{prefix}ByteSize", "assoc": f"{prefix}SetAssoc"}
+        geometry[name] = {key: resolve(field)
+                          for key, field in fields.items()}
+        missing += [field for key, field in fields.items()
+                    if geometry[name][key] is None]
+    if missing:
+        print(f"[WARN] Could not resolve {', '.join(missing)} in {path}")
+    return geometry
+
+
+def build_table_header(engine, program, geometry):
+    """One-line table title: engine, program, and the two L1 geometries."""
+    parts = [f"RESULTS TABLE {engine} {program}"]
+    for name, label in (("icache", "ICache"), ("dcache", "DCache")):
+        cache = geometry.get(name) or {}
+        size = format_cache_size(cache.get("size") or "")
+        assoc = cache.get("assoc") or "?"
+        parts.append(f"{label}: {size}/{assoc}")
+    return "  ".join(parts)
 
 
 def detect_lang(src_file, override):
@@ -412,12 +577,18 @@ def main():
     ipc_official = raw_inst / raw_cycles if raw_cycles > 0 else 0.0
     ipc_corrected = net_inst / net_cycles if net_cycles > 0 else 0.0
 
+    geometry = read_cache_geometry(cva6_root, args.target)
+    header = build_table_header("CVA6", os.path.basename(abs_src_path),
+                                geometry)
+    # The rule is widened when the title is longer, so the box never breaks.
+    width = max(70, len(header))
+
     output_buffer = []
-    output_buffer.append("=" * 70)
-    output_buffer.append("RESULTS TABLE")
-    output_buffer.append("=" * 70)
+    output_buffer.append("=" * width)
+    output_buffer.append(header)
+    output_buffer.append("=" * width)
     output_buffer.append(f"{'METRIC':<25} | {'OFFICIAL':>15} | {'NET':>15}")
-    output_buffer.append("=" * 70)
+    output_buffer.append("=" * width)
 
     # Iterate metrics
     for key in ORDERED_KEYS:
@@ -443,7 +614,7 @@ def main():
     clean_official.append(round(ipc_official, 4))
     clean_corrected.append(round(ipc_corrected, 4))
 
-    output_buffer.append("=" * 70)
+    output_buffer.append("=" * width)
     output_buffer.append(f"\nClean result (OFFICIAL):  {clean_official}")
     output_buffer.append(f"Clean result (NET):       {clean_corrected}\n")
 
