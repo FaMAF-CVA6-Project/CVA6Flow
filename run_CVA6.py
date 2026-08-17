@@ -85,6 +85,13 @@ CODELIST_PROFILES = {
 C_EXTS = {".c"}
 ASM_EXTS = {".s", ".asm", ".sx"}
 
+# The _clean.txt holds two sections: the measured region of the disassembly,
+# then the metrics table.
+RULE = "=" * 70
+METRICS_MARKER = "RESULTS TABLE"
+CODE_BANNER = [RULE, "DISASSEMBLED CODE", RULE]
+CODE_END_BANNER = [RULE, "END OF DISASSEMBLED CODE", RULE]
+
 
 def format_cache_size(value):
     """Render a cache size as KiB/MiB from a byte count."""
@@ -237,15 +244,19 @@ def read_cache_geometry(cva6_root, target):
     return geometry
 
 
-def build_table_header(engine, program, geometry):
-    """One-line table title: engine, program, and the two L1 geometries."""
+def build_table_header(engine, core, program, geometry):
+    """The table title, over two lines.
+
+    What was measured goes on the first, and the core the model was built
+    from on the second, since a target name is long enough to push the title
+    well past the width of the table."""
     parts = [f"RESULTS TABLE {engine} {program}"]
     for name, label in (("icache", "ICache"), ("dcache", "DCache")):
         cache = geometry.get(name) or {}
         size = format_cache_size(cache.get("size") or "")
         assoc = cache.get("assoc") or "?"
         parts.append(f"{label}: {size}/{assoc}")
-    return "  ".join(parts)
+    return ["  ".join(parts), f"Core: {core}"]
 
 
 def detect_lang(src_file, override):
@@ -291,9 +302,10 @@ def generate_and_show_codelist(binary_path, codelist):
         return None
 
     # Filtered view.
-    print("\n" + "=" * 70)
-    print("DISASSEMBLED CODE")
-    print("=" * 70 + "\n")
+    print()
+    for line in CODE_BANNER:
+        print(line)
+    print()
 
     def core_phrase(marker):
         return re.sub(r'\s+', ' ', marker.lstrip('#/ \t').strip())
@@ -323,6 +335,8 @@ def generate_and_show_codelist(binary_path, codelist):
             lines = f.readlines()
 
         with open(clean_path, "w") as f_clean:
+            f_clean.write("\n".join(CODE_BANNER) + "\n")
+            written = "\n"
             for idx, line in enumerate(lines, 1):
                 if printing:
                     eh = first_hit(line, end_cores)
@@ -349,12 +363,18 @@ def generate_and_show_codelist(binary_path, codelist):
                         if codelist["keep_discriminator"] and "(discriminator" in line:
                             print(line, end='')
                             f_clean.write(line)
+                            written = line
                             continue
                         else:
                             continue
 
                     print(line, end='')
                     f_clean.write(line)
+                    written = line
+
+            if not written.endswith("\n"):
+                f_clean.write("\n")
+            f_clean.write("\n".join(CODE_END_BANNER) + "\n")
 
         if not found_start:
             print(f"[WARN] No start marker found (searched {start_cores!r}), "
@@ -368,7 +388,9 @@ def generate_and_show_codelist(binary_path, codelist):
         print(f"[ERROR] {e}")
         return None
 
-    print("=" * 70 + "\n")
+    for line in CODE_END_BANNER:
+        print(line)
+    print()
     print(f"[INFO] Clean file saved in: {clean_path}")
     return clean_path
 
@@ -578,14 +600,14 @@ def main():
     ipc_corrected = net_inst / net_cycles if net_cycles > 0 else 0.0
 
     geometry = read_cache_geometry(cva6_root, args.target)
-    header = build_table_header("CVA6", os.path.basename(abs_src_path),
-                                geometry)
+    header = build_table_header("CVA6", args.target,
+                                os.path.basename(abs_src_path), geometry)
     # The rule is widened when the title is longer, so the box never breaks.
-    width = max(70, len(header))
+    width = max(70, max(len(line) for line in header))
 
     output_buffer = []
     output_buffer.append("=" * width)
-    output_buffer.append(header)
+    output_buffer.extend(header)
     output_buffer.append("=" * width)
     output_buffer.append(f"{'METRIC':<25} | {'OFFICIAL':>15} | {'NET':>15}")
     output_buffer.append("=" * width)
@@ -626,7 +648,7 @@ def main():
     if clean_path and os.path.exists(clean_path):
         try:
             with open(clean_path, "a") as f_clean:
-                f_clean.write("\n\n")
+                f_clean.write("\n")
                 for line in output_buffer:
                     f_clean.write(line + "\n")
             print(f"[INFO] Metrics successfully consolidated in: {clean_path}")

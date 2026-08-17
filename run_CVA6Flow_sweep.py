@@ -12,8 +12,9 @@ only the workloads that configuration was cut for:
 A configuration whose workload is 'all' runs every workload named anywhere in
 the table, which is the set the sweep has been exercised with.
 
-Outputs are collected as <test>.config<N>.<ext>, so one configuration's 
-results never overwrite another's.
+Outputs are collected as <test>.config<N>.<ext>, so one configuration's
+results never overwrite another's. Every metrics table is also gathered into
+a single metrics.txt.
 
 The live config package is restored when the sweep ends, fails or is
 interrupted.
@@ -40,10 +41,10 @@ LIVE_CONFIG_PKG = os.path.join(
 SOURCE_CONFIG_PKG = "cv64a6_imafdc_sv39_hpdcache_wb_config_pkg.sv"
 
 DEFAULT_TARGET = "cv64a6_imafdc_sv39_hpdcache_wb"
-DEFAULT_TESTS_DIR = os.path.join(CVA6_ROOT, "verif/tests/custom/FaMAF")
+DEFAULT_TESTS_DIR = os.path.join(CVA6_ROOT, "CVA6Flow_benchmarks")
 DEFAULT_OUT_DIR = "CVA6Flow_sweep_results"
 
-RUNNER_NAME = "run_verilator.py"
+RUNNER_NAME = "run_CVA6.py"
 
 # Extensions tried when turning a workload name into a file, in this order.
 EXT_PRIORITY = [".c", ".S", ".s", ".asm", ".sx"]
@@ -58,9 +59,14 @@ SELECTOR_RE = re.compile(
 
 SEP = "=" * 70
 
+# What the runner writes above its metrics table, and where the sweep gathers
+# every one of those tables once the runs are done.
+METRICS_MARKER = "RESULTS TABLE"
+METRICS_FILE = "metrics.txt"
+
 
 def find_runner():
-    """Locate run_verilator.py next to this script, then in the cwd."""
+    """Locate run_CVA6.py next to this script, then in the cwd."""
     here = os.path.dirname(os.path.abspath(__file__))
     for candidate in (os.path.join(here, RUNNER_NAME),
                       os.path.abspath(RUNNER_NAME)):
@@ -134,15 +140,36 @@ def suggest(name, tests_dir):
         entries = sorted(os.listdir(tests_dir))
     except OSError:
         return []
+    # Compare on the stem, so a workload typed with an extension or as a
+    # path still finds its neighbours.
+    stem = os.path.splitext(os.path.basename(name))[0].lower()
     return [e for e in entries
             if os.path.splitext(e)[1] in EXT_PRIORITY
-            and name.lower() in os.path.splitext(e)[0].lower()]
+            and stem in os.path.splitext(e)[0].lower()]
 
 
 def resolve_test_file(name, tests_dir):
-    """Turn a workload name into a path, trying the known extensions."""
-    matches = [os.path.join(tests_dir, name + ext) for ext in EXT_PRIORITY
-               if os.path.isfile(os.path.join(tests_dir, name + ext))]
+    """Turn a workload into a path.
+
+    The table writes a workload as a bare name, but a name carrying its
+    extension and a path to a file are what a person naturally types on
+    --tests, so all three resolve rather than only the first."""
+    # A path, absolute or relative to the working directory, taken as given.
+    if os.path.isfile(name):
+        return name
+
+    stem, ext = os.path.splitext(name)
+    if ext in EXT_PRIORITY:
+        # A name that already carries its extension, inside the tests folder.
+        candidate = os.path.join(tests_dir, name)
+        if os.path.isfile(candidate):
+            return candidate
+        # Fall through on the stem: the same workload under a different
+        # extension is a likelier intent than no match at all.
+        name = stem
+
+    matches = [os.path.join(tests_dir, name + e) for e in EXT_PRIORITY
+               if os.path.isfile(os.path.join(tests_dir, name + e))]
     if not matches:
         return None
     if len(matches) > 1:
@@ -242,18 +269,18 @@ def install_config(source_text, cfg_name, live_path):
 
 
 def driver_results_dir(runner):
-    """The run_results/ folder run_verilator.py copies its keepers into."""
+    """The run_results/ folder run_CVA6.py copies its keepers into."""
     return os.path.join(os.path.dirname(os.path.abspath(runner)), "run_results")
 
 
 def sim_output_dir():
-    """The simulation tree run_verilator.py writes: logs, VCD, binaries."""
+    """The simulation tree run_CVA6.py writes: logs, VCD, binaries."""
     today = datetime.date.today().strftime("%Y-%m-%d")
     return os.path.join(CVA6_ROOT, "verif/sim", f"out_{today}")
 
 
 def output_paths(results_dir, test_name):
-    """The three files run_verilator.py leaves in run_results/ for this test."""
+    """The three files run_CVA6.py leaves in run_results/ for this test."""
     return {
         "vcd": os.path.join(results_dir, f"{test_name}.vcd"),
         "list": os.path.join(results_dir, f"{test_name}.list"),
@@ -335,6 +362,64 @@ def clear_stale_outputs(results_dir, test_name):
                 pass
 
 
+def extract_metrics(clean_path):
+    """The metrics section of a _clean.txt, or None if it holds none.
+
+    A _clean.txt is the measured region of the disassembly followed by the
+    metrics table, so everything from the rule above the table's title to the
+    end of the file is the section wanted here."""
+    try:
+        with open(clean_path) as f:
+            lines = f.read().splitlines()
+    except OSError as e:
+        print(f"[WARN] Could not read {clean_path}: {e}")
+        return None
+
+    for i, line in enumerate(lines):
+        if line.startswith(METRICS_MARKER):
+            # Take the rule above the title too, so the block arrives boxed.
+            start = i - 1 if i and set(lines[i - 1]) == {"="} else i
+            return "\n".join(lines[start:]).rstrip()
+
+    return None
+
+
+def write_metrics_file(out_dir, entries, info):
+    """Gather every run's metrics table into one metrics.txt.
+
+    entries is [(label, clean file)] in plan order, so the file reads in the
+    same order as the summary above it. A run whose table is missing is named
+    rather than skipped silently."""
+    blocks, missing = [], []
+    for label, clean_path in entries:
+        block = extract_metrics(clean_path)
+        if block is None:
+            missing.append(label)
+            continue
+        blocks.append(f">>> {label}\n{block}")
+
+    if missing:
+        print(f"[WARN] No metrics table for: {', '.join(missing)}")
+    if not blocks:
+        print(f"[WARN] No metrics tables found, so no {METRICS_FILE} written")
+        return None
+
+    path = os.path.join(out_dir, METRICS_FILE)
+    try:
+        with open(path, "w") as f:
+            f.write(f"{SEP}\nALL METRICS\n{SEP}\n")
+            for line in info:
+                f.write(line + "\n")
+            f.write(f"{SEP}\n\n")
+            f.write("\n\n".join(blocks) + "\n")
+    except OSError as e:
+        print(f"[WARN] Could not write {path}: {e}")
+        return None
+
+    print(f"[INFO] {len(blocks)} metrics table(s) gathered in {path}")
+    return path
+
+
 def format_duration(seconds):
     minutes, secs = divmod(int(seconds), 60)
     if minutes:
@@ -403,7 +488,8 @@ def main():
     parser.add_argument("--tests", default="",
                         help="Comma-separated workloads to run for every "
                              "configuration, instead of the ones the table "
-                             "names")
+                             "names. A bare name, a file name with its "
+                             "extension, or a path all work")
     parser.add_argument("--out-dir", default=DEFAULT_OUT_DIR,
                         help=f"Where to collect the results. Defaults to "
                              f"{DEFAULT_OUT_DIR}/")
@@ -415,13 +501,13 @@ def main():
                              f"configuration and restored at the end. "
                              f"Defaults to {LIVE_CONFIG_PKG}")
     parser.add_argument("--no-vcd", action="store_true",
-                        help="Forwarded to run_verilator.py: no .vcd trace, "
+                        help="Forwarded to run_CVA6.py: no .vcd trace, "
                              "metrics only")
     parser.add_argument("--list", action="store_true",
                         help="Print the plan and exit, touching nothing")
     args = parser.parse_args()
 
-    # Keep our output interleaved correctly with each run_verilator.py run.
+    # Keep our output interleaved correctly with each run_CVA6.py run.
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(line_buffering=True)
 
@@ -534,7 +620,19 @@ def main():
         print(f"\n[INFO] Restored {live_pkg}")
 
     failed = print_summary(results, time.time() - sweep_start)
-    print(f"[INFO] Results in {os.path.abspath(args.out_dir)}")
+
+    out_dir = os.path.abspath(args.out_dir)
+    # Only a run that passed left a table behind to gather.
+    write_metrics_file(
+        out_dir,
+        [(f"config{cid} / {name}",
+          os.path.join(out_dir, f"{name}_clean.config{cid}.txt"))
+         for cid, name, code, _ in results if code == 0],
+        [f"Target   : {args.target}",
+         f"Tests dir: {os.path.abspath(args.tests_dir)}",
+         f"Runs     : {len(results)}, {len(results) - failed} passed"])
+
+    print(f"[INFO] Results in {out_dir}")
     if failed:
         print(f"[INFO] The failed run(s) left their output under "
               f"{sim_output_dir()}")

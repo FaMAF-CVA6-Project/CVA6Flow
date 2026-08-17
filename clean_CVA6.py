@@ -11,10 +11,11 @@ by mistake. The folders shared by name with the gem5 flow are taken only when
 a Verilator runner sits beside them, so this never sweeps up a gem5 run's
 results.
 
-  python3 clean_verilator.py               # list, then ask
-  python3 clean_verilator.py -y            # no confirmation
-  python3 clean_verilator.py --dry-run     # list only
-  python3 clean_verilator.py --keep-build  # spare work-ver
+  python3 clean_CVA6.py               # list, then ask
+  python3 clean_CVA6.py -y            # no confirmation
+  python3 clean_CVA6.py --dry-run     # list only
+  python3 clean_CVA6.py --keep-build  # spare work-ver
+  python3 clean_CVA6.py my_results    # plus a custom --out-dir sweep
 """
 import os
 import sys
@@ -25,33 +26,33 @@ import argparse
 # Folders the flow creates at the top of the checkout, or of the directory a
 # batch was launched from. Matched only at the top of each search root.
 ROOT_DIRS = {
-    "work-ver":      "the Verilator build, remade by the next run",
-    "batch_results": "run_all_verilator_benchmarks.py",
+    "work-ver":               "the Verilator build, remade by the next run",
+    "CVA6Flow_sweep_results": "run_CVA6Flow_sweep.py",
 }
 
 # Date-stamped simulation output: logs, disassembly, binaries and VCDs.
 # Matched only at this path under a search root, so an unrelated out_* folder
 # elsewhere is left alone.
 OUT_GLOB = "verif/sim/out_*"
-OUT_REASON = "run_verilator.py: simulation output, logs and binaries"
+OUT_REASON = "run_CVA6.py: simulation output, logs and binaries"
 
 # Folders that appear beside a runner script. Matched at any depth, but only
 # when one of the Verilator runners sits in the same folder.
 SIBLING_DIRS = {
-    "run_results": "run_verilator.py: the files worth keeping",
+    "run_results": "run_CVA6.py: the files worth keeping",
     "__pycache__": "left behind by python",
 }
 
-RUNNERS = {"run_verilator.py", "run_all_verilator_benchmarks.py"}
+RUNNERS = {"run_CVA6.py", "run_CVA6Flow_sweep.py"}
 
 # Never descended into: heavy trees that cannot hold a generated folder.
 PRUNE_DIRS = {".git", "build", "vendor", "node_modules", "install"}
 
-# This repository, two levels up from benchmarks/verilator/.
+# This repository, two levels up from benchmarks/CVA6/.
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__))))
 
-# Where run_verilator.py expects the checkout. Outside the container that path
+# Where run_CVA6.py expects the checkout. Outside the container that path
 # does not exist and the repository this script lives in is used instead.
 CVA6_ROOT = "/cva6" if os.path.isdir("/cva6") else REPO_ROOT
 
@@ -76,8 +77,8 @@ def search_roots():
     return roots
 
 
-def find_targets(roots, keep_build):
-    """Collect every generated folder under the roots.
+def find_targets(roots, keep_build, extra=()):
+    """Collect every generated folder under the roots, plus any named by hand.
 
     A match is never descended into: it is about to be deleted whole, so its
     contents cannot add anything."""
@@ -89,6 +90,12 @@ def find_targets(roots, keep_build):
         if real not in seen and os.path.isdir(path):
             seen.add(real)
             found.append((path, reason))
+
+    for path in extra:
+        if os.path.isdir(path):
+            add(path, "named on the command line")
+        else:
+            print(f"[WARN] Not a folder, ignored: {path}")
 
     for root in roots:
         for name, reason in ROOT_DIRS.items():
@@ -140,13 +147,16 @@ def main():
     parser = argparse.ArgumentParser(
         description="Delete the folders the CVA6 Verilator run scripts "
                     "generate.")
+    parser.add_argument("extra", nargs="*",
+                        help="Extra folders to delete, for a batch or a sweep "
+                             "run with a custom --out-dir")
     parser.add_argument("-y", "--yes", action="store_true",
                         help="Delete without asking for confirmation")
     parser.add_argument("-n", "--dry-run", action="store_true",
                         help="List what would be deleted and stop")
     parser.add_argument("--keep-build", action="store_true",
                         help="Spare work-ver/, so the next run can reuse it "
-                             "with run_verilator.py --keep-build instead of "
+                             "with run_CVA6.py --keep-build instead of "
                              "recompiling the model")
     args = parser.parse_args()
 
@@ -157,7 +167,7 @@ def main():
 
     print("[INFO] Searching in: " + ", ".join(os.path.abspath(r)
                                               for r in roots))
-    targets = find_targets(roots, args.keep_build)
+    targets = find_targets(roots, args.keep_build, args.extra)
 
     if not targets:
         print("[INFO] Nothing to clean")

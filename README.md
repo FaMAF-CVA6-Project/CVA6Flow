@@ -14,10 +14,10 @@ Zero guesswork. The core philosophy of this tool is uncompromising: every report
 
 ## Quick start
 
-Build CVA6 with Verilator and run a test with VCD tracing enabled. [`run_verilator.py`](#running-a-test-run_verilatorpy) does that in one command and hands you the VCD and the disassembly listing:
+Build CVA6 with Verilator and run a test with VCD tracing enabled. [`run_CVA6.py`](#running-a-test-run_cva6py) does that in one command and hands you the VCD and the disassembly listing:
 
 ```bash
-python3 run_verilator.py cv64a6_imafdc_sv39_hpdcache daxpy.S
+python3 run_CVA6.py cv64a6_imafdc_sv39_hpdcache daxpy.S
 ```
 
 Then turn the VCD into a trace:
@@ -50,12 +50,12 @@ python3 CVA6Flow_tracer.py <vcd_path> [options]
 | `--stages` | Print per-stage resolution diagnostics on stderr |
 | `--quiet` | Suppress the streaming progress indicator |
 
-## Running a test: `run_verilator.py`
+## Running a test: `run_CVA6.py`
 
-Getting a VCD out of CVA6 by hand means sourcing the simulation environment, picking the right `cva6.py` flags, and then digging the performance counters out of the log. `run_verilator.py` does all of it in one command, and is how every trace in [tests/](tests/) was produced.
+Getting a VCD out of CVA6 by hand means sourcing the simulation environment, picking the right `cva6.py` flags, and then digging the performance counters out of the log. `run_CVA6.py` does all of it in one command, and is how every trace in [tests/](tests/) was produced.
 
 ```bash
-python3 run_verilator.py <target> <test> [--lang c|asm] [--no-vcd]
+python3 run_CVA6.py <target> <test> [--lang c|asm] [--no-vcd]
 ```
 
 | Argument | Meaning |
@@ -69,9 +69,9 @@ python3 run_verilator.py <target> <test> [--lang c|asm] [--no-vcd]
 What it does, in order:
 
 1. **Rebuilds.** Removes `/cva6/work-ver` so Verilator recompiles the core, unless `--keep-build` says to reuse it. Then sources `verif/sim/setup-env.sh` and runs `cva6.py` against `veri-testharness` with the project's linker script and the `syscalls.c` / `crt.S` runtime. Tracing is enabled through `TRACE_FAST` unless `--no-vcd` is given, and because that is a build-time define, changing it changes the model.
-2. **Disassembles.** Runs `objdump -d -S -l` over the compiled `.o` into `<test>.list`, the full listing the tracer wants for `--disasm-list`, and prints only the measured region, the part between the `MAIN PROGRAM` and `END OF MAIN PROGRAM` markers, saving it as `<test>_clean.txt`.
+2. **Disassembles.** Runs `objdump -d -S -l` over the compiled `.o` into `<test>.list`, the full listing the tracer wants for `--disasm-list`, and prints only the measured region, the part between the `MAIN PROGRAM` and `END OF MAIN PROGRAM` markers, saving it as `<test>_clean.txt` under a `DISASSEMBLED CODE` banner and closed by an `END OF DISASSEMBLED CODE` one.
 3. **Extracts the metrics.** The test leaves its counter deltas in `s2`–`s10` (`x18`–`x26`) before exiting, and the script recovers them from the simulation log by register.
-4. **Prints the table.** Cycles, instructions, I-cache and D-cache misses and accesses, branches, mispredictions plus unpredicted, elapsed microseconds and IPC. Two columns: `OFFICIAL` as measured, and `NET` with the fixed cost of the measurement code itself subtracted, so a short kernel is not swamped by its own instrumentation. The table is appended to `<test>_clean.txt` alongside the disassembly.
+4. **Prints the table.** Cycles, instructions, I-cache and D-cache misses and accesses, branches, mispredictions plus unpredicted, elapsed microseconds and IPC. Two columns: `OFFICIAL` as measured, and `NET` with the fixed cost of the measurement code itself subtracted, so a short kernel is not swamped by its own instrumentation. The table is appended to `<test>_clean.txt` below the disassembly, in its own banner, so the two sections can be told apart at a glance. Its title line names the simulator, the program and the L1 geometry the run used, read from the target's `core/include/<target>_config_pkg.sv`, and the line under it names the CVA6 target.
 
 Outputs land under `verif/sim/out_<date>/`: the VCD and the log in `veri-testharness_sim/`, and the binary, the `.list` and the `_clean.txt` in `directed_tests/`.
 
@@ -114,7 +114,7 @@ python3 run_CVA6Flow_sweep.py [--configs 1,4-6] [--tests-dir DIR] [--no-vcd] [--
 | Option | Meaning |
 | --- | --- |
 | `--configs` | Which configurations to run, for example `1,4-6`. Defaults to every one in the table |
-| `--tests-dir` | Where the workloads live. Defaults to `/cva6/verif/tests/custom/FaMAF` |
+| `--tests-dir` | Where the workloads live. Defaults to `/cva6/benchmarks` |
 | `--tests` | Comma-separated workloads to run for every configuration, instead of the ones the table names |
 | `--target` | Architecture target. Defaults to `cv64a6_imafdc_sv39_hpdcache_wb` |
 | `--out-dir` | Where results are collected. Defaults to `CVA6Flow_sweep_results/` |
@@ -122,9 +122,9 @@ python3 run_CVA6Flow_sweep.py [--configs 1,4-6] [--tests-dir DIR] [--no-vcd] [--
 | `--no-vcd` | Metrics only, no traces |
 | `--list` | Print the plan and exit, touching nothing |
 
-For each configuration it installs the package with `CVA6_CONFIG_SEL` set to that variant, then runs that configuration's workloads through [`run_verilator.py`](#running-a-test-run_verilatorpy). A configuration whose workload is `all` runs every workload the table names.
+For each configuration it installs the package with `CVA6_CONFIG_SEL` set to that variant, then runs that configuration's workloads through [`run_CVA6.py`](#running-a-test-run_cva6py). A configuration whose workload is `all` runs every workload the table names.
 
-Results are moved out of `run_results/` into the out directory as `<test>.config<N>.vcd`, `<test>.config<N>.list` and `<test>_clean.config<N>.txt`, so one configuration never overwrites another and the VCD and its listing stay paired for the tracer.
+Results are moved out of `run_results/` into the out directory as `<test>.config<N>.vcd`, `<test>.config<N>.list` and `<test>_clean.config<N>.txt`, so one configuration never overwrites another and the VCD and its listing stay paired for the tracer. Every metrics table is also gathered into one `metrics.txt` in that folder, labelled by configuration and test, so the whole sweep can be read without opening a file per run.
 
 Once a run is collected its leftovers are deleted: `run_results/`, and that run's VCD, log, binary, listing and `_clean.txt` in `verif/sim/out_<date>/`. A run that **fails** is the exception: nothing of its is collected or deleted, so its output survives the rest of the sweep and is still under `out_<date>/` at the end. If nothing failed, that tree goes too.
 
