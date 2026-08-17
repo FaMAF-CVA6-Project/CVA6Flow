@@ -92,6 +92,34 @@ METRICS_MARKER = "RESULTS TABLE"
 CODE_BANNER = [RULE, "DISASSEMBLED CODE", RULE]
 CODE_END_BANNER = [RULE, "END OF DISASSEMBLED CODE", RULE]
 
+# Lines of the simulation log echoed when a run fails. The whole of it stays
+# on disk either way; this is only what the terminal is worth.
+ERROR_TAIL_LINES = 40
+
+
+def print_log_tail(path, lines=ERROR_TAIL_LINES):
+    """Print the end of a log, which is where the cause of a failure is."""
+    try:
+        with open(path, errors="replace") as f:
+            content = f.read().splitlines()
+    except OSError as e:
+        print(f"[WARN] Could not read {path}: {e}")
+        return
+
+    if not content:
+        print("[ERROR] The simulation produced no output at all, so it "
+              "failed before it started. Check the target and the "
+              "environment.")
+        return
+
+    shown = content[-lines:]
+    if len(content) > len(shown):
+        print(f"[ERROR] --- last {len(shown)} of {len(content)} log lines ---")
+    else:
+        print(f"[ERROR] --- log ({len(content)} line(s)) ---")
+    for line in shown:
+        print(f"  {line}")
+
 
 def format_cache_size(value):
     """Render a cache size as KiB/MiB from a byte count."""
@@ -482,6 +510,10 @@ def main():
     # Prepare environment
     env = os.environ.copy()
     env["PYTHONDONTWRITEBYTECODE"] = "1"
+    # cva6.py drives the flow, and its stdout is block-buffered once it is a
+    # file rather than a terminal, which would land its output in the log well
+    # after the unbuffered stderr it belongs next to.
+    env["PYTHONUNBUFFERED"] = "1"
     env["DV_SIMULATORS"] = "veri-testharness"
 
     # Output paths
@@ -532,21 +564,41 @@ def main():
     py_cmd_str = shlex.join(py_cmd_list)
     final_shell_cmd = f"source {setup_script} && {trace_injection} {py_cmd_str}"
 
+    # The build and the simulation are far too chatty to put on the terminal,
+    # but discarding that output leaves a failure with nothing to explain it.
+    # Both streams go to a log inside the simulation tree instead, which is
+    # cleaned along with the rest of out_<date>/, and the end of it is printed
+    # if the run fails. They are merged rather than kept apart so that a
+    # Verilator or make error sits next to the step it interrupted, as far as
+    # the child's own buffering allows.
+    sim_out_dir = os.path.join(sim_dir, f"out_{today}")
+    run_log = os.path.join(sim_out_dir, f"{test_name}_run.log")
+
     ext_label = "c" if lang == "c" else "S"
+    print(f"[INFO] Running Verilator simulation with "
+          f"'{test_name}.{ext_label}'")
+    print(f"[INFO] The build is quiet. Everything it writes goes to "
+          f"{run_log}\n")
     try:
-        print(
-            f"[INFO] Running Verilator simulation with '{test_name}.{ext_label}'\n")
-        subprocess.run(
-            final_shell_cmd,
-            cwd=sim_dir,
-            check=True,
-            env=env,
-            stdout=subprocess.DEVNULL,
-            shell=True,
-            executable='/bin/bash'
-        )
+        os.makedirs(sim_out_dir, exist_ok=True)
+        with open(run_log, "w") as log:
+            subprocess.run(
+                final_shell_cmd,
+                cwd=sim_dir,
+                check=True,
+                env=env,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                shell=True,
+                executable='/bin/bash'
+            )
     except subprocess.CalledProcessError as e:
-        print(f"[ERROR] Exit code: {e.returncode}")
+        print(f"[ERROR] The simulation failed with exit code {e.returncode}")
+        print_log_tail(run_log)
+        print(f"[ERROR] Full output: {run_log}")
+        sys.exit(1)
+    except OSError as e:
+        print(f"[ERROR] Could not run the simulation: {e}")
         sys.exit(1)
 
     # --------------------------------------------------------------------------
