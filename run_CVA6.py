@@ -85,7 +85,7 @@ CODELIST_PROFILES = {
 C_EXTS = {".c"}
 ASM_EXTS = {".s", ".asm", ".sx"}
 
-# The _clean.txt holds two sections: the measured region of the disassembly,
+# The _report.txt holds two sections: the measured region of the disassembly,
 # then the metrics table.
 RULE = "=" * 70
 METRICS_MARKER = "RESULTS TABLE"
@@ -307,14 +307,14 @@ def detect_lang(src_file, override):
 def generate_and_show_codelist(binary_path, codelist):
     """
     Generate the .list file with objdump and print the filtered CODE section.
-    Returns the path of the clean file for later writing.
+    Returns the path of the report file for later writing.
     """
     if not os.path.exists(binary_path):
         print(f"[ERROR] Binary to disassemble not found: {binary_path}")
         return None
 
     list_path = os.path.splitext(binary_path)[0] + ".list"
-    clean_path = os.path.splitext(binary_path)[0] + "_clean.txt"
+    report_path = os.path.splitext(binary_path)[0] + "_report.txt"
 
     cmd = f"riscv64-unknown-elf-objdump -d -S -l {binary_path}"
 
@@ -362,8 +362,8 @@ def generate_and_show_codelist(binary_path, codelist):
         with open(list_path, "r") as f:
             lines = f.readlines()
 
-        with open(clean_path, "w") as f_clean:
-            f_clean.write("\n".join(CODE_BANNER) + "\n")
+        with open(report_path, "w") as f_report:
+            f_report.write("\n".join(CODE_BANNER) + "\n")
             written = "\n"
             for idx, line in enumerate(lines, 1):
                 if printing:
@@ -390,19 +390,19 @@ def generate_and_show_codelist(binary_path, codelist):
                     if line.strip().startswith('/'):
                         if codelist["keep_discriminator"] and "(discriminator" in line:
                             print(line, end='')
-                            f_clean.write(line)
+                            f_report.write(line)
                             written = line
                             continue
                         else:
                             continue
 
                     print(line, end='')
-                    f_clean.write(line)
+                    f_report.write(line)
                     written = line
 
             if not written.endswith("\n"):
-                f_clean.write("\n")
-            f_clean.write("\n".join(CODE_END_BANNER) + "\n")
+                f_report.write("\n")
+            f_report.write("\n".join(CODE_END_BANNER) + "\n")
 
         if not found_start:
             print(f"[WARN] No start marker found (searched {start_cores!r}), "
@@ -419,15 +419,15 @@ def generate_and_show_codelist(binary_path, codelist):
     for line in CODE_END_BANNER:
         print(line)
     print()
-    print(f"[INFO] Clean file saved in: {clean_path}")
-    return clean_path
+    print(f"[INFO] Clean file saved in: {report_path}")
+    return report_path
 
 
-def collect_results(test_name, vcd_path, list_path, clean_path):
+def collect_results(test_name, vcd_path, list_path, report_path):
     """Copy the three files worth keeping into run_results/, next to this script.
 
     The VCD is what the viewer renders, the .list is the listing its tracer
-    needs, and the _clean.txt is the measured region plus the metrics table.
+    needs, and the _report.txt is the measured region plus the metrics table.
     The originals are left where the simulation put them."""
     try:
         os.makedirs(RESULTS_DIR, exist_ok=True)
@@ -438,7 +438,7 @@ def collect_results(test_name, vcd_path, list_path, clean_path):
     copied = []
     for source, name in ((vcd_path, f"{test_name}.vcd"),
                          (list_path, f"{test_name}.list"),
-                         (clean_path, f"{test_name}_clean.txt")):
+                         (report_path, f"{test_name}_report.txt")):
         # With --no-vcd there is no trace to copy, so a missing source here is
         # expected rather than a problem.
         if not source or not os.path.isfile(source):
@@ -605,7 +605,7 @@ def main():
     # GENERATE AND SHOW CODE
     # --------------------------------------------------------------------------
     binary_path = os.path.join(binary_dir_compilation, f"{test_name}.o")
-    clean_path = generate_and_show_codelist(binary_path, codelist)
+    report_path = generate_and_show_codelist(binary_path, codelist)
 
     # --------------------------------------------------------------------------
     # PARSE METRICS
@@ -696,23 +696,23 @@ def main():
     for line in output_buffer:
         print(line)
 
-    # Append the same block to the _clean.txt file
-    if clean_path and os.path.exists(clean_path):
+    # Append the same block to the _report.txt file
+    if report_path and os.path.exists(report_path):
         try:
-            with open(clean_path, "a") as f_clean:
-                f_clean.write("\n")
+            with open(report_path, "a") as f_report:
+                f_report.write("\n")
                 for line in output_buffer:
-                    f_clean.write(line + "\n")
-            print(f"[INFO] Metrics successfully consolidated in: {clean_path}")
+                    f_report.write(line + "\n")
+            print(f"[INFO] Metrics successfully consolidated in: {report_path}")
         except Exception as e:
             print(f"[WARN] Could not save the metrics to the file: {e}")
 
-    # Done last, so the _clean.txt copied out already carries the table.
+    # Done last, so the _report.txt copied out already carries the table.
     collect_results(
         test_name,
         os.path.join(log_dir_prediction, f"{test_name}.{args.target}.vcd"),
         os.path.join(binary_dir_compilation, f"{test_name}.list"),
-        clean_path)
+        report_path)
 
 
 if __name__ == "__main__":

@@ -284,7 +284,7 @@ def output_paths(results_dir, test_name):
     return {
         "vcd": os.path.join(results_dir, f"{test_name}.vcd"),
         "list": os.path.join(results_dir, f"{test_name}.list"),
-        "clean": os.path.join(results_dir, f"{test_name}_clean.txt"),
+        "report": os.path.join(results_dir, f"{test_name}_report.txt"),
     }
 
 
@@ -294,7 +294,7 @@ def collect(results_dir, test_name, config_id, out_dir, want_vcd):
     wanted = {
         "vcd": f"{test_name}.config{config_id}.vcd",
         "list": f"{test_name}.config{config_id}.list",
-        "clean": f"{test_name}_clean.config{config_id}.txt",
+        "report": f"{test_name}_report.config{config_id}.txt",
     }
 
     collected = 0
@@ -327,7 +327,7 @@ def sim_run_files(test_name, target):
         os.path.join(sim_output_dir(), f"{test_name}_run.log"),
         os.path.join(bin_dir, f"{test_name}.o"),
         os.path.join(bin_dir, f"{test_name}.list"),
-        os.path.join(bin_dir, f"{test_name}_clean.txt"),
+        os.path.join(bin_dir, f"{test_name}_report.txt"),
     ]
 
 
@@ -364,17 +364,17 @@ def clear_stale_outputs(results_dir, test_name):
                 pass
 
 
-def extract_metrics(clean_path):
-    """The metrics section of a _clean.txt, or None if it holds none.
+def extract_metrics(report_path):
+    """The metrics section of a _report.txt, or None if it holds none.
 
-    A _clean.txt is the measured region of the disassembly followed by the
+    A _report.txt is the measured region of the disassembly followed by the
     metrics table, so everything from the rule above the table's title to the
     end of the file is the section wanted here."""
     try:
-        with open(clean_path) as f:
+        with open(report_path) as f:
             lines = f.read().splitlines()
     except OSError as e:
-        print(f"[WARN] Could not read {clean_path}: {e}")
+        print(f"[WARN] Could not read {report_path}: {e}")
         return None
 
     for i, line in enumerate(lines):
@@ -389,12 +389,12 @@ def extract_metrics(clean_path):
 def write_metrics_file(out_dir, entries, info):
     """Gather every run's metrics table into one metrics.txt.
 
-    entries is [(label, clean file)] in plan order, so the file reads in the
+    entries is [(label, report file)] in plan order, so the file reads in the
     same order as the summary above it. A run whose table is missing is named
     rather than skipped silently."""
     blocks, missing = [], []
-    for label, clean_path in entries:
-        block = extract_metrics(clean_path)
+    for label, report_path in entries:
+        block = extract_metrics(report_path)
         if block is None:
             missing.append(label)
             continue
@@ -630,7 +630,7 @@ def main():
     write_metrics_file(
         out_dir,
         [(f"config{cid} / {name}",
-          os.path.join(out_dir, f"{name}_clean.config{cid}.txt"))
+          os.path.join(out_dir, f"{name}_report.config{cid}.txt"))
          for cid, name, code, _ in results if code == 0],
         [f"Target   : {args.target}",
          f"Tests dir: {os.path.abspath(args.tests_dir)}",
