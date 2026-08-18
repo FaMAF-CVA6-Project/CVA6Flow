@@ -83,6 +83,8 @@ python3 CVA6Flow_tracer.py run_results/daxpy.vcd -o daxpy.json --disasm-list run
 
 The `_report.txt` is the readable record of what was measured, disassembly and table together. With `--no-vcd` there is no trace, so only two files are copied.
 
+The build and the simulation are quiet: everything they write goes to `verif/sim/out_<date>/<test>_run.log`. If the run fails nothing is deleted and the end of that log is printed.
+
 The script assumes the CVA6 checkout is at `/cva6`, which is where the Docker image below puts it.
 
 ### Writing a test
