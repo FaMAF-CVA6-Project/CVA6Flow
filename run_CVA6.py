@@ -29,7 +29,6 @@ OVERHEAD_PROFILES = {
         'x23': 32,   # D-Cache accesses
         'x24': 0,    # Branches
         'x25': 0,    # Branch mispredicts + unpredicted
-        'x26': 3,    # Time (us)
     },
     "asm": {
         'x18': 40,   # Cycles
@@ -40,7 +39,6 @@ OVERHEAD_PROFILES = {
         'x23': 9,    # D-Cache accesses
         'x24': 0,    # Branches
         'x25': 0,    # Branch mispredicts + unpredicted
-        'x26': 0,    # Time (us)
     },
 }
 
@@ -93,7 +91,7 @@ CODE_BANNER = [RULE, "DISASSEMBLED CODE", RULE]
 CODE_END_BANNER = [RULE, "END OF DISASSEMBLED CODE", RULE]
 
 # Lines of the simulation log echoed when a run fails. The whole of it stays
-# on disk either way; this is only what the terminal is worth.
+# on disk either way. This is only what the terminal is worth.
 ERROR_TAIL_LINES = 40
 
 
@@ -133,14 +131,50 @@ def format_cache_size(value):
     return f"{num}B"
 
 
-def find_config_pkg(cva6_root, target):
-    """Locate the target's SystemVerilog config package.
+# How each test spells the clock it divides by, in assembly and in C.
+FREQ_PATTERNS = (r"\.equ\s+CPU_FREQ\s*,\s*(\d+)",
+                 r"#define\s+CPU_FREQ_HZ\s+(\d+)")
 
-    core/include/ is where it lives, under the CVA6 root the simulation used or
-    under this checkout. A target whose package sits elsewhere, or that is
-    generated into another folder, is still worth finding, so the checkout is
-    searched as a last resort. Returns None when there is no such package,
-    which is the case for a target name that is not a package name."""
+
+def read_cpu_freq(src_path):
+    """The clock the test turns cycles into microseconds with. Every test
+    carries it, '.equ CPU_FREQ' in assembly and '#define CPU_FREQ_HZ' in C, so
+    the time here comes from the same constant the program divided by."""
+    try:
+        with open(src_path, errors="replace") as f:
+            text = f.read()
+    except OSError as e:
+        print(f"[WARN] Could not read {src_path}: {e}. The time is reported "
+              f"as the counter left it")
+        return None
+
+    for pattern in FREQ_PATTERNS:
+        match = re.search(pattern, text)
+        if match:
+            return int(match.group(1))
+
+    print(f"[WARN] No CPU_FREQ in {os.path.basename(src_path)}. The time is "
+          f"reported as the counter left it")
+    return None
+
+
+def format_metric(value, decimals=4):
+    """Render a table value: thousands grouped, decimals only when it has any,
+    so a count reads as 1,234,567 and an IPC as 0.8523 down the same column. A
+    real number landing on a whole one drops the trailing zeros."""
+    try:
+        number = round(float(value), decimals)
+    except (TypeError, ValueError):
+        return str(value)
+    if number.is_integer():
+        return f"{int(number):,}"
+    return f"{number:,.{decimals}f}"
+
+
+def find_config_pkg(cva6_root, target):
+    """Locate the target's SystemVerilog config package under core/include/,
+    in the CVA6 root or this checkout, falling back to a recursive search for a
+    generated one. Returns None when the target names no package."""
     name = f"{target}_config_pkg.sv"
     repo_root = os.path.dirname(os.path.dirname(
         os.path.dirname(os.path.abspath(__file__))))
@@ -188,12 +222,9 @@ def _fold(node):
 
 
 def sv_int(text):
-    """Turn a SystemVerilog integer expression into a Python int.
-
-    Covers a plain literal, a sized literal such as 32'd16384, and the small
-    arithmetic a config package may use, such as 16 * 1024. An identifier or
-    anything else is reported as unknown rather than guessed at. The tree is
-    folded by hand instead of evaluated, so nothing in the file can run."""
+    """Turn a SystemVerilog integer expression into a Python int: a plain or
+    sized literal and the small arithmetic a config package uses. The tree is
+    folded by hand rather than evaluated, so nothing in the file can run."""
     text = text.strip().rstrip(";").strip()
     if not text:
         return None
@@ -214,13 +245,9 @@ def sv_int(text):
 
 
 def read_cache_geometry(cva6_root, target):
-    """Read the L1 geometry from the target's config package.
-
-    Two forms are accepted, because packages use both: the field of the
-    config struct the core is built from, whose value is either a literal or
-    the name of a localparam declared above it, and the CVA6Config<field>
-    localparam on its own. An unreadable package leaves the geometry unknown
-    rather than failing the run."""
+    """Read the L1 geometry from the target's config package. Both forms are
+    accepted, the config struct's field, literal or naming a localparam, and
+    the CVA6Config<field> localparam on its own."""
     path = find_config_pkg(cva6_root, target)
     if not path:
         return {}
@@ -273,11 +300,9 @@ def read_cache_geometry(cva6_root, target):
 
 
 def build_table_header(engine, core, program, geometry):
-    """The table title, over two lines.
-
-    What was measured goes on the first, and the core the model was built
-    from on the second, since a target name is long enough to push the title
-    well past the width of the table."""
+    """The table title, over two lines. What was measured goes on the first
+    and the core on the second, a target name being long enough to push a
+    single title past the width of the table."""
     parts = [f"RESULTS TABLE {engine} {program}"]
     for name, label in (("icache", "ICache"), ("dcache", "DCache")):
         cache = geometry.get(name) or {}
@@ -424,11 +449,9 @@ def generate_and_show_codelist(binary_path, codelist):
 
 
 def collect_results(test_name, vcd_path, list_path, report_path):
-    """Copy the three files worth keeping into run_results/, next to this script.
-
-    The VCD is what the viewer renders, the .list is the listing its tracer
-    needs, and the _report.txt is the measured region plus the metrics table.
-    The originals are left where the simulation put them."""
+    """Copy the three files worth keeping into run_results/. The VCD is what
+    the viewer renders, the .list the listing its tracer needs, and the
+    _report.txt the measured region plus the metrics table."""
     try:
         os.makedirs(RESULTS_DIR, exist_ok=True)
     except OSError as e:
@@ -564,13 +587,9 @@ def main():
     py_cmd_str = shlex.join(py_cmd_list)
     final_shell_cmd = f"source {setup_script} && {trace_injection} {py_cmd_str}"
 
-    # The build and the simulation are far too chatty to put on the terminal,
-    # but discarding that output leaves a failure with nothing to explain it.
-    # Both streams go to a log inside the simulation tree instead, which is
-    # cleaned along with the rest of out_<date>/, and the end of it is printed
-    # if the run fails. They are merged rather than kept apart so that a
-    # Verilator or make error sits next to the step it interrupted, as far as
-    # the child's own buffering allows.
+    # Both streams go to a log under out_<date>/ rather than the terminal,
+    # and its tail is printed when the run fails. Merged, so an error sits
+    # next to the step it interrupted.
     sim_out_dir = os.path.join(sim_dir, f"out_{today}")
     run_log = os.path.join(sim_out_dir, f"{test_name}_run.log")
 
@@ -651,6 +670,29 @@ def main():
     ipc_official = raw_inst / raw_cycles if raw_cycles > 0 else 0.0
     ipc_corrected = net_inst / net_cycles if net_cycles > 0 else 0.0
 
+    # The test computes Time (us) as cycles * 1e6 / CPU_FREQ with an integer
+    # divide, so x26 arrives with the fraction already cut off. The same
+    # division here, from the same constant, keeps it.
+    cpu_freq = read_cpu_freq(abs_src_path)
+    time_us = None
+    if cpu_freq:
+        # Not raw_cycles: that one defaults to 1 to keep IPC out of a
+        # division by zero, and a run with no counters means no time.
+        time_us = final_values.get('x18', 0) * 1_000_000 / cpu_freq
+        counter = final_values.get('x26', 0)
+        if counter and int(time_us) != int(counter):
+            print(f"[WARN] Time from cycles ({int(time_us)} us) disagrees "
+                  f"with the counter ({int(counter)} us). The counter is "
+                  f"reported, check how the test computes it")
+            time_us = None
+
+    # The time is the cycle count read through the clock, so the net time is
+    # the net cycles read through the same clock.
+    net_time_us = None
+    if time_us is not None:
+        net_time_us = (max(0, final_values.get('x18', 0) - ovh_cycles)
+                       * 1_000_000 / cpu_freq)
+
     geometry = read_cache_geometry(cva6_root, args.target)
     header = build_table_header("CVA6", args.target,
                                 os.path.basename(abs_src_path), geometry)
@@ -673,16 +715,23 @@ def main():
         # Net value
         val_corrected = max(0, val_official - ovh)
 
-        # Format and store
-        clean_official.append(val_official)
-        clean_corrected.append(val_corrected)
+        if key == 'x26' and time_us is not None:
+            val_official = time_us
+            val_corrected = net_time_us
 
-        output_buffer.append(
-            f"{metric_name:<25} | {val_official:>15} | {val_corrected:>15}")
+        # Format and store. round() leaves a count alone and only bites on the
+        # one metric that carries a fraction.
+        clean_official.append(round(val_official, 4))
+        clean_corrected.append(round(val_corrected, 4))
+
+        output_buffer.append(f"{metric_name:<25} | "
+                             f"{format_metric(val_official):>15} | "
+                             f"{format_metric(val_corrected):>15}")
 
     # Print IPC
-    output_buffer.append(
-        f"{'IPC':<25} | {ipc_official:>15.4f} | {ipc_corrected:>15.4f}")
+    output_buffer.append(f"{'IPC':<25} | "
+                         f"{format_metric(ipc_official):>15} | "
+                         f"{format_metric(ipc_corrected):>15}")
 
     # Add IPC to the clean lists
     clean_official.append(round(ipc_official, 4))

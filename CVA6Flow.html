@@ -137,9 +137,43 @@
       font-size: 11px;
       color: var(--warn);
       font-weight: 500;
-      min-width: 42px;
+      width: 46px;
+      flex-shrink: 0;
+      background: var(--bg3);
+      border: 1px solid var(--border2);
+      border-radius: 3px;
+      padding: 1px 4px;
+      text-align: right;
+      font-family: inherit;
+    }
+
+    #zoom-note {
+      font-size: 11px;
+      color: var(--warn);
+      font-weight: 500;
       white-space: nowrap;
       flex-shrink: 0;
+    }
+
+    /* Drag handle between the label column and the timeline. */
+    /* Absolutely positioned so it takes no space in the flex row. In flow it
+       widened that row while its siblings kept their offset, sliding the
+       timeline out of alignment. setLabelWidth places its left edge. */
+    .lblgrip {
+      position: absolute;
+      top: 0;
+      bottom: 0;
+      width: 7px;
+      margin-left: -3px;
+      z-index: 6;
+      cursor: col-resize;
+      background: transparent;
+      transition: background 0.12s;
+    }
+
+    .lblgrip:hover,
+    .lblgrip.drag {
+      background: rgba(120, 170, 210, 0.55);
     }
 
     input[type=range] {
@@ -178,6 +212,13 @@
       flex-shrink: 0;
     }
 
+    /* A control with nothing to control: greyed and unclickable, with the
+       reason on its title. */
+    label.chk.disabled {
+      opacity: 0.45;
+      cursor: not-allowed;
+    }
+
     label.chk input {
       accent-color: var(--accent);
       cursor: pointer;
@@ -212,6 +253,9 @@
       display: none;
       flex-direction: column;
       min-height: 0;
+      /* Positioning context for the single #lblresize grip, which spans every
+         row that has to stay aligned with the label column. */
+      position: relative;
     }
 
     #leg {
@@ -247,6 +291,8 @@
     #main {
       flex: 1;
       display: flex;
+      /* Positioning context for the absolutely placed #lblresize handle. */
+      position: relative;
       min-height: 0;
     }
 
@@ -532,7 +578,7 @@
       position: relative;
       overflow: hidden;
       background: #1a1a1c;
-      cursor: crosshair;
+      cursor: default;
     }
 
     #wbcanvas {
@@ -706,14 +752,18 @@
 
     #cfg-body td:first-child {
       color: var(--text2);
-      width: 230px;
+      width: 190px;
       font-family: var(--font-mono);
     }
 
     #cfg-body td:nth-child(2) {
       color: var(--text);
       font-family: var(--font-mono);
-      width: 140px;
+      /* Wide enough for a functional unit's whole latency line on one row. The
+         panel has the room, and at the old width it wrapped after every few
+         words. */
+      width: 300px;
+      white-space: normal;
     }
 
     #cfg-body td:nth-child(3) {
@@ -907,8 +957,8 @@
       · RISC-V</span>
 
     <span class="vsep">│</span>
-    <button class="tbtn" onclick="document.getElementById('fi').click()" title="Open a CVA6 trace JSON from disk.">📂
-      Open trace</button>
+    <button class="tbtn" onclick="openTraceFile()" title="Load a CVA6 trace JSON from disk.">📂
+      Load JSON</button>
     <input type="file" id="fi" accept=".json,application/json">
     <span id="tracename" title=""></span>
 
@@ -916,12 +966,16 @@
     <span class="tlbl">Zoom X</span>
     <input type="range" id="zx" min="1" max="200" value="6" oninput="setZoom()"
       title="Pixels per cycle. Higher means more detail per cycle and fewer cycles visible at once.">
-    <span id="zoom-val">6px</span>
-    <button class="tbtn" onclick="fitAll()" title="Shrink cycles until the whole program fits in the viewport.">Fit
-      all</button>
+    <input id="zoom-val" type="text" inputmode="decimal" spellcheck="false"
+      title="Pixels per cycle. Type a value and press Enter. A number between 1 and this window's maximum, with up to two decimals."
+      oninput="onZoomInput(this)"
+      value="6" onchange="setZoomTo(this.value)"
+      onkeydown="if (event.key === 'Enter') this.blur()">
+    <span id="zoom-note">px</span>
+    <button class="tbtn" onclick="fitAll()" title="Shrink cycles until the whole program fits in the viewport.">Fit All</button>
 
     <span class="vsep">│</span>
-    <span class="tlbl">Fetch range</span>
+    <span class="tlbl">Fetch Range</span>
     <input type="number" id="rfrom" class="rng" placeholder="from" min="1" onkeydown="onRangeKeyDown(event)"
       onpaste="onRangePaste(event)" oninput="onRangeInput(event)" onchange="onRangeChange('from')"
       title="First fetched instruction to show.">
@@ -931,8 +985,7 @@
       title="Last fetched instruction to show.">
     <button class="tbtn" onclick="resetRange()" title="Show every instruction in the trace.">Reset</button>
     <button class="tbtn" onclick="showMainCode()"
-      title="Filter to the measurement region. For C programs uses the first two `csrr X, mcycle` reads. For assembly falls back to entry_pc and the first jump to exit.">Main
-      code</button>
+      title="Jump to the main program: the region between the MAIN PROGRAM and END OF MAIN PROGRAM markers in the test template, found from the jump to the 4096-aligned region label and the counter reads that follow it.">Main Code</button>
 
     <span class="vsep">│</span>
     <label class="chk"
@@ -940,7 +993,7 @@
       <input type="checkbox" id="wb-on" checked onchange="onWbToggle()">
       Writebacks
     </label>
-    <label class="chk" title="Show a detailed information panel as the mouse hovers over an instruction.">
+    <label class="chk" title="Show a detailed information panel as the cursor hovers over an instruction.">
       <input type="checkbox" id="tt-on" checked onchange="onTooltipToggle()">
       Tooltip
     </label>
@@ -962,12 +1015,11 @@
 
     <span class="vsep">│</span>
     <button class="tbtn" id="lblToggleBtn" onclick="toggleLabelPanel()"
-      title="Collapse the left label panel to give the timeline more room. Click again to bring the labels back.">◀ Hide
-      labels</button>
+      title="Collapse the left label panel to give the timeline more room. Click again to bring the labels back.">◀ Hide Labels</button>
 
     <span class="vsep">│</span>
     <button class="tbtn" onclick="toggleConfigPanel()"
-      title="Show the pipeline configuration and aggregate statistics for this trace.">⚙ Config</button>
+      title="Show the pipeline configuration and aggregate statistics inferred from this trace.">⚙ Config</button>
   </div>
 
   <div id="cfg-backdrop" onclick="if (event.target.id === 'cfg-backdrop') toggleConfigPanel()">
@@ -998,8 +1050,8 @@
 
   <div id="dropzone" ondragover="event.preventDefault(); this.classList.add('ov')"
     ondragleave="this.classList.remove('ov')"
-    ondrop="event.preventDefault(); this.classList.remove('ov'); loadF(event.dataTransfer.files[0])"
-    onclick="document.getElementById('fi').click()">
+    ondrop="event.preventDefault(); this.classList.remove('ov')"
+    onclick="openTraceFile()">
     <h2>Drag a CVA6 trace here, or click to browse</h2>
     <p style="font-size:11px">JSON produced by <code>CVA6Flow_tracer.py</code> from a Verilator generated VCD.</p>
     <p style="font-size:10px;margin-top:4px">Keys: + / − to zoom · arrows to navigate · Home/End to jump · Esc to close
@@ -1010,13 +1062,14 @@
   </div>
 
   <div id="view">
+    <div id="lblresize" class="lblgrip" title="Drag to resize the instruction label column."></div>
     <div id="leg"></div>
     <div id="main">
       <div id="lblpanel">
         <div id="lblhead">
           <span id="pcfind"
             title="Find instructions by memory address (hexadecimal). Matches anywhere in the PC and is searched across the whole fetch range window, not only the rows on screen. Enter or the arrows step through the matches.">
-            <input id="pcq" placeholder="find pc" spellcheck="false" autocomplete="off">
+            <input id="pcq" placeholder="Find PC" spellcheck="false" autocomplete="off">
             <span id="pcn">0/0</span>
             <button id="pcprev" title="Previous match.">▲</button>
             <button id="pcnext" title="Next match.">▼</button>
@@ -1045,20 +1098,20 @@
     <div id="status">
       <span title="Cycle the mouse cursor is over.">Cycle: <span class="hi" id="s-c">-</span></span>
       <span title="Instruction at the row under the cursor.">Instr: <span class="hi" id="s-i">-</span></span>
-      <span title="Functional unit class that handled the instruction.">FU: <span class="hi" id="s-f">-</span></span>
+      <span title="Functional-unit class that handled the instruction.">FU: <span class="hi" id="s-f">-</span></span>
       <span title="Program counter.">PC: <span class="hi" id="s-p">-</span></span>
       <span class="vsep">│</span>
       <span
         title="Cycles in the visible window, counting every stall. The number in parentheses, when shown, drops the leading redirect bubble inherited from a branch outside the window.">Cycles:
         <span class="hi" id="s-cyc">-</span></span>
-      <span title="Instructions that reached the front-end (committed + flushed).">Fetched: <span class="hi"
+      <span title="Instructions fetched into the front-end in this window, committed and flushed alike.">Fetched: <span class="hi"
           id="s-fet">-</span></span>
-      <span title="Committed (retired) instructions.">Committed: <span class="hi" id="s-cmt">-</span></span>
-      <span title="Speculative instructions discarded before commit.">Flushed: <span class="hi"
+      <span title="Committed (retired) instructions in this window.">Committed: <span class="hi" id="s-cmt">-</span></span>
+      <span title="Speculative instructions discarded after a redirect in this window.">Flushed: <span class="hi"
           id="s-flsh">-</span></span>
       <span title="16-bit compressed (RVC) instructions in this window.">Compress: <span class="hi"
           id="s-cmp">-</span></span>
-      <span title="Instructions whose fetch spanned two cache lines (wraps line) in this window.">Wrap: <span class="hi"
+      <span title="Instructions whose fetch spanned two cache lines in this window.">Wrap: <span class="hi"
           id="s-wrp">-</span></span>
       <span
         title="ICache miss events in the visible window, matching the RTL perf counter. The number in parentheses, when shown, is the subset from the listed instructions.">IC✗<sup
@@ -1077,7 +1130,7 @@
         acc<sup style="font-size:.7em;opacity:.55" title="cycle-window scoped">cyc</sup>: <span class="hi"
           id="s-dca">-</span></span>
       <span
-        title="Control flow instructions resolved in the visible window, committed and flushed alike. The number in parentheses, when shown, is the non-speculative subset (committed only).">Branches:
+        title="Control instructions in this window, committed and flushed alike. The number in parentheses, when shown, is the non-speculative subset (committed only).">Branches:
         <span class="hi" id="s-br">-</span></span>
       <span
         title="Branches the predictor got wrong (had a specific guess at IF2 and Execute resolved differently). Excludes the unpredicted case below.">Mispred:
@@ -1085,9 +1138,9 @@
       <span
         title="Branches the predictor stayed silent on (predicted_cf == NoCF, default not-taken) but Execute resolved as taken. The front-end fell through and needed a redirect. Common on the first encounter of a control instruction.">Unpred:
         <span class="hi" id="s-unpred">-</span></span>
-      <span title="Elapsed time in the visible window (cycles / 50 MHz).">Time: <span class="hi"
+      <span title="Wall-clock time for this window at the trace's clock frequency.">Time: <span class="hi"
           id="s-time">-</span></span>
-      <span title="Instructions per cycle (committed / cycles).">IPC: <span class="hi" id="s-ipc">-</span></span>
+      <span title="Instructions per cycle, committed divided by cycles.">IPC: <span class="hi" id="s-ipc">-</span></span>
       <span
         title="Flush recovery cycles: the redirect bubble and the pre-fetch wait on the instruction resuming after a mispredict, an unpredicted branch, or a fence or serializing flush.">FlushSt:
         <span class="hi" id="s-stall-flush">-</span></span>
@@ -1100,12 +1153,14 @@
       <span title="Cycles a consumer was held in id buf waiting for a load result (the memory hazard).">DMemSt:
         <span class="hi" id="s-stall-dmem">-</span></span>
       <span
-        title="Total stall cycles: the deduplicated union of the four categories to the left, as a percentage of the window's cycles. A cycle stalled for more than one reason at once counts once.">Stall:
+        title="Total stall cycles, the deduplicated union of the four categories to the left. A cycle stalled for more than one reason counts once. The percentage is of the window’s cycles.">Stall:
         <span class="hi" id="s-stall">-</span></span>
       <span style="margin-left:auto"
         title="Fetch numbers of the rows on screen, over the fetch number of the last instruction in this window.">Visible:
         <span class="hi" id="s-vis">-</span>
         / <span class="hi" id="s-tot">-</span></span>
+      <button id="copy-metrics" class="tbtn" onclick="copyMetrics()"
+        title="Copy every metric from Cycles to Stall to the clipboard, one per line.">Copy Metrics</button>
     </div>
   </div>
 
@@ -1152,11 +1207,14 @@
       fwd_wb: '#20a8a0',            /* forwarding via wb path (consumer's IS) */
       fwd_sb: '#a050a0',            /* forwarding via sb path (consumer's IS) */
       flushed: '#3a1515',
+      /* Forwarding into a flushed consumer. The flushed stage colour itself is
+       * near the background by design, which makes a two-pixel line on it
+       * almost invisible, so this is the same hue lifted enough to follow. */
+      flushedFwd: '#a04a4a',
     };
-    /* Bubble-kind metadata, modeled on MinorFlow's BUB dictionary. The Phase 8c
-     * tagger emits four kinds, drawn as a fill bar BEFORE the resuming
-     * instruction's IF1 (MinorFlow convention). The causer is named in the
-     * tooltip via cross-reference. */
+    /* Bubble-kind metadata, modeled on MinorFlow's BUB dictionary. The tagger
+     * emits four kinds, drawn as a fill bar before the resuming instruction's
+     * IF1. The causer is named in the tooltip by cross-reference. */
     const BUBBLE_KIND_META = {
       mispred: {
         label: 'Bubble: mispredict',
@@ -1189,11 +1247,6 @@
     };
     const LBL_W = 390, RULER_H = 18;
     const MIN_CELL = 1, MAX_CELL = 200, MIN_CELL_FIT = 0.05;
-    /* Fallback program bounds when the trace doesn't record user_entry_pc /
-     * user_end_pc. Adjust per program: these match the standard test programs
-     * (entry "addi sp,sp,-80" .. "jal ra, <exit>"). */
-    const DEFAULT_USER_ENTRY_PC = '0x80003000';
-    const DEFAULT_USER_END_PC = '0x8000314c';
     let cellW = 6;
     function getRowH() { return cellW >= 40 ? 26 : cellW >= 20 ? 20 : 15; }
 
@@ -1202,17 +1255,15 @@
     let ROW_BY_ID = new Map();
     let ROW_INDEX_BY_ID = new Map();
     let cMin = 0, cMax = 0;
-    /* Deduplicated total-stall cycle set for the visible window (null when the
-     * Stalls toggle is off), shared by the bands, row backgrounds and ruler
-     * tint. Scroll-invariant, so STALL_HL_KEY caches it across scroll redraws
-     * and it is rebuilt only when the window or filter changes. */
+    /* Deduplicated total-stall cycle set for the visible window, null when the
+     * Stalls toggle is off, shared by bands, row backgrounds and ruler tint.
+     * Scroll-invariant, so STALL_HL_KEY caches it across scroll redraws. */
     let STALL_HL_SET = null;
     let STALL_HL_KEY = null;
     let scrollX = 0, scrollY = 0;
     /* Scroll positions the keyboard handler just wrote, so the scroll listener
-     * can tell its own echo from a mouse or wheel scroll and keep the
-     * keyboard's cycle-accurate origin instead of re-deriving it from the
-     * device-pixel-quantised position. */
+     * can tell its own echo from a mouse scroll and keep the cycle-accurate
+     * origin instead of re-deriving it from the quantised position. */
     let kbExpectPx = null;
     let kbExpectPy = null;
     let _cfgScrollPending = false;
@@ -1236,18 +1287,14 @@
       /* Clear the input so reselecting the same file re-fires change. */
       e.target.value = '';
     });
-    /* Ranged streaming loader for oversized traces. Files past the whole-file
-     * limit cannot become one JavaScript string (the engine caps strings around
-     * 0.5 GB), so a state machine splits the top-level JSON, parses the
-     * instructions array one element at a time and keeps only the requested
-     * fetch-number range. The trailing cycle-keyed arrays are filtered inline
-     * against the kept cycle span, so memory tracks the range, not the file. */
+    /* Ranged streaming loader for oversized traces. Past the whole-file limit
+     * a file cannot become one JavaScript string, so a state machine splits the
+     * JSON and keeps only the requested fetch-number range. */
     let _pendingBigFile = null;
 
-    /* Count the elements of the "instructions" array without parsing them, so
-     * the range prompt can show the record total up front. Bulk-skips string
-     * interiors with indexOf for speed and stops once the array closes (the
-     * trailing event arrays need not be read). Returns -1 if there is none. */
+    /* Count the "instructions" elements without parsing them, so the range
+     * prompt can show the total up front. Bulk-skips string interiors with
+     * indexOf and stops at the array close. Returns -1 if there is none. */
     async function countInstructions(file, onProgress) {
       const reader = file.stream().getReader();
       const dec = new TextDecoder('utf-8');
@@ -1397,11 +1444,9 @@
            * included) so JSON.parse sees exactly what the file said. */
           if (inStr) {
             if (!esc && ch !== '"' && ch !== '\\') {
-              /* Bulk-scan the string interior: strings hold most of a trace's
-               * bytes, and slicing instead of per-character appending is the
-               * difference between tens of seconds and minutes on a multi-GB
-               * file. The backslash search is bounded to the segment before
-               * the next quote. An unbounded indexOf would rescan the chunk. */
+              /* Bulk-scan the string interior. Strings hold most of a
+               * trace's bytes, and slicing rather than appending per character
+               * is tens of seconds against minutes on a multi-GB file. */
               const nq = chunk.indexOf('"', i);
               const end = nq < 0 ? chunk.length : nq;
               let seg = chunk.slice(i, end);
@@ -1702,6 +1747,31 @@
       closeModalMessage();
       await streamAndIngest(f, fromN, toN, false);
     }
+    /* Reopen in the folder the last trace came from, via the File System
+     * Access API where the browser has it. Firefox, Safari and file:// pages
+     * fall back to the plain input, and the handle lasts the session only. */
+    let _lastTraceHandle = null;
+    async function openTraceFile() {
+      const input = document.getElementById('fi');
+      if (typeof window.showOpenFilePicker !== 'function') { input.click(); return; }
+      try {
+        const opts = {
+          multiple: false,
+          types: [{ description: 'Trace JSON', accept: { 'application/json': ['.json'] } }],
+        };
+        if (_lastTraceHandle) opts.startIn = _lastTraceHandle;
+        const [handle] = await window.showOpenFilePicker(opts);
+        if (!handle) return;
+        _lastTraceHandle = handle;
+        loadF(await handle.getFile());
+      } catch (err) {
+        /* AbortError just means the user closed the picker. Anything else means
+         * the API was unusable here, so fall back to the input. */
+        if (err && err.name === 'AbortError') return;
+        input.click();
+      }
+    }
+
     function loadF(f) {
       if (!f) return;
       /* V8 caps a string at about 0.5 GB (Firefox about 1 GB), so readAsText
@@ -1787,10 +1857,9 @@
       };
       r.readAsText(f);
     }
-    /* Bundled sample trace, two paths, both relative to where this HTML file
-     * sits. When served, fetch the JSON. When opened from a file:// URL, where
-     * browsers block fetch of local files, fall back to a script tag that
-     * assigns the same object to window.__SAMPLE_TRACE__. */
+    /* Bundled sample trace, two paths relative to this file. When served,
+     * fetch the JSON. From a file:// URL, where browsers block fetch of local
+     * files, a script tag assigns the same object to window.__SAMPLE_TRACE__. */
     const SAMPLE_URL = 'tests/daxpy.config1.json';
     const SAMPLE_URL_JS = 'tests/daxpy.config1.js';
 
@@ -1855,34 +1924,40 @@
        * they include PTW, accel and cache-maintenance misses that have no
        * instruction record. */
       DC_ALLOCS = Array.isArray(json.dcache_alloc_events) ? json.dcache_alloc_events : [];
-      /* Phase 4b extra: per-cycle ICache events with miss flag. Used for
+      /* Per-cycle ICache events with miss flag. Used for
        * window-filtered ICache miss count straight from the cache. */
       IC_EVENTS = Array.isArray(json.icache_events) ? json.icache_events : [];
       /* Cycles where the corresponding request signal was high, filtered to
        * [cMin, cMax] in fillStatus to give the access counts. */
       IC_ACC_CYCLES = Array.isArray(json.ic_access_cycles) ? json.ic_access_cycles : [];
       DC_ACC_CYCLES = Array.isArray(json.dc_access_cycles) ? json.dc_access_cycles : [];
-      /* Phase 4b: cycles the icache asserted miss_o, one per cacheable line
+      /* Cycles the icache asserted miss_o, one per cacheable line
        * fill, matching the hardware L1 I$ miss counter (perf_counters.sv
        * event 1). */
       IC_MISS_CYCLES = Array.isArray(json.icache_miss_cycles) ? json.icache_miss_cycles : [];
       const base = name.replace(/\.json$/i, '');
       const shown = base.length > 30 ? base.slice(0, 14) + '…' + base.slice(-14) : base;
       const tn = document.getElementById('tracename');
-      /* The trace name is set at the end of the synchronous setup below, so a
-       * load that throws part-way never leaves the name of a trace that never
-       * rendered. */
-      /* Re-apply the writeback toggle on every load: the panel's CSS default is
-       * visible, so restored form state can leave the checkbox off while the
-       * panel still shows. */
+      /* The trace name is set at the end of the setup below, so a load that
+       * throws part-way leaves no name for a trace that never rendered. The
+       * writeback toggle is re-applied here since the CSS default is on. */
+      const wbChk = document.getElementById('wb-on');
+      const wbCount = (DATA.writebacks || []).length;
+      const wbLabel = wbChk.closest('label');
+      wbChk.disabled = wbCount === 0;
+      if (wbLabel) {
+        wbLabel.classList.toggle('disabled', wbCount === 0);
+        wbLabel.title = wbCount === 0
+          ? 'This program has no memory writebacks, so there is nothing to show.'
+          : 'Show the memory writeback panel below the timeline.';
+      }
       document.getElementById('wbpanel').style.display =
-        document.getElementById('wb-on').checked ? 'flex' : 'none';
+        (wbCount > 0 && wbChk.checked) ? 'flex' : 'none';
 
       ROWS = DATA.instructions.slice();
-      /* Bubble propagation across instructions sharing one fetch: with
-       * INSTR_PER_FETCH > 1 and RVC, a redirect that bubbled the leading
-       * instruction also hit its followers, so copy the bubble fields along a
-       * contiguous run sharing if1_lo. */
+      /* Bubble propagation across instructions sharing one fetch. With
+       * INSTR_PER_FETCH > 1 and RVC a redirect that bubbled the leader hit its
+       * followers too, so copy the fields along a run sharing if1_lo. */
       for (let i = 1; i < ROWS.length; i++) {
         const cur = ROWS[i];
         const prev = ROWS[i - 1];
@@ -1894,30 +1969,31 @@
         cur.bubble_from_branch_id = prev.bubble_from_branch_id;
         cur.bubble_shared_with = prev.id;
       }
-      /* Pre-fetch stall: cycles the FE was blocked from issuing the next IF1
-       * (instr_queue / address-FIFO full, downstream backpressure). NOT the
-       * branch-redirect cost, so bubble_cycles is subtracted from the rendered
-       * cell where both apply. Records sharing if1_lo inherit the lead's value
-       * rather than computing 0, mirroring the bubble pass. */
-      for (let i = 1; i < ROWS.length; i++) {
+      /* Pre-fetch stall: cycles the FE could not issue the next IF1, from
+       * queue-full backpressure and not the redirect cost, so bubble_cycles is
+       * subtracted where both apply. Flushed rows get 0. */
+      let lastNonFlushed = null;
+      for (let i = 0; i < ROWS.length; i++) {
         const cur = ROWS[i];
-        const prev = ROWS[i - 1];
-        if (cur.if1_lo == null) continue;
+        if (cur.if1_lo == null) {
+          if (!cur.flushed) lastNonFlushed = cur;
+          continue;
+        }
+        if (cur.flushed) { cur.pre_fetch_stall = 0; continue; }
+        const prev = lastNonFlushed;
+        if (prev == null) { cur.pre_fetch_stall = 0; lastNonFlushed = cur; continue; }
         if (prev.if1_lo != null && cur.if1_lo === prev.if1_lo) {
           cur.pre_fetch_stall = prev.pre_fetch_stall ?? 0;
           cur.pre_fetch_stall_shared_with = prev.id;
+          lastNonFlushed = cur;
           continue;
         }
-        if (prev.if1_lo == null) {
-          cur.pre_fetch_stall = 0;
-          continue;
-        }
-        /* Measured prev.if1_lo to cur.if1_lo, capturing both backpressure and
-         * cache-busy time inherited from prev. prev's hi cycle is deliberately
-         * ignored on wraps records: prev.if1_hi would zero out the cell for
-         * co-fetched followers, exactly the case where the follower waited
-         * longest for the cache. */
+        if (prev.if1_lo == null) { cur.pre_fetch_stall = 0; lastNonFlushed = cur; continue; }
+        /* Measured prev.if1_lo to cur.if1_lo, capturing backpressure and
+         * cache-busy time inherited from prev. prev's hi cycle is ignored on
+         * wraps, it would zero the cell for the longest-waiting follower. */
         cur.pre_fetch_stall = Math.max(0, cur.if1_lo - prev.if1_lo - 1);
+        lastNonFlushed = cur;
       }
       precomputeForwardingProducers();
       /* Build id -> record map for fast producer lookup in the popup. */
@@ -1954,10 +2030,10 @@
       requestAnimationFrame(() => {
         fitAll();
         fillStatus();
-        /* Auto-navigate to Main Code on initial load, matching MinorFlow.
-         * showMainCode tries CSR markers, then m5ops, then entry_pc + <exit>,
-         * and silently falls back to the full range. */
-        showMainCode();
+        /* Open on the full program. Narrowing to the main region on load hid
+         * everything outside it before the user had seen the trace, and the
+         * Main Code button is one click away. */
+        resetRange();
       });
     }
     function computeBoundsAndStats() {
@@ -1975,11 +2051,9 @@
           if (bubLo < lo) lo = bubLo;
         }
       }
-      /* Include the pre-fetch wait extent only when the FE-stall toggle is on,
-       * so a disabled toggle leaves no empty lead-in before the first
-       * instruction. Only the first visible instruction can reach below the
-       * low bound. The toggle handler re-runs the bounds so the layout, the
-       * Cycles figure and the classification switch together. */
+      /* Include the pre-fetch wait extent only with the FE-stall toggle on, so
+       * a disabled toggle leaves no empty lead-in. The toggle handler re-runs
+       * the bounds so layout, Cycles and classification switch together. */
       if (document.getElementById('festall-on')?.checked) {
         for (const r of ROWS) {
           if (r.pre_fetch_stall != null && r.pre_fetch_stall > 0 && r.if1_lo != null) {
@@ -1993,6 +2067,8 @@
        * drawWritebacks clips writebacks outside [cMin, cMax]. */
       if (!isFinite(lo)) { lo = 0; hi = 1; }
       cMin = lo; cMax = hi;
+      invalidateLabelContentWidth();
+      _lblClamped = false;
       /* Writebacks whose alloc..ack span overlaps [cMin, cMax]. Stats and the
        * status bar use these so the counts track the fetch range filter. */
       VISIBLE_WBS = WBS.filter(w => {
@@ -2010,10 +2086,9 @@
          * row can show a (max N) for the combined figure. */
         const icU = (w.icStall || 0) + (w.icStallHi || 0);
         if (icU > waitMax.icUnion) waitMax.icUnion = icU;
-        /* Per-row total stall, matching the tooltip's formula: pre-fetch wait
-         * only with its toggle on, FU compute latency excluded (not a stall).
-         * The suffered redirect / flush bubble is drawn ungated by the toggle
-         * and counts as flush recovery, so it is always in the total. */
+        /* Per-row total stall, matching the tooltip: pre-fetch wait only with
+         * its toggle on, FU compute latency excluded. The redirect bubble is
+         * drawn ungated and always counts as flush recovery. */
         const sufBub = (r.bubble_from_branch_id != null && r.bubble_cycles != null && r.bubble_cycles >= 1)
           ? r.bubble_cycles : 0;
         if (sufBub > waitMax.bubble) waitMax.bubble = sufBub;
@@ -2132,14 +2207,87 @@
       buildLegend();
       redraw();
     }
+
+    /* ---- Main program region ---------------------------------------------
+     * The templates open the workload with a jump to a 4096-aligned label and
+     * end where the harness resumes, at the counter reads or the next m5op. */
+    /* Unconditional direct jumps only: the trampoline is a plain "j", and
+     * admitting calls would let any page-aligned function look like an entry. */
+    /* A call is a jump that links. gem5 writes "jal ra, 8238" for one and
+     * "jal zero" for a plain jump, so a jal not naming zero is a call. */
+    const REGION_CALL_RE = /^(?:c_)?jalr?\b(?!\s+zero)/i;
+    /* Argument setup immediately in front of that call. */
+    const REGION_ARGSET_RE = /^(?:c_)?(?:li|mv|addi)\s+a[0-7]\b/i;
+    const REGION_JUMP_RE = /^(?:c\.)?(?:j|jal)\b/i;
+    const REGION_HARNESS_RE =
+      /\bM5Op\b|\bcsrrs?\s+\w+\s*,\s*(?:mcycle|minstret|mhpmcounter\d*|cycle|instret|0x[bc][0-9a-f]{2})\b/i;
+    function findMainRegion(list, disasmOf) {
+      /* The trampoline sits after the opening harness, so the search starts
+       * only once a counter read or m5op has been seen. Without that, any
+       * earlier aligned jump target qualifies and the region narrows wrongly. */
+      let prevReal = -1, startIdx = -1, harnessSeen = false;
+      for (let i = 0; i < list.length; i++) {
+        if (list[i].flushed) continue;
+        const dis = String(disasmOf(list[i]) || '');
+        if (!harnessSeen) {
+          if (REGION_HARNESS_RE.test(dis)) harnessSeen = true;
+          prevReal = i;
+          continue;
+        }
+        const pc = parseInt(list[i].pc, 16);
+        if (prevReal >= 0 && Number.isFinite(pc) && (pc & 0xfff) === 0
+          && REGION_JUMP_RE.test(String(disasmOf(list[prevReal]) || '').trim())) {
+          startIdx = i;
+          break;
+        }
+        prevReal = i;
+      }
+      if (startIdx < 0) return null;
+      /* End at the last real instruction before the harness resumes, or at the
+       * last real instruction of the trace if the harness never appears. */
+      let endIdx = -1, lastReal = -1;
+      for (let i = startIdx + 1; i < list.length; i++) {
+        if (list[i].flushed) continue;
+        if (REGION_HARNESS_RE.test(String(disasmOf(list[i]) || ''))) { endIdx = lastReal; break; }
+        lastReal = i;
+      }
+      if (endIdx < 0) endIdx = lastReal;
+      /* The call into the harness is not workload either: m5_dump_stats
+       * compiles to argument setup plus a call, and the marker is inside the
+       * callee. Only stripped when the region really does end in a call. */
+      const backOne = i => {
+        let k = i - 1;
+        while (k > startIdx && list[k].flushed) k--;
+        return k;
+      };
+      const dis = i => String(disasmOf(list[i]) || '').trim();
+      if (endIdx > startIdx && REGION_CALL_RE.test(dis(endIdx))) {
+        endIdx = backOne(endIdx);
+        while (endIdx > startIdx && REGION_ARGSET_RE.test(dis(endIdx))) {
+          endIdx = backOne(endIdx);
+        }
+      }
+      return endIdx > startIdx ? { startIdx, endIdx } : null;
+    }
+
     function showMainCode() {
       if (!DATA) return;
 
-      /* Last non-flushed instruction whose disasm references <exit> (e.g.
-       * `jal ra, 8000366e <exit>`), or -1. Scanned backward so error-path
-       * exits do not shadow the real program-end exit. Matches `<exit>` and
-       * `<exit+...>` but NOT `<_exit>`, the variant CVA6 baremetal C runtimes
-       * use, so on those the CSR / m5op detectors stay authoritative. */
+      /* Template markers first: they delimit the workload exactly, where the
+       * heuristics below only bracket it. */
+      const region = findMainRegion(DATA.instructions, r => r.disasm);
+      if (region) {
+        document.getElementById('rfrom').value =
+          String(dispId(DATA.instructions[region.startIdx].id));
+        document.getElementById('rto').value =
+          String(dispId(DATA.instructions[region.endIdx].id));
+        onRangeChange();
+        return;
+      }
+
+      /* Last non-flushed instruction whose disasm references <exit>, or -1.
+       * Scanned backward so error-path exits do not shadow the real one.
+       * Matches <exit> and <exit+...> but not <_exit>. */
       const exitRe = /<exit(?:[+>])/;
       const findLastExitIdx = (minIdx) => {
         for (let i = DATA.instructions.length - 1; i > minIdx; i--) {
@@ -2149,11 +2297,9 @@
         return -1;
       };
 
-      /* CSR-based detection first: most C programs bracket the workload with
-       * `read_csr(mcycle)`. The first csrr mcycle marks the start. The end is
-       * the instruction just before the run of 3+ consecutive loads that opens
-       * the print block, falling back to the instruction before the second
-       * csrr mcycle. */
+      /* CSR detection first: most C programs bracket the workload with
+       * read_csr(mcycle). The end is just before the run of 3+ loads that opens
+       * the print block, falling back to the second csrr mcycle. */
       const csrrMCycleRe = /\bcsrr\s+\w+\s*,\s*mcycle\b/;
       const loadRe = /^(?:ld|lw|lh|lb|lbu|lhu|lwu|fld|flw|c\.l[dw])\b/;
       const csrIdx = [];
@@ -2198,11 +2344,9 @@
         return;
       }
 
-      /* m5op-based detection: assembly programs bracket the workload with jal
-       * to gem5's m5_reset_stats / m5_dump_stats, so the ROI runs from the
-       * instruction after the reset call to the one before the dump call.
-       * Matched by symbol name permissively, accepting workbegin/workend
-       * variants. */
+      /* m5op detection: assembly programs bracket the workload with jal to
+       * m5_reset_stats and m5_dump_stats, so the ROI runs between them.
+       * Matched permissively by symbol name, workbegin/workend included. */
       const resetCallRe = /\b(?:m5_reset_stats|m5_resetstats|m5_workbegin)\b/;
       const dumpCallRe = /\b(?:m5_dump_stats|m5_dumpstats|m5_dump_reset_stats|m5_workend)\b/;
       let resetIdx = -1, dumpIdx = -1;
@@ -2227,98 +2371,31 @@
        * PC detection without warning. */
 
 
-      /* Fallback: PC-based detection from metadata.user_entry_pc /
-       * user_end_pc and the exit-jump pattern. */
-      const m = DATA.metadata || {};
-      const entryPc = m.user_entry_pc || DEFAULT_USER_ENTRY_PC;
-
-      /* Hex PCs in the trace can be written with or without leading zeros, so
-       * normalize both sides before comparing. */
-      const norm = pc => {
-        let s = String(pc || '').toLowerCase().trim();
-        if (!s.startsWith('0x')) s = '0x' + s;
-        s = s.replace(/^0x0+/, '0x');
-        if (s === '0x') s = '0x0';
-        return s;
-      };
-      const tEntry = norm(entryPc);
-
-      /* Entry cascade: metadata.user_entry_pc, then DEFAULT_USER_ENTRY_PC,
-       * then the first non-flushed instruction. The last step covers ASM
-       * programs whose entry PC varies with linker layout. The end of the ROI
-       * is still found by symbol, which is invariant across programs. */
-      let startIdx = DATA.instructions.findIndex(r => norm(r.pc) === tEntry);
-      if (startIdx < 0) {
-        const tDefault = norm(DEFAULT_USER_ENTRY_PC);
-        if (tDefault !== tEntry) {
-          startIdx = DATA.instructions.findIndex(r => norm(r.pc) === tDefault);
-        }
-      }
-      /* Only a PC marker counts as an explicit delimiter. If the fallback is
-       * used and the end detection also fails, the user is told rather than
-       * shown a guessed range. */
-      const entryExplicit = startIdx >= 0;
-      if (startIdx < 0) {
-        startIdx = DATA.instructions.findIndex(r => !r.flushed);
-      }
-      if (startIdx < 0) {
-        /* Zero non-flushed instructions: unlikely, but covered. */
-        showModalMessage('Main code: empty trace',
-          `<p>This trace has no non-flushed instructions to use as an entry point.</p>` +
-          `<p>Total records: ${DATA.instructions.length}. Try a different trace.</p>`);
-        return;
-      }
-
-      /* End-PC resolution order: metadata.user_end_pc, then a jump to <exit>
-       * in the disasm, then DEFAULT_USER_END_PC, then the end of the trace. */
-      let endIdx = -1;
-      if (m.user_end_pc) {
-        const tMeta = norm(m.user_end_pc);
-        for (let i = DATA.instructions.length - 1; i >= startIdx; i--) {
-          if (norm(DATA.instructions[i].pc) === tMeta) { endIdx = i; break; }
-        }
-      }
-      if (endIdx < 0) {
-        /* Last (not first) non-flushed jump to <exit>, so error-path exits
-         * do not preempt the real program-end exit. */
-        endIdx = findLastExitIdx(startIdx - 1);
-      }
-      if (endIdx < 0 && DEFAULT_USER_END_PC) {
-        const tFallback = norm(DEFAULT_USER_END_PC);
-        for (let i = DATA.instructions.length - 1; i >= startIdx; i--) {
-          if (norm(DATA.instructions[i].pc) === tFallback) { endIdx = i; break; }
-        }
-      }
-      if (!entryExplicit && endIdx < 0) {
-        /* Nothing matched at all: say so and show the whole program. */
-        showModalMessage('Main code not found',
-          `<p>This trace has no main-code delimiters the viewer recognises: ` +
-          `no <code>csrr …, mcycle</code> pair, no m5op ` +
-          `reset / dump pair, no matching entry or end PC, and no jump to ` +
-          `<code>&lt;exit&gt;</code>.</p>` +
-          `<p>Showing the full program instead.</p>`);
-        resetRange();
-        return;
-      }
-      document.getElementById('rfrom').value = String(dispId(DATA.instructions[startIdx].id));
-      document.getElementById('rto').value = String(
-        endIdx >= 0 ? dispId(DATA.instructions[endIdx].id) : maxId
-      );
-      onRangeChange();
+      /* Nothing recognisable: say so rather than guessing a range. */
+      showModalMessage('Main code not found',
+        `<p>This trace has no main-code delimiters the viewer recognises: ` +
+        `no jump to a 4096-aligned region label, no <code>csrr …, mcycle</code> ` +
+        `pair, and no m5op reset / dump pair.</p>` +
+        `<p>Showing the full program instead.</p>`);
+      resetRange();
     }
 
-    /* setZoom preserves the cycle at the viewport center so zooming feels like
-     * a magnifying glass instead of a teleport. */
-    function setZoom() {
+    /* setZoom holds the cycle at the viewport centre, so zooming feels like a
+     * magnifying glass. explicitCW comes from the typed zoom field, which is
+     * not on the slider's integer track, so it is applied directly. */
+    function setZoom(explicitCW = null) {
       const vpW = tlscroll.clientWidth || 800;
       const vpH = tlscroll.clientHeight || 600;
       const oldRh = getRowH();
       /* Save the center cycle and the fractional top row index, not the pixel
        * scrollY: getRowH() jumps when the slider crosses cellW = 20 or 40, so a
        * fixed pixel offset would map to a different row after the zoom. */
-      const centerCyc = cMin + (scrollX + vpW / 2) / cellW;
+      const centerCyc = (zoomAnchorCyc !== null && scrollX === zoomAnchorScrollX)
+        ? zoomAnchorCyc : cMin + (scrollX + vpW / 2) / cellW;
       const topRow = scrollY / oldRh;
-      cellW = Math.min(+document.getElementById('zx').value, maxSafeCellW());
+      cellW = explicitCW != null
+        ? Math.min(explicitCW, maxSafeCellW())
+        : Math.min(+document.getElementById('zx').value, maxSafeCellW());
       const newRh = getRowH();
       clampZoomToWindow();
       setupGeometry();
@@ -2326,9 +2403,20 @@
       const totalH = ROWS.length * newRh + 3 * newRh;
       const desX = (centerCyc - cMin) * cellW - vpW / 2;
       const desY = topRow * newRh;
-      tlscroll.scrollLeft = Math.max(0, Math.min(Math.max(0, totalW - vpW), desX));
-      tlscroll.scrollTop = Math.max(0, Math.min(Math.max(0, totalH - vpH), desY));
-      syncScrollFromDom();
+      /* Set the origin from the anchor and the position from the origin, not
+       * the reverse: the read-back floored to a whole cell, so a zoom round
+       * trip drifted. The kbExpect flags stop the listener re-deriving it. */
+      const clampedX = Math.max(0, Math.min(Math.max(0, totalW - vpW), desX));
+      const clampedY = Math.max(0, Math.min(Math.max(0, totalH - vpH), desY));
+      scrollX = Math.round(clampedX / cellW) * cellW;
+      scrollY = Math.round(clampedY / newRh) * newRh;
+      const devPx = 1 / (window.devicePixelRatio || 1);
+      tlscroll.scrollLeft = scrollX + devPx / 2;
+      kbExpectPx = tlscroll.scrollLeft;
+      tlscroll.scrollTop = scrollY;
+      kbExpectPy = tlscroll.scrollTop;
+      zoomAnchorCyc = centerCyc;
+      zoomAnchorScrollX = scrollX;
       redraw();
     }
     /* Largest cellW keeping the inner width within the browser's element pixel
@@ -2347,9 +2435,7 @@
       if (+sl.value > safeCW) sl.value = String(safeCW);
       if (cellW > safeCW) cellW = safeCW;
       const rangeLimited = safeCW < MAX_CELL && +sl.value >= safeCW;
-      document.getElementById('zoom-val').textContent =
-        (cellW < 1 ? cellW.toFixed(2) : Math.round(cellW)) + 'px'
-        + (rangeLimited ? ' (max for this range)' : '');
+      showZoomValue(cellW, rangeLimited);
       return safeCW;
     }
     function fitAll() {
@@ -2366,7 +2452,8 @@
       setupGeometry(); redraw();
     }
     function onWbToggle() {
-      const show = document.getElementById('wb-on').checked;
+      const chk = document.getElementById('wb-on');
+      const show = chk.checked && !chk.disabled && ((DATA && DATA.writebacks) || []).length > 0;
       document.getElementById('wbpanel').style.display = show ? 'flex' : 'none';
       /* Defer the geometry update until after the reflow from the display
        * change. Otherwise clientHeight still reads the old heights and the
@@ -2381,11 +2468,9 @@
     }
     function setupGeometry() {
       const totalW = (cMax - cMin + 4) * cellW;
-      /* Three extra rows of bottom padding so the last instruction clears the
-       * horizontal scrollbar. Whole-row quantisation can eat one row, and one
-       * remaining row (15px) proved marginal against a scrollbar's 15-17px
-       * pointer-capture zone on overlay-scrollbar systems. Three rows leave at
-       * least 30px at every zoom and viewport height. */
+      /* Three rows of bottom padding so the last instruction clears the
+       * horizontal scrollbar. Row quantisation can eat one, and one 15px row
+       * was marginal against a 15-17px overlay-scrollbar capture zone. */
       const totalH = ROWS.length * getRowH() + 3 * getRowH();
       const sp = document.getElementById('tlspacer');
       sp.style.width = totalW + 'px'; sp.style.height = totalH + 'px';
@@ -2427,9 +2512,8 @@
     window.addEventListener('resize', () => { if (DATA) { setupGeometry(); redraw(); } });
 
     /* Keep the overlay canvases sized to the scroll viewport whenever it
-     * changes for any reason (status bar wrapping, a panel toggling, a font
-     * reflow), not only on the explicit toggle handlers, or the stale-sized
-     * canvas leaves a gap. */
+     * changes for any reason, not only on the toggle handlers, or a
+     * stale-sized canvas leaves a gap. */
     if (window.ResizeObserver) {
       let _roScheduled = false;
       const ro = new ResizeObserver(() => {
@@ -2466,11 +2550,9 @@
       if (fu === 'CTRL_FLOW') return COL.branch;
       return COL.int;
     }
-    /* Classify the id buf gap. CVA6 decodes and issues in the same cycle, so a
-     * RAW dependency shows up as a wait in front of decode, not an issue gap.
-     * The blocker is the latest producer writing back at or just before
-     * id_cycle: a load gives 'memhzd', another producer 'hzd', no late producer
-     * plain 'idbuf' back-pressure (null when there is no gap). */
+    /* Classify the id buf gap. CVA6 decodes and issues in one cycle, so a RAW
+     * dependency waits in front of decode. The blocker is the latest producer
+     * writing back near id_cycle: a load is 'memhzd', another 'hzd'. */
     function idBufKind(rec) {
       if (rec.fe_cycle == null || rec.id_cycle == null
         || rec.id_cycle <= rec.fe_cycle + 1) return null;
@@ -2505,8 +2587,138 @@
       if (rec.is_compressed) m = m.replace(/^c[._]/, '');
       return m;
     }
-    function dispMnem(rec) {
-      return rec.is_compressed ? (rec.disasm || '').replace(/^c[._]/, '') : (rec.disasm || '');
+    /* Bare target address followed by the symbol objdump resolved, as in
+     * "j 8000453c <runahead_outer+0x534>". Both say the same thing and the
+     * symbol reads better, so a target with a symbol drops its address. */
+    const RE_ADDR_BEFORE_SYM = /\b[0-9a-f]{4,16}\s+(<[^>]+>)/g;
+    /* Dotted pseudo-instructions. objdump spells these with a dot but gem5
+     * prints the instruction they stand for, so rewriting the dot would match
+     * neither viewer. fmv.w.x and fmv.x.d are real and stay unmatched. */
+    const RE_PSEUDO_DOTTED = /^(?:sext|zext)\.[bhw]$|^(?:fmv|fabs|fneg)\.[sd]$/;
+    /* objdump prints a pseudo-instruction where gem5 prints what it stands
+     * for. Each entry rebuilds the base form from objdump's operands. Applies
+     * to uncompressed only, gem5 prints the compressed pseudo name itself. */
+    const PSEUDO_EXPAND = {
+      nop: () => ['addi', ['zero', 'zero', '0']],
+      li: o => ['addi', [o[0], 'zero', o[1]]],
+      mv: o => ['addi', [o[0], o[1], '0']],
+      not: o => ['xori', [o[0], o[1], '-1']],
+      neg: o => ['sub', [o[0], 'zero', o[1]]],
+      negw: o => ['subw', [o[0], 'zero', o[1]]],
+      'sext.w': o => ['addiw', [o[0], o[1], '0']],
+      seqz: o => ['sltiu', [o[0], o[1], '1']],
+      snez: o => ['sltu', [o[0], 'zero', o[1]]],
+      sltz: o => ['slt', [o[0], o[1], 'zero']],
+      sgtz: o => ['slt', [o[0], 'zero', o[1]]],
+      beqz: o => ['beq', [o[0], 'zero', o[1]]],
+      bnez: o => ['bne', [o[0], 'zero', o[1]]],
+      blez: o => ['bge', ['zero', o[0], o[1]]],
+      bgez: o => ['bge', [o[0], 'zero', o[1]]],
+      bltz: o => ['blt', [o[0], 'zero', o[1]]],
+      bgtz: o => ['blt', ['zero', o[0], o[1]]],
+      j: o => ['jal', ['zero', o[0]]],
+      /* Only the one-operand forms are pseudo. "jal ra, X" and "jalr rd, rs, i"
+       * are already the base instruction and are left alone. */
+      jal: o => (o.length === 1 ? ['jal', ['ra', o[0]]] : null),
+      jr: o => (o.length === 1 ? ['jalr', ['zero', o[0], '0']] : null),
+      jalr: o => (o.length === 1 ? ['jalr', ['ra', o[0], '0']] : null),
+      ret: () => ['jalr', ['zero', 'ra', '0']],
+      csrr: o => ['csrrs', [o[0], o[1], 'zero']],
+      csrw: o => ['csrrw', ['zero', o[0], o[1]]],
+      csrs: o => ['csrrs', ['zero', o[0], o[1]]],
+      csrc: o => ['csrrc', ['zero', o[0], o[1]]],
+      csrwi: o => ['csrrwi', ['zero', o[0], o[1]]],
+      csrsi: o => ['csrrsi', ['zero', o[0], o[1]]],
+      csrci: o => ['csrrci', ['zero', o[0], o[1]]],
+      rdcycle: o => ['csrrs', [o[0], 'cycle', 'zero']],
+      rdtime: o => ['csrrs', [o[0], 'time', 'zero']],
+      rdinstret: o => ['csrrs', [o[0], 'instret', 'zero']],
+      'fmv.s': o => ['fsgnj_s', [o[0], o[1], o[1]]],
+      'fmv.d': o => ['fsgnj_d', [o[0], o[1], o[1]]],
+      'fabs.s': o => ['fsgnjx_s', [o[0], o[1], o[1]]],
+      'fabs.d': o => ['fsgnjx_d', [o[0], o[1], o[1]]],
+      'fneg.s': o => ['fsgnjn_s', [o[0], o[1], o[1]]],
+      'fneg.d': o => ['fsgnjn_d', [o[0], o[1], o[1]]],
+    };
+    /* Compressed instructions. gem5 names them c_addi, c_li and so on and
+     * MinorFlow drops the c_, while objdump prints the expanded form. These
+     * bring objdump's wording back to the compressed one. */
+    const COMPRESSED_FIXUP = {
+      ret: () => ['jr', ['ra']],
+      'sext.w': o => ['addiw', [o[0], '0']],
+    };
+    /* gem5 writes immediates in decimal throughout (lui t4, 260096) where
+     * objdump uses hex for the shift and upper-immediate forms. CSR operands are
+     * left alone: those are register names or numbers, not immediates. */
+    const RE_HEX_IMM = /^0x[0-9a-f]+$/i;
+
+    /* The compressed stack-pointer forms are the one family objdump's text
+     * cannot identify: c.ldsp prints as "ld", c.addi16sp and c.addi4spn as
+     * "addi". Decoded from instr_word instead, assuming RV64 as CVA6 is. */
+
+    /* The renaming below is inferred from gem5's convention, the spec name
+     * with its dot as an underscore, and from its disassembly classes: loads
+     * and stores print "rd, off(base)", immediate arithmetic "rd, imm". */
+    const RVC_SP_FUNCT3 = {
+      1: 'fldsp', 2: 'lwsp', 3: 'ldsp', 5: 'fsdsp', 6: 'swsp', 7: 'sdsp',
+    };
+    function rvcStackForm(word) {
+      if (!word) return null;
+      const w = parseInt(word, 16);
+      if (!Number.isFinite(w)) return null;
+      const h = w & 0xffff, q = h & 3, f3 = (h >> 13) & 7;
+      if (q === 0 && f3 === 0) return 'addi4spn';
+      if (q === 1 && f3 === 3 && ((h >> 7) & 31) === 2) return 'addi16sp';
+      if (q === 2) return RVC_SP_FUNCT3[f3] || null;
+      return null;
+    }
+    /* withComment keeps objdump's trailing annotation, which only the tooltip
+     * wants. gem5 never writes one, and at 46 characters against 27 it was what
+     * pushed the label column's ceiling out. */
+    function dispMnem(rec, withComment) {
+      const src = rec.is_compressed
+        ? (rec.disasm || '').replace(/^c[._]/, '') : (rec.disasm || '');
+      const comment = /\s+#\s*(.+?)\s*$/.exec(src);
+      const raw = src.replace(/\s+#.*$/, '').trim();
+      if (!raw) return '';
+      /* Remaining lexical differences: objdump writes multi-part mnemonics
+       * with dots where gem5 uses underscores, and no space after an operand
+       * comma. Applied here so every consumer of the text follows. */
+      const cut = raw.indexOf(' ');
+      let head = cut < 0 ? raw : raw.slice(0, cut);
+      let ops = cut < 0 ? []
+        : raw.slice(cut + 1).split(',').map(t => t.trim()).filter(t => t !== '');
+      if (!rec.is_compressed
+        && Object.prototype.hasOwnProperty.call(PSEUDO_EXPAND, head)) {
+        const ex = PSEUDO_EXPAND[head](ops);
+        if (ex) { head = ex[0]; ops = ex[1]; }
+      } else if (rec.is_compressed) {
+        const spForm = rvcStackForm(rec.instr_word);
+        const fx = COMPRESSED_FIXUP[head];
+        if (spForm === 'addi16sp' || spForm === 'addi4spn') {
+          head = spForm;
+          if (ops.length >= 2) ops = [ops[0], ops[ops.length - 1]];
+        } else if (spForm) {
+          head = spForm;
+        } else if (fx) {
+          const ex = fx(ops);
+          head = ex[0]; ops = ex[1];
+        } else if (ops.length === 3 && ops[0] === ops[1]) {
+          /* The RVC arithmetic forms are two-operand, destination and source.
+           * objdump repeats the destination as the first source, gem5 does not. */
+          ops = [ops[0], ops[2]];
+        }
+      }
+      if (!/^csrr?[wsc]?i?$/.test(head)) {
+        ops = ops.map(o => (RE_HEX_IMM.test(o) ? String(parseInt(o, 16)) : o));
+      }
+      const mnem = RE_PSEUDO_DOTTED.test(head) ? head : head.replace(/\./g, '_');
+      const tail = ops.map(o => o.replace(RE_ADDR_BEFORE_SYM, '$1')).join(', ');
+      const out = tail ? mnem + ' ' + tail : mnem;
+      /* The comment is passed through untouched. Its whole point is the raw
+       * address objdump resolved, so the symbol substitution that runs over the
+       * operands must not swallow it. */
+      return (withComment && comment) ? out + '  # ' + comment[1] : out;
     }
 
     function redraw() {
@@ -2526,7 +2738,8 @@
       }
       drawTimeline();
       drawRuler();
-      if (document.getElementById('wb-on').checked) drawWritebacks();
+      if (document.getElementById('wb-on').checked
+        && !document.getElementById('wb-on').disabled) drawWritebacks();
       updateVisibleReadout();
     }
     /* On-screen row range for the Visible metric, over the window total set in
@@ -2564,10 +2777,9 @@
         /* The faint cycle grid is drawn per row after drawBars instead, so it
          * overlays the bars (MinorFlow's approach). */
       }
-      /* Tint every stalled cycle column full height and behind the rows.
-       * STALL_HL_SET is the same deduplicated total the metric reports, so the
-       * highlight and the count agree. The tint is kept cool and low-alpha so
-       * it does not fight the stage colours. */
+      /* Tint every stalled column full height behind the rows. STALL_HL_SET is
+       * the same deduplicated total the metric reports, so highlight and count
+       * agree. Kept cool and low-alpha so it does not fight the stages. */
       if (STALL_HL_SET && STALL_HL_SET.size) {
         ctx.fillStyle = 'rgba(120,150,210,0.13)';
         for (let c = firstCyc; c <= lastCyc; c++) {
@@ -2626,12 +2838,9 @@
         ctx.fillStyle = '#18181a';
         ctx.fillRect(0, contentEndY, W, H - contentEndY);
       }
-      /* Label panel rows are DOM, not canvas, so the fetch number, address and
-       * mnemonic can be selected and copied. The list is windowed and rebuilt
-       * only when the row window, row height or fetch-number width changes, so
-       * a horizontal scroll or mouse move does not wipe a selection in
-       * progress. Vertical follow is a transform, keeping the rows
-       * pixel-aligned with the bars. */
+      /* Label rows are DOM, not canvas, so text can be selected and copied.
+       * The list is windowed and rebuilt only when the row window, height or
+       * number width changes, so scrolling does not wipe a selection. */
       const lblFirst = Math.max(0, firstRow - 3);
       const lblLast = Math.min(ROWS.length - 1, lastRow + 3);
       let maxIdDigits = 1;
@@ -2662,6 +2871,7 @@
             + `</div>`;
         }
         lbllist.innerHTML = html;
+        if (!_lblClamped) { _lblClamped = true; clampLabelWidthToContent(); }
       }
       /* Follow the vertical scroll. Set every draw (cheap) so the list stays
        * aligned on zoom, fit, and filter as well as on scroll. */
@@ -2690,6 +2900,30 @@
           ctx.restore();
         }
       }
+      /* One lane of a two-lane fetch row: the top or bottom half of the band
+       * seg would fill. Used for a wraps_line record, whose two cache lines each
+       * keep a fixed lane for the whole fetch. */
+      function segHalf(c0, c1, color, isTop, label) {
+        if (c0 == null || c1 == null || c1 <= c0) return;
+        const x = (c0 - firstCyc) * cellW;
+        const w = Math.max(1, (c1 - c0) * cellW - 1);
+        if (x + w < 0 || x > vpW) return;
+        /* The two lanes share the whole row, not the 60% band a single-line
+         * fetch uses. Splitting the band left each lane under a third of the
+         * row and the fetch stage became hard to read. Matches MinorFlow. */
+        const gap = 2;
+        const hh = Math.max(1, Math.floor((h - gap) / 2));
+        const yy = isTop ? y0 : (y0 + h - hh);
+        ctx.fillStyle = color; ctx.fillRect(x, yy, w, hh);
+        if (label && cellW >= 14 && w >= 14) {
+          const fs = Math.min(10, Math.max(8, hh - 3));
+          ctx.font = `${fs}px ${FONT_SANS}`;
+          ctx.fillStyle = 'rgba(255,255,255,0.55)';
+          ctx.save(); ctx.beginPath(); ctx.rect(x + 1, yy, w - 2, hh); ctx.clip();
+          ctx.fillText(label, x + 3, yy + hh - 1);
+          ctx.restore();
+        }
+      }
       function strip(c0, c1, color, yOff, stripH, label) {
         if (c0 == null || c1 == null || c1 <= c0) return;
         const x = (c0 - firstCyc) * cellW;
@@ -2702,35 +2936,6 @@
           ctx.fillStyle = 'rgba(255,255,255,0.85)';
           ctx.save(); ctx.beginPath(); ctx.rect(x + 1, yy, w - 2, stripH); ctx.clip();
           ctx.fillText(label, x + 2, yy + stripH - 1);
-          ctx.restore();
-        }
-      }
-      /* A single-cycle cell split left/right, for the lo-IF2 / hi-IF1 overlap
-       * on wraps_line records where the cache responds to lo and accepts hi in
-       * the same cycle. Not temporally precise (the events are concurrent) but
-       * it reads better than a top/bottom split or one colour winning. The
-       * convention mirrors Konata's split cell. */
-      function segSplit(c0, c1, colorLeft, colorRight, hFrac, labelLeft, labelRight) {
-        if (c0 == null || c1 == null || c1 <= c0) return;
-        const x = (c0 - firstCyc) * cellW;
-        const w = Math.max(2, (c1 - c0) * cellW - 1);
-        if (x + w < 0 || x > vpW) return;
-        const hh = Math.max(2, Math.round(h * hFrac));
-        const yy = y0 + h - hh;
-        const halfW = Math.max(1, Math.floor(w / 2));
-        ctx.fillStyle = colorLeft; ctx.fillRect(x, yy, halfW, hh);
-        ctx.fillStyle = colorRight; ctx.fillRect(x + halfW, yy, w - halfW, hh);
-        const fs = Math.min(10, Math.max(8, hh - 3));
-        ctx.font = `${fs}px ${FONT_SANS}`;
-        ctx.fillStyle = 'rgba(255,255,255,0.55)';
-        if (labelLeft && cellW >= 14 && halfW >= 10) {
-          ctx.save(); ctx.beginPath(); ctx.rect(x + 1, yy, halfW - 1, hh); ctx.clip();
-          ctx.fillText(labelLeft, x + 2, yy + hh - 2);
-          ctx.restore();
-        }
-        if (labelRight && cellW >= 14 && (w - halfW) >= 10) {
-          ctx.save(); ctx.beginPath(); ctx.rect(x + halfW + 1, yy, w - halfW - 1, hh); ctx.clip();
-          ctx.fillText(labelRight, x + halfW + 2, yy + hh - 2);
           ctx.restore();
         }
       }
@@ -2782,12 +2987,11 @@
       if (lastIf2 != null && ins.fe_cycle != null && ins.fe_cycle > lastIf2 + 1)
         seg(lastIf2 + 1, ins.fe_cycle, sc(COL.f2buf), 0.60, 'fe buf');
       if (ins.if1_lo != null && ins.if2_lo != null)
-        renderIF12(ins.if1_lo, ins.if2_lo, ins.ic_miss, sc, seg, strip, segSplit, h,
+        renderIF12(ins.if1_lo, ins.if2_lo, ins.ic_miss, sc, seg, strip, segHalf, h,
           ins.if1_hi, ins.if2_hi, ins.wraps_line, ins.ic_miss_hi);
-      /* Cycles where the FE was blocked from issuing this record's IF1, drawn
-       * at the bubble's height so the two read as one stripe. The bubble
-       * already covers the right edge of the gap, so its cycles are subtracted
-       * to leave only the FE backpressure it does not account for. */
+      /* Cycles where the FE could not issue this record's IF1, drawn at the
+       * bubble's height so the two read as one stripe. The bubble covers the
+       * right edge, so its cycles are subtracted. */
       if (document.getElementById('festall-on')?.checked
         && ins.pre_fetch_stall != null && ins.if1_lo != null) {
         const bubble = ins.bubble_cycles ?? 0;
@@ -2798,10 +3002,9 @@
           seg(c0, c1, sc(COL.feBlock), 0.55, 'wait');
         }
       }
-      /* Phase 8c bubble: recovery records carry bubble_cycles (flushed records
-       * between their causer and them), drawn as a transparent bar ending
-       * exactly at if1_lo and coloured by the causer's bubble_kind. Same
-       * convention as MinorFlow's '_bubble' fill bar. */
+      /* Recovery records carry bubble_cycles, the flushed records between
+       * their causer and them, drawn as a transparent bar ending at if1_lo and
+       * coloured by the causer's kind. Same convention as MinorFlow. */
       if (ins.bubble_cycles != null && ins.bubble_cycles >= 1 && ins.if1_lo != null) {
         const causer = ROW_BY_ID.get(ins.bubble_from_branch_id);
         const meta = (causer && BUBBLE_KIND_META[causer.bubble_kind])
@@ -2833,23 +3036,22 @@
       }
       if (ins.fu === 'CTRL_FLOW' && ins.bp_mispredict && ins.ex_cycle != null) {
         const taken = ins.bp_resolved_taken === false ? 'N' : 'T';
-        /* Cap on the EX cell for a branch that needed an Execute redirect. The
-         * strip height matches the cell's H_EXEC top edge. The two outcomes
-         * split as the Mispred and Unpred metrics do: a mispredict caps red
-         * (T✗/N✗), a predictor that stayed silent (predicted_cf == NoCF) caps
-         * orange (T!/N!), matching MinorFlow's outcome colours. */
+        /* Cap on the EX cell for a branch that needed an Execute redirect,
+         * at the cell's H_EXEC top edge. A mispredict caps red, a silent
+         * predictor caps orange, matching MinorFlow's outcome colours. */
         const psH = Math.max(6, Math.round(h * 0.15));
         const silent = ins.bp_predicted_cf === 'NoCF';
         strip(ins.ex_cycle, ins.ex_cycle + 1, sc(silent ? '#f0a030' : '#ff4040'), 0, psH, taken + (silent ? '!' : '✗'));
       } else if (ins.fu === 'CTRL_FLOW' && ins.bp_predicted_cf
         && ins.bp_predicted_cf !== 'NoCF' && ins.if2_lo != null) {
         const taken = ins.bp_resolved_taken === false ? 'N' : 'T';
-        /* Predict cap on the IF2 cell delivering the full encoding. BHT/BTB
-         * lookups happen at IF1, but the verdict is only final once the
-         * realigner has the whole instruction: at IF2_lo when aligned, and at
-         * IF2_hi for wraps_line records, where the realigner stitches the
-         * saved lo half to the freshly arrived hi half. */
-        const psH = Math.max(6, Math.round(h * 0.4));
+        /* Predict cap on the IF2 cell delivering the full encoding. The
+         * lookups happen at IF1, but the verdict is final only once the
+         * realigner has the whole instruction, at IF2_hi when it wraps. */
+        /* A thin tag along the top edge, the same height as the mispredict
+         * tag. At four tenths of the row it covered the whole top lane of a
+         * line-spanning fetch, hiding the if2 hi cell it annotates. */
+        const psH = Math.max(5, Math.round(h * 0.15));
         const predictCyc = (ins.wraps_line && ins.if2_hi != null)
           ? ins.if2_hi : ins.if2_lo;
         strip(predictCyc, predictCyc + 1, sc('#40c0ff'), 0, psH, taken + '✓');
@@ -2858,8 +3060,7 @@
 
     /* Arrows from the centre of the producer's wb cell to just inside the
      * consumer's IS cycle, coloured by the via path. Producers outside the
-     * current filter are skipped silently. The popup still carries the textual
-     * producer info in that case. */
+     * filter are skipped, the popup still carries the text. */
     function drawForwardingArrows(ctx, firstRow, lastRow, firstCyc, vpW, vpH) {
       const rh = getRowH();
       ctx.lineWidth = 2.5;
@@ -2883,8 +3084,17 @@
           if (Math.max(prodX, consX) < -50 || Math.min(prodX, consX) > vpW + 50) continue;
           if (Math.max(prodY, consY) < -50 || Math.min(prodY, consY) > vpH + 50) continue;
           const via = cons[`fwd_${rs}_via`];
-          const color = via === 'wb' ? 'rgba(80,210,200,0.85)' : 'rgba(190,110,200,0.85)';
-          const headColor = via === 'wb' ? 'rgba(80,210,200,1.0)' : 'rgba(190,110,200,1.0)';
+          /* Forwarding into a flushed consumer did happen in hardware, so
+           * the arrow stays but is drawn faint. At full strength it reads as
+           * if it had fed a committed instruction. Same hue either way. */
+          /* An arrow into a flushed consumer takes the flushed stage colour,
+           * so it reads as part of the wrong-path row rather than a live
+           * edge. The forwarding did happen, so the arrow stays. */
+          const spec = !!cons.flushed;
+          const color = spec ? COL.flushedFwd
+            : (via === 'wb' ? 'rgba(80,210,200,0.85)' : 'rgba(190,110,200,0.85)');
+          const headColor = spec ? COL.flushedFwd
+            : (via === 'wb' ? 'rgba(80,210,200,1.0)' : 'rgba(190,110,200,1.0)');
           ctx.strokeStyle = color;
           ctx.beginPath();
           ctx.moveTo(prodX, prodY);
@@ -2905,57 +3115,48 @@
       }
     }
 
-    function renderIF12(if1c, if2c, missed, sc, seg, strip, segSplit, h,
+    /* A wraps_line record keeps two lanes for its whole fetch, low on the
+     * bottom half and high on the top, so a cycle with both filled IS a shared
+     * cycle. One that fits a single line keeps the full-height band. */
+    function renderIF12(if1c, if2c, missed, sc, seg, strip, segHalf, h,
       if1hc, if2hc, wrapsLine, missedHi) {
       if (if1c == null || if2c == null) return;
+      const twoLane = !!(wrapsLine && if1hc != null && if2hc != null);
+      /* isTop null means the single-line case, where the lane is the whole band. */
+      const band = (c0, c1, color, label, isTop) => {
+        if (c0 == null || c1 == null || c1 <= c0) return;
+        if (isTop === null) seg(c0, c1, color, 0.60, label);
+        else segHalf(c0, c1, color, isTop, label);
+      };
       /* Miss-ness comes from the ICache FSM flag, not the if1-to-if2 gap: a hit
        * that took more than one cycle is still a hit and must not read as a
        * stall. The gap is only a fallback when the flag is absent. */
       const loMiss = (missed != null) ? missed : (if2c > if1c + 1);
-      /* On a miss the request cell is red (it runs into the ICache stall), then
-       * the stall, then the response. On a hit the whole fetch window is one
-       * continuous if1 bar whatever the latency. Matches MinorFlow. */
+      const loLane = twoLane ? false : null;
+      /* Low line: on a miss the request cell is red (it runs into the ICache
+       * stall), then the stall, then the response. On a hit the whole fetch
+       * window is one continuous if1 bar whatever the latency. */
       if (loMiss) {
-        seg(if1c, if1c + 1, sc(COL.f1reqMiss), 0.60, 'if1');
-        if (if2c > if1c + 1) seg(if1c + 1, if2c, sc(COL.f1stall), 0.60, 'icache stall');
+        band(if1c, if1c + 1, sc(COL.f1reqMiss), 'if1', loLane);
+        band(if1c + 1, if2c, sc(COL.f1stall), 'icache stall', loLane);
       } else {
-        seg(if1c, if2c, sc(COL.f1), 0.60, 'if1');
+        band(if1c, if2c, sc(COL.f1), 'if1', loLane);
       }
-      /* A wraps_line record whose hi IF1 shares its cycle with lo IF2 is the
-       * typical pipelined CVA6 case, and gets one split cell instead of two. */
-      const sharesCycle = wrapsLine && if1hc != null && if1hc === if2c;
-      const hiMiss = (wrapsLine && if1hc != null && if2hc != null)
-        ? ((missedHi != null) ? missedHi : (if2hc - if1hc > 1)) : false;
-      if (sharesCycle) {
-        /* The right half is the hi IF1 request. Red when the hi line missed,
-         * so a shared-cycle request still reads as a miss. */
-        segSplit(if2c, if2c + 1, sc(COL.f2), sc(hiMiss ? COL.f1reqMiss_hi : COL.f1_hi),
-          0.60, 'if2', 'if1 hi');
+      band(if2c, if2c + 1, sc(COL.f2), 'if2', loLane);
+      if (!twoLane) return;
+      /* High line, top lane. */
+      const hiMiss = (missedHi != null) ? missedHi : (if2hc - if1hc > 1);
+      /* Gap between the lo IF2 response and the hi IF1 request: lo is buffered
+       * but hi cannot be fetched yet. It delays the high line, so it sits in
+       * the high lane, the convention MinorFlow uses. */
+      if (if1hc > if2c + 1) band(if2c + 1, if1hc, sc(COL.feStall), 'fe stall', true);
+      if (hiMiss) {
+        band(if1hc, if1hc + 1, sc(COL.f1reqMiss_hi), 'if1 hi', true);
+        band(if1hc + 1, if2hc, sc(COL.f1stall_hi), 'icache stall hi', true);
       } else {
-        seg(if2c, if2c + 1, sc(COL.f2), 0.60, 'if2');
+        band(if1hc, if2hc, sc(COL.f1_hi), 'if1 hi', true);
       }
-      /* Hi fetch (wraps_line only). With sharesCycle, hi IF1's cycle is already
-       * inside the split cell above and is not drawn again. */
-      if (wrapsLine && if1hc != null && if2hc != null) {
-        /* Gap between the lo IF2 response and the hi IF1 request: the lo half
-         * is buffered but hi cannot be fetched yet (cache busy, FE FIFO
-         * backpressure, drain). Same convention as MinorFlow's feStall. */
-        if (!sharesCycle && if1hc > if2c + 1) {
-          seg(if2c + 1, if1hc, sc(COL.feStall), 0.60, 'fe stall');
-        }
-        /* On a hi miss the hi request cell is red (COL.f1reqMiss_hi) and the
-         * stall uses the distinct hi-line stall colour (COL.f1stall_hi). */
-        if (hiMiss) {
-          if (!sharesCycle) seg(if1hc, if1hc + 1, sc(COL.f1reqMiss_hi), 0.60, 'if1 hi');
-          if (if2hc > if1hc + 1) seg(if1hc + 1, if2hc, sc(COL.f1stall_hi), 0.60, 'icache stall hi');
-        } else {
-          /* Hit: one continuous if1-hi bar, minus the request half already
-           * drawn inside the split cell when sharesCycle. */
-          if (!sharesCycle) seg(if1hc, if2hc, sc(COL.f1_hi), 0.60, 'if1 hi');
-          else if (if2hc > if1hc + 1) seg(if1hc + 1, if2hc, sc(COL.f1_hi), 0.60, 'if1 hi');
-        }
-        seg(if2hc, if2hc + 1, sc(COL.f2_hi), 0.60, 'if2 hi');
-      }
+      band(if2hc, if2hc + 1, sc(COL.f2_hi), 'if2 hi', true);
     }
 
     function clip(ctx, s, maxW) {
@@ -3352,23 +3553,9 @@
       return `${totalNs.toFixed(0)} ns`;
     }
 
-    /* Classify stall cycles by cause across `records` within [cMin, cMax], a
-     * CVA6 adaptation of MinorFlow's classifier. Categories overlap, and a
-     * cycle stalled for two reasons counts once in totalStall.
-     *
-     *   FlushStall   - recovery after an Execute redirect or a fence /
-     *                  serializing flush (bubble + pre-fetch wait).
-     *   FetchStall   - the front-end cannot deliver a fetch: non-flush
-     *                  pre-fetch waits, the blocked slot in a line-spanning
-     *                  fetch, fe buf, plain id buf, predicted-taken steering.
-     *   DataStall    - issue / exec-buffer pre-execute wait, and id buf (reg).
-     *   DataMemStall - id buf (mem), waiting on a load result.
-     *   TotalStall   - deduplicated union of the four.
-     *
-     * Unlike MinorCPU, CVA6 decodes and issues in one cycle, so RAW waits
-     * surface a stage earlier as id buf rather than a held FU cell, and the
-     * LSU access (ex..wb) is work, not a stall. Cycles are absolute, so no
-     * rebasing. Every range matches a cell drawn by drawBars. */
+    /* Classify stall cycles by cause over [cMin, cMax], a CVA6 adaptation of
+     * MinorFlow's classifier. Categories overlap and a cycle stalled twice
+     * counts once in totalStall, whose members are named below. */
     const FLUSH_BUBBLE_KINDS = new Set(['mispred', 'unpred', 'flush_other']);
     function classifyStallCycles(records, lo, hi) {
       /* Producer ids referenced by in-window forwarding links: a load's fill
@@ -3390,10 +3577,9 @@
         for (let c = a; c <= b; c++) set.add(c);
       };
       for (const ins of records) {
-        /* Bubble kind read from the causer. Only the flush kinds (Execute
-         * redirects, fence / serializing flushes) are FlushStall. A
-         * predicted-taken steering bubble stays a FetchStall. ROW_BY_ID is the
-         * full map, so this resolves causers outside the window. */
+        /* Bubble kind read from the causer. Only the flush kinds are
+         * FlushStall, a predicted-taken steering bubble stays a FetchStall.
+         * ROW_BY_ID is the full map, so causers outside the window resolve. */
         let isFlushKind = false;
         if (ins.bubble_from_branch_id != null) {
           const causer = ROW_BY_ID.get(ins.bubble_from_branch_id);
@@ -3404,26 +3590,21 @@
           addRange(isFlushKind ? flushStall : fetchStall,
             ins.if1_lo - ins.bubble_cycles, ins.if1_lo);
         }
-        /* A wait on an instruction resuming after a flush is a consequence of
-         * that flush (FlushStall), otherwise FetchStall. It ends at
-         * if1_lo - bubble_cycles, matching the drawn 'wait' cell, and is
-         * counted regardless of the FE-stall toggle, which only controls
-         * drawing. CVA6 has no executeBranchDelay, so no redirectDelay term
-         * (port note section 40). */
+        /* A wait on an instruction resuming after a flush is FlushStall,
+         * otherwise FetchStall. It ends at if1_lo - bubble_cycles, matching
+         * the drawn cell, and ignores the FE-stall toggle, which only draws. */
         if (ins.pre_fetch_stall != null && ins.pre_fetch_stall > 0 && ins.if1_lo != null) {
           const gap = (ins.bubble_cycles != null && ins.bubble_cycles >= 1) ? ins.bubble_cycles : 0;
           addRange(isFlushKind ? flushStall : fetchStall,
             ins.if1_lo - ins.pre_fetch_stall, ins.if1_lo - gap);
         }
-        /* Structural stalls below are wrong-path work on a flushed record, and
-         * their cost is already counted as FlushStall via the resuming
-         * instruction's bubble. The attribution above is not skipped: it
-         * belongs to the resuming (non-flushed) instruction. */
+        /* Structural stalls below are wrong-path work on a flushed record,
+         * already counted as FlushStall via the resuming instruction's bubble.
+         * The attribution above belongs to that resuming instruction. */
         if (ins.flushed) continue;
-        /* Line-spanning fetch: the hi request could not issue until if1_hi.
-         * CVA6's icache blocks on a single outstanding miss, so the eligible
-         * point is the cycle after the lo response, which is correct at any
-         * icache latency (port note 42). Matches the drawn feStall cell. */
+        /* Line-spanning fetch: the hi request waits until if1_hi. CVA6's
+         * icache blocks on a single outstanding miss, so the eligible point is
+         * the cycle after the lo response, at any icache latency. */
         if (ins.wraps_line && ins.if1_hi != null && ins.if2_lo != null) {
           addRange(fetchStall, ins.if2_lo + 1, ins.if1_hi);
         }
@@ -3453,10 +3634,9 @@
         if (ins.is_cycle != null && ins.ex_cycle != null && ins.ex_cycle > ins.is_cycle + 1) {
           addRange(dataStall, ins.is_cycle + 1, ins.ex_cycle);
         }
-        /* A missed load's wait counts as DataMemStall only when an in-window
-         * instruction consumes its result, matching MinorFlow, where a lone
-         * load's fill is FU occupancy rather than a stall. A store miss drains
-         * after commit through the writeback path and is not counted. */
+        /* A missed load's wait is DataMemStall only when an in-window
+         * instruction consumes the result, as MinorFlow does. A store miss
+         * drains after commit through writeback and is not counted. */
         if (ins.fu === 'LOAD' && ins.dc_primary_miss && ins.ex_cycle != null
           && ins.wb_cycle != null && ins.wb_cycle > ins.ex_cycle + 1
           && consumedIds.has(ins.id)) {
@@ -3492,10 +3672,7 @@
       const brCommitted = ROWS.filter(r => r.fu === 'CTRL_FLOW' && !r.flushed).length;
       /* Intrinsic-span lower bound for the Cycles parenthetical: the earliest
        * architectural cycle of the visible records, plus a bubble lead-in only
-       * when its causer is also in the window. A bubble inherited from a
-       * branch outside the window is a consequence of a pre-window
-       * instruction, not work intrinsic to it. Never wider than the full
-       * span, which the headline Cycles figure reports. */
+       * when its causer is in the window too. Never wider than the full span. */
       const ARCH_KEYS_INTR = ['if1_lo', 'if2_lo', 'if1_hi', 'if2_hi', 'fe_cycle',
         'id_cycle', 'is_cycle', 'ex_cycle', 'wb_cycle', 'co_cycle'];
       let loIntrinsic = Infinity;
@@ -3518,18 +3695,14 @@
        * silent (bp_predicted_cf NoCF). Same convention as MinorFlow. */
       const misp = ROWS.filter(r => r.bp_mispredict && r.bp_predicted_cf !== 'NoCF').length;
       const unpred = ROWS.filter(r => r.bp_mispredict && r.bp_predicted_cf === 'NoCF').length;
-      /* Access and miss figures come from the cycle-keyed event arrays scoped
-       * to [cMin, cMax], the same signals the RTL performance counters
-       * (mhpmevent 16/17) report. The window figure therefore covers all cache
-       * activity in those cycles, including recordless page-table-walk
-       * traffic, not only the listed instructions. Traces where those signals
-       * were not dumped (empty arrays) fall back to per-record counts. */
+      /* Access and miss figures come from the cycle-keyed arrays scoped to
+       * [cMin, cMax], the same signals mhpmevent 16/17 report, so they include
+       * recordless PTW traffic. Traces without them fall back to records. */
       let ic;
       let icEventsInRange = 0;   // total accesses, derived from cache FSM when available
-      /* Record-attributed icache misses, keyed by fetch cycle so instructions
-       * sharing a fetch count once (CVA6 has a single fetch port). Shown in
-       * parentheses next to the window count, and the headline in the
-       * no-event-array fallback. */
+      /* Record-attributed icache misses keyed by fetch cycle, so instructions
+       * sharing a fetch count once, CVA6 having one fetch port. Shown in
+       * parentheses, and as the headline in the no-event-array fallback. */
       const icRecSet = new Set();
       for (const r of ROWS) {
         if (r.ic_miss && r.if1_lo != null) icRecSet.add(r.if1_lo);
@@ -3542,9 +3715,8 @@
       }
       const icRec = icRecSet.size;
       /* At the full window the cache metrics count every loaded event,
-       * including wind-down fetches after the last committed cycle, so the
-       * totals equal the tracer perf counters (and the config panel). A
-       * fetch-range filter re-imposes [cMin, cMax]. */
+       * wind-down fetches included, so the totals equal the tracer's counters.
+       * A fetch-range filter re-imposes [cMin, cMax]. */
       const fullWindow = !!(DATA && DATA.instructions && ROWS.length === DATA.instructions.length);
       /* Delivery-based miss count (one event per non-killed fetch delivery),
        * kept for the access count and the config-panel split. It omits
@@ -3574,10 +3746,8 @@
         ic = icRec;
       }
       /* Non-prefetch allocs in the window, which the cache reports as read
-       * misses. Being record-independent this includes page-table-walk, accel
-       * and cache-maintenance misses that have no record. The per-adapter
-       * split shows in the tooltip and config panel. Traces without the
-       * alloc-event array fall back to the per-record dc_primary_miss count. */
+       * misses. Being record-independent this includes PTW, accel and CMO
+       * misses. Without the array, per-record dc_primary_miss is used. */
       let dcLd = 0, dcSt = 0, dcOther = 0;
       if (DC_ALLOCS.length) {
         for (const ev of DC_ALLOCS) {
@@ -3646,11 +3816,9 @@
       document.getElementById('s-time').textContent = formatTime(cycles);
       document.getElementById('s-ica').textContent = icAcc.toLocaleString();
       if (DC_ACC_CYCLES.length) {
-        /* Headline is the hardware access-cycle count. The parenthetical is the
-         * ld+st record count, deliberately a different, smaller number because
-         * the cycle count also sees PTW reads, miss retries and atomic
-         * sub-accesses. Shown as one figure rather than an ld / st split that
-         * would look like it should add up to the headline. */
+        /* The headline is the hardware access-cycle count and the
+         * parenthetical the ld+st record count, deliberately smaller since the
+         * cycle count also sees PTW reads, retries and atomic sub-accesses. */
         document.getElementById('s-dca').textContent =
           `${dcAcc.toLocaleString()} (${(nLoads + nStores).toLocaleString()} ld+st records)`;
       } else {
@@ -3685,7 +3853,7 @@
       document.getElementById('s-tot').textContent =
         ROWS.length ? String(dispId(ROWS[ROWS.length - 1].id)) : '-';
       updateVisibleReadout();
-      const wbStat = DATA.metadata && DATA.metadata.stats && DATA.metadata.stats.phase7b;
+      const wbStat = DATA.metadata && DATA.metadata.stats && DATA.metadata.stats.writeback;
       const awl = wbStat && wbStat.axi_write_latency;
       const head = document.getElementById('wbstat');
       if (!WBS.length) { head.textContent = 'none'; return; }
@@ -3934,12 +4102,9 @@
       }
 
       if (IC_EVENTS.length || st.icache_event_count != null) {
-        /* Counted from the loaded IC_EVENTS array rather than the whole-run
-         * metadata, so the figures match the status bar and stay correct for a
-         * shortened load. Without the array, misses are recomputed from the
-         * per-record ic_miss flags deduped by fetch cycle, as the status bar
-         * does, and wlMiss prefers ic_miss_hi over the if2_hi-if1_hi>1
-         * fallback. */
+        /* Counted from the loaded IC_EVENTS array rather than whole-run
+         * metadata, so the figures match the status bar on a shortened load.
+         * Without it, misses come from ic_miss deduped by fetch cycle. */
         const hasIcEvents = IC_EVENTS.length > 0;
         const inWin = e => e.fe2 != null;
         const icEvCount = hasIcEvents ? IC_EVENTS.filter(inWin).length : 0;
@@ -3971,11 +4136,9 @@
           return r.if1_hi != null && r.if2_hi != null && r.if2_hi - r.if1_hi > 1;
         }).length;
         const minHit = minHitLatency('if');
-        /* The ICache reads the full line from SRAM (ICACHE_LINE_WIDTH) and
-         * selects FETCH_WIDTH bits at the requested word offset (32 in default
-         * CVA6, 64 with SuperscalarEn). The row appears whenever FETCH_WIDTH is
-         * known. The line width is appended only when the metadata carries the
-         * cache geometry. */
+        /* The ICache reads a full line from SRAM and selects FETCH_WIDTH bits
+         * at the requested offset, 32 by default and 64 with SuperscalarEn.
+         * The line width is appended only when the metadata carries it. */
         const fwRow = [];
         const fw = cp.FETCH_WIDTH, lw = cp.ICACHE_LINE_WIDTH, ipf = cp.INSTR_PER_FETCH;
         if (fw != null) {
@@ -4011,12 +4174,9 @@
         sections.push({ title: 'Instruction cache', rows: icRows });
       }
 
-      /* The sections below are derived from the loaded event arrays, so they
-       * match the status bar and stay correct for a shortened load. A few
-       * DCache miss-handler internals and the raw eviction count cannot be
-       * reconstructed from those arrays and appear only when !isPartial.
-       * Adapter mapping mirrors the status bar: sid 1 = load, sid 3 = store,
-       * anything else = other, and prefetches are skipped. */
+      /* The sections below come from the loaded event arrays, so they match
+       * the status bar on a shortened load. A few miss-handler internals appear
+       * only when !isPartial. Adapters: sid 1 load, sid 3 store, else other. */
       let dcMissTot = 0, dcMissLd = 0, dcMissSt = 0, dcMissOther = 0;
       for (const ev of DC_ALLOCS) {
         if (ev.pf === 1) continue;
@@ -4026,8 +4186,8 @@
         else dcMissOther++;
       }
 
-      const p6b = st.phase6b || {};
-      if (DC_ALLOCS.length || Object.keys(p6b).length) {
+      const dcSt = st.dcache || {};
+      if (DC_ALLOCS.length || Object.keys(dcSt).length) {
         const minHit = minHitLatency('dc');
         const dcRows = [
           ['accesses' + accNote, DC_ACC_CYCLES.length
@@ -4046,13 +4206,13 @@
             'Page-table-walk, accelerator, or cache-maintenance allocations (any adapter other than load or store).']);
         }
         if (!isPartial) {
-          dcRows.push(['event pulses', fmtCfg(p6b.total_dc_events),
+          dcRows.push(['event pulses', fmtCfg(dcSt.total_dc_events),
             'Pulses from the miss handler. Includes miss allocations, check pulses, and refill responses. Cache hits do not appear here. A single miss can generate multiple pulses. Whole-run figure from the tracer.']);
-          dcRows.push(['refill active cycles', fmtCfg(p6b.rfsm_active_cycles),
+          dcRows.push(['refill active cycles', fmtCfg(dcSt.rfsm_active_cycles),
             'Cycles the cache refill machine was busy. Whole-run figure from the tracer.']);
-          dcRows.push(['coalesced loads', fmtCfg(p6b.n_coalesced_loads),
+          dcRows.push(['coalesced loads', fmtCfg(dcSt.n_coalesced_loads),
             'Loads that joined an in-flight miss for the same line. Whole-run figure from the tracer.']);
-          dcRows.push(['refill overlap loads', fmtCfg(p6b.n_refill_overlap_loads),
+          dcRows.push(['refill overlap loads', fmtCfg(dcSt.n_refill_overlap_loads),
             'Loads served while a refill for the same line was already in progress. Whole-run figure from the tracer.']);
         }
         dcRows.push(['observed load hit latency',
@@ -4061,11 +4221,9 @@
         sections.push({ title: 'Data cache', rows: dcRows });
       }
 
-      /* A resolution is a control-flow record that reached execute. Ones that
-       * needed a redirect split by bp_predicted_cf into mispredicted (a wrong
-       * verdict) and unpredicted (NoCF, silent), the rest are correct. The
-       * three sum to the resolutions. Accuracy is correct over resolutions,
-       * counting an unpredicted redirect as wrong, the basis MinorFlow uses. */
+      /* A resolution is a control-flow record that reached execute. Those
+       * needing a redirect split into mispredicted and unpredicted, the rest
+       * are correct. Accuracy counts an unpredicted redirect as wrong. */
       const cfRecs = DATA.instructions.filter(r => r.fu === 'CTRL_FLOW');
       const bpCF = cfRecs.length;
       const bpCommitted = cfRecs.filter(r => !r.flushed).length;
@@ -4078,8 +4236,8 @@
       const bpNotTaken = cfRecs.filter(r => r.ex_cycle != null && r.bp_resolved_taken === false).length;
       const bpAcc = bpResolv > 0 ? ((bpCorrect / bpResolv) * 100) : null;
 
-      const p7a = st.phase7a || {};
-      if (bpCF > 0 || Object.keys(p7a).length) {
+      const bpSt = st.branch_pred || {};
+      if (bpCF > 0 || Object.keys(bpSt).length) {
         /* Predictor capacity from the trace config constants, when present. */
         const bhtEntries = cp.BHTEntries;
         const btbEntries = cp.BTBEntries;
@@ -4116,10 +4274,9 @@
         sections.push({ title: 'Branch behaviour (observed)', rows: brRows });
       }
 
-      /* Each WBS entry is a dirty-line writeback with its alloc, send and ack
-       * cycles and the eviction that caused it. The raw eviction count also
-       * counts clean evictions, which produce no writeback, so it is not in
-       * this array and appears only for a whole-run load. */
+    /* Each WBS entry is a dirty-line writeback with its alloc, send and ack
+     * cycles and the eviction behind it. The raw eviction count also counts
+     * clean evictions, so it is separate and whole-run only. */
       let wbAlloc = 0, wbSend = 0, wbAck = 0, wbMatched = 0, wbAckNoSend = 0, wbSendNoAck = 0, wbLinked = 0;
       const wbLats = [];
       for (const w of WBS) {
@@ -4134,7 +4291,7 @@
         if (w.axi_write_latency != null) wbLats.push(w.axi_write_latency);
       }
 
-      const p7b = st.phase7b || {};
+      const wbSt = st.writeback || {};
       if (WBS.length) {
         const wbRows = [
           ['allocations / sends / acks',
@@ -4145,7 +4302,7 @@
             'Should be near 100 percent matched.'],
         ];
         if (!isPartial) {
-          wbRows.push(['eviction samples', fmtCfg(p7b.n_evictions),
+          wbRows.push(['eviction samples', fmtCfg(wbSt.n_evictions),
             'Raw eviction events seen, before joining to writebacks. Includes clean evictions that produce no writeback, so it is a whole-run figure from the tracer.']);
         }
         wbRows.push(['writebacks linked to evictions', `${wbLinked.toLocaleString()} of ${WBS.length.toLocaleString()}`,
@@ -4203,9 +4360,8 @@
     }
 
     /* Sweep-line maximum of overlapping occupancy intervals per buffer region,
-     * built from committed records. Intervals are half-open [enter, leave), so
-     * an instruction that transits a buffer in one cycle counts as 0. Returns
-     * {fe, id, is, sb}, or null if ROWS is empty. */
+     * from committed records. Intervals are half-open, so a one-cycle transit
+     * counts as 0. Returns {fe, id, is, sb}, or null when ROWS is empty. */
     function computeBufferPeaks() {
       if (!ROWS || !ROWS.length) return null;
       function peak(intervals) {
@@ -4241,11 +4397,9 @@
       }
       return { fe: peak(fe), id: peak(id), is: peak(is), sb: peak(sb) };
     }
-    /* Phase 8a forwarding: resolve each consumer's producer by trans_id
-     * timeline. The scoreboard reuses its slots, so the producer is the
-     * most-recent record with a matching trans_id whose wb_cycle is <=
-     * consumer.is_cycle. Stamped as fwd_rs{1,2,3}_producer_id (null if
-     * unresolved) so the popup and the arrows need no rescan of ROWS. */
+    /* Resolve each consumer's producer by trans_id timeline. Slots are reused,
+     * so the producer is the most recent record with that trans_id whose
+     * wb_cycle is at or before consumer.is_cycle. Stamped for the popup. */
     function precomputeForwardingProducers() {
       const tidMap = new Map();
       for (const r of ROWS) {
@@ -4334,20 +4488,327 @@
       }
     }
     /* Hiding the left label panel gives the timeline the full width. */
+
+    /* ============================================================================
+     * Label column resize, drop-to-load, manual zoom entry, metric copy
+     * ========================================================================== */
+
+    /* The label column's width lives in CSS on more than one element, the
+     * column and the header above it. The drag writes an inline width to each
+     * so they cannot drift, then the canvases are re-measured. */
+    const LBL_WIDTH_IDS = ['lblpanel', 'wbhead'];
+    /* Resize limits taken from the content, not fixed pixels. The minimum
+     * still shows the Find PC control in full, the maximum the longest mnemonic
+     * or the header key. Both measured live, so they follow font and program. */
+    const LBL_W_HARD_MAX = 720;
+    function lblWidthMin() {
+      const arrow = document.getElementById('pcnext');
+      const head = document.getElementById('lblhead');
+      if (!arrow || !head) return 140;
+      const a = arrow.getBoundingClientRect(), hd = head.getBoundingClientRect();
+      const w = Math.ceil(a.right - hd.left) + 6;
+      /* Stop short of the legend keys. A margin measured from the arrow alone
+       * let the first few pixels of the compressed key show at the narrowest
+       * width, so the minimum is also held below the key's left edge. */
+      const key = head.querySelector('.lgnd');
+      if (key) {
+        const kl = Math.floor(key.getBoundingClientRect().left - hd.left) - 2;
+        if (kl > 0) return Math.max(80, Math.min(w, kl));
+      }
+      return Math.max(80, w || 140);
+    }
+    /* Widest label row, measured from the text alone. Every layout read is a
+     * way for the ceiling to follow the column it caps, as reading scrollWidth
+     * did, so the row is rebuilt here from the CSS constants instead. */
+    const LBL_PAD_X = 6;   /* .lblrow padding, left and right */
+    const LBL_GAP = 6;            /* .lblrow gap between the columns */
+    let _lblContentW = null;
+    function invalidateLabelContentWidth() { _lblContentW = null; }
+    function labelContentWidth() {
+      if (_lblContentW != null) return _lblContentW;
+      const rows = (typeof ROWS !== 'undefined' && ROWS) ? ROWS : [];
+      if (!rows.length) return (_lblContentW = 0);
+      let probe = null;
+      try { probe = document.createElement('canvas').getContext('2d'); } catch (e) { probe = null; }
+      if (!probe) return (_lblContentW = 0);
+      /* Only the longest few strings need measuring: in one font a shorter
+       * string cannot be wider. */
+      const longest = (list, n) => list.sort((a, b) => b.length - a.length).slice(0, n);
+      const widestOf = (list, font) => {
+        probe.font = font;
+        let w = 0;
+        for (const t of list) {
+          const m = probe.measureText(t);
+          if (m && m.width > w) w = m.width;
+        }
+        return w;
+      };
+      const mnems = [], pcs = [], ids = [];
+      let anyMark = false;
+      for (const r of rows) {
+        const t = dispMnem(r);
+        if (t) mnems.push(t);
+        if (r.pc) pcs.push(String(r.pc));
+        ids.push(String(dispId(r.id)));
+        if (!anyMark && (r.is_compressed || r.wraps_line)) anyMark = true;
+      }
+      if (!mnems.length) return (_lblContentW = 0);
+      const mnemW = widestOf(longest(mnems, 24), `10px ${FONT_SANS}`);
+      const pcW = widestOf(longest(pcs, 4), `9px ${FONT_MONO}`);
+      const idW = widestOf(longest(ids, 4), `9px ${FONT_MONO}`);
+      /* The marker column holds at most the compressed and wraps glyphs. */
+      const markW = anyMark ? widestOf(['\u25aa\u21aa'], `10px ${FONT_SANS}`) : 0;
+      const gaps = LBL_GAP * (anyMark ? 3 : 2);
+      return (_lblContentW =
+        Math.ceil(LBL_PAD_X * 2 + idW + pcW + markW + mnemW + gaps) + 4);
+    }
+    function lblWidthMax() {
+      const cap = Math.max(200, Math.round((window.innerWidth || 1200) * 0.8));
+      let widest = 0;
+      const head = document.getElementById('lblhead');
+      if (head) {
+        const hd = head.getBoundingClientRect();
+        /* The legend keys sit at the end of the header, so their right edge is
+         * the width at which "wraps fetch line" becomes readable. That is the
+         * floor for the ceiling, used on its own when no labels are loaded. */
+        for (const k of head.querySelectorAll('.lgnd')) {
+          const r = k.getBoundingClientRect();
+          /* Bounded: this is the one layout read left, and a legend cannot
+           * sensibly need more than a few hundred pixels. */
+          if (r.width) widest = Math.max(widest, Math.min(420, Math.ceil(r.right - hd.left) + 8));
+        }
+      }
+      widest = Math.max(widest, labelContentWidth());
+      /* LBL_W_HARD_MAX is a backstop: whatever the measurements say, the column
+       * never grows past a width no real mnemonic needs. */
+      return Math.min(cap, LBL_W_HARD_MAX, Math.max(lblWidthMin() + 40, widest || 390));
+    }
+    function setLabelWidth(px) {
+      const lo = lblWidthMin();
+      const w = Math.max(lo, Math.min(Math.max(lo, lblWidthMax()), Math.round(px)));
+      for (const id of LBL_WIDTH_IDS) {
+        const el = document.getElementById(id);
+        if (!el) continue;
+        el.style.width = w + 'px';
+        el.style.minWidth = w + 'px';
+      }
+      /* The handle is out of flow, so it has to be moved onto the new boundary
+       * explicitly. */
+      for (const grip of document.querySelectorAll('.lblgrip')) grip.style.left = w + 'px';
+      placeLabelGrip();
+      return w;
+    }
+    function relayoutAfterLabelResize() { if (DATA) { setupGeometry(); redraw(); } }
+    /* One grip spanning every row that stays aligned with the label column,
+     * rather than one per row, which left a visible break between them. It
+     * lives in #view and shrinks with the writeback panel. */
+    /* Bring the column inside the limits the freshly loaded program implies.
+     * The stylesheet default can sit outside the measured range when the
+     * mnemonics are short. Deferred so the rows can be measured. */
+    function clampLabelWidthToContent() {
+      requestAnimationFrame(() => {
+        invalidateLabelContentWidth();
+        const panel = document.getElementById('lblpanel');
+        if (!panel) return;
+        const cur = parseFloat(panel.style.width)
+          || panel.getBoundingClientRect().width || 390;
+        setLabelWidth(cur);
+      });
+    }
+
+    let _lblClamped = false;
+    function placeLabelGrip() {
+      const grip = document.getElementById('lblresize');
+      const view = document.getElementById('view');
+      const head = document.getElementById('lblhead');
+      if (!grip || !view) return;
+      const vr = view.getBoundingClientRect();
+      const hr = (head || document.getElementById('lblpanel') || view).getBoundingClientRect();
+      const top = Math.max(0, Math.round(hr.top - vr.top));
+      grip.style.top = top + 'px';
+      /* Stop at the bottom of the last row aligned with the column. The status
+       * bar is inside #view, so running to the container's bottom drew the grip
+       * across it. Using the writeback panel makes the grip shrink with it. */
+      const rows = ['wbpanel', 'main', 'area'].map(id => document.getElementById(id))
+        .filter(el => el && el.getBoundingClientRect().height > 0
+          && el.style.display !== 'none');
+      let bottom = 0;
+      if (rows.length) {
+        const low = rows.reduce((acc, el) => {
+          const b = el.getBoundingClientRect().bottom;
+          return b > acc ? b : acc;
+        }, -Infinity);
+        bottom = Math.max(0, Math.round(vr.bottom - low));
+      }
+      grip.style.bottom = bottom + 'px';
+    }
+
+    (function initLabelResize() {
+      /* One grip per row aligned with the label column: the timeline, the
+       * cycle-number row above and the writeback row below. Separate elements,
+       * each absolutely placed in its own row, dragged as one column. */
+      const grips = [...document.querySelectorAll('.lblgrip')];
+      if (!grips.length) return;
+      const seed = document.getElementById('lblpanel');
+      const seedW = ((seed && seed.getBoundingClientRect().width) || 390) + 'px';
+      for (const g of grips) g.style.left = seedW;
+      placeLabelGrip();
+      let dragging = false;
+      for (const handle of grips) {
+        handle.addEventListener('mousedown', e => {
+          dragging = true;
+          for (const g of grips) g.classList.add('drag');
+          e.preventDefault();
+        });
+      }
+      window.addEventListener('mousemove', e => {
+        if (!dragging) return;
+        const panel = document.getElementById('lblpanel');
+        if (!panel) return;
+        /* Width from the panel's own left edge, so the handle tracks the
+         * pointer regardless of what sits to the left of the column. */
+        setLabelWidth(e.clientX - panel.getBoundingClientRect().left);
+        relayoutAfterLabelResize();
+        e.preventDefault();
+      });
+      window.addEventListener('mouseup', () => {
+        if (!dragging) return;
+        dragging = false;
+        for (const g of grips) g.classList.remove('drag');
+        relayoutAfterLabelResize();
+      });
+      /* A narrower window can leave the column wider than the new ceiling. */
+      window.addEventListener('resize', () => {
+        const panel = document.getElementById('lblpanel');
+        if (!panel || !panel.style.width) return;
+        setLabelWidth(parseFloat(panel.style.width));
+      });
+    })();
+
+    /* A trace dropped anywhere on the page loads it. Otherwise the drop lands
+     * on the document once the dropzone is gone and the browser navigates to
+     * the raw JSON. The dropzone's own handler only clears its highlight. */
+    document.addEventListener('dragover', e => { e.preventDefault(); });
+    document.addEventListener('drop', e => {
+      e.preventDefault();
+      const dz = document.getElementById('dropzone');
+      if (dz) dz.classList.remove('ov');
+      const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+      if (f) loadF(f);
+    });
+
+    /* The zoom readout is editable, so the number goes in its field and the
+     * unit and any range note go in the span beside it. */
+    function showZoomValue(cw, rangeLimited) {
+      const inp = document.getElementById('zoom-val');
+      if (inp && document.activeElement !== inp) {
+        /* Show the value that is actually in force, decimals and all. Rounding
+         * the display to a whole pixel made a typed 12.34 read back as 12,
+         * so committing the box a second time silently changed the zoom. */
+        inp.value = String(Math.round(cw * 100) / 100);
+      }
+      const note = document.getElementById('zoom-note');
+      if (note) note.textContent = 'px' + (rangeLimited ? ' (max for this range)' : '');
+    }
+    /* Manual zoom entry, any real number above zero, clamped to the window's
+     * usable ceiling past which the inner element exceeds the browser's pixel
+     * limit. Sub-pixel values are allowed, Fit All produces them. */
+    /* Live filter for the zoom box: digits, one decimal point, two decimals.
+     * No clamping here, a value below the minimum can be the prefix of a valid
+     * larger one still being typed. setZoomTo clamps on commit. */
+    function onZoomInput(el) {
+      let v = el.value.replace(/[^0-9.]/g, '');
+      const first = v.indexOf('.');
+      if (first >= 0) v = v.slice(0, first + 1) + v.slice(first + 1).replace(/\./g, '');
+      const dot = v.indexOf('.');
+      if (dot >= 0 && v.length > dot + 3) v = v.slice(0, dot + 3);
+      if (v !== el.value) el.value = v;
+    }
+    function setZoomTo(raw) {
+      const v = parseFloat(String(raw).replace(',', '.'));
+      const cap = Math.min(maxSafeCellW(), MAX_CELL);
+      if (!isFinite(v) || v <= 0) { showZoomValue(cellW, false); return; }
+      /* Clamped to one pixel per cycle at the low end and to this window's
+       * ceiling at the high end, then rounded to the two decimals the box
+       * accepts, so what is applied is exactly what the box ends up showing. */
+      const target = Math.round(Math.max(1, Math.min(v, cap)) * 100) / 100;
+      const sl = document.getElementById('zx');
+      if (sl) {
+        const safeCW = Math.min(MAX_CELL, Math.max(MIN_CELL, Math.floor(maxSafeCellW())));
+        sl.max = String(safeCW);
+        sl.value = String(Math.max(MIN_CELL, Math.min(safeCW, Math.round(target))));
+      }
+      setZoom(target);
+    }
+
+    /* Copy every metric from Cycles to Stall, one "Label: value" per line. The
+     * labels are read back out of the bar rather than duplicated here, so a
+     * wording change cannot leave the copy out of step with the display. */
+    const METRIC_COPY_IDS = ['s-cyc', 's-fet', 's-cmt', 's-flsh', 's-cmp', 's-wrp',
+      's-icm', 's-dcm', 's-ica', 's-dca', 's-br', 's-misp', 's-unpred', 's-time',
+      's-ipc', 's-stall-flush', 's-stall-fetch', 's-stall-data', 's-stall-dmem',
+      's-stall'];
+    function copyMetrics() {
+      const lines = [];
+      for (const id of METRIC_COPY_IDS) {
+        const el = document.getElementById(id);
+        if (!el || !el.parentElement) continue;
+        const txt = el.parentElement.textContent.replace(/\s+/g, ' ').trim();
+        if (txt) lines.push(txt);
+      }
+      const text = lines.join('\n');
+      const btn = document.getElementById('copy-metrics');
+      const prev = btn ? btn.textContent : '';
+      const done = ok => {
+        if (!btn) return;
+        btn.textContent = ok ? 'Copied' : 'Copy failed';
+        setTimeout(() => { btn.textContent = prev; }, 1200);
+      };
+      /* execCommand fallback: a page opened straight off the filesystem is not
+       * a secure context in every browser, and the async clipboard API is
+       * unavailable there. */
+      const fallback = () => {
+        try {
+          const ta = document.createElement('textarea');
+          ta.value = text;
+          ta.style.position = 'fixed';
+          ta.style.opacity = '0';
+          document.body.appendChild(ta);
+          ta.select();
+          const ok = document.execCommand('copy');
+          document.body.removeChild(ta);
+          done(ok);
+        } catch (err) { done(false); }
+      };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(() => done(true), fallback);
+      } else {
+        fallback();
+      }
+    }
+
+    /* Anchor for zooming, the cycle held at the viewport centre and carried
+     * across consecutive zooms. Re-deriving it from the whole-cycle origin
+     * rounds away a fraction each time and the view creeps sideways. */
+    let zoomAnchorCyc = null;
+    let zoomAnchorScrollX = null;
     let LBL_PANEL_HIDDEN = false;
     function toggleLabelPanel() {
       LBL_PANEL_HIDDEN = !LBL_PANEL_HIDDEN;
       const panel = document.getElementById('lblpanel');
       const wbhead = document.getElementById('wbhead');
       const btn = document.getElementById('lblToggleBtn');
+      const grip = document.getElementById('lblresize');
       if (LBL_PANEL_HIDDEN) {
         panel.style.display = 'none';
         wbhead.style.display = 'none';
-        btn.textContent = '\u25b6 Show labels';
+        if (grip) grip.style.display = 'none';
+        btn.textContent = '\u25b6 Show Labels';
       } else {
         panel.style.display = '';
         wbhead.style.display = '';
-        btn.textContent = '\u25c0 Hide labels';
+        if (grip) grip.style.display = '';
+        btn.textContent = '\u25c0 Hide Labels';
       }
       /* Read the new widths on the next frame: the display change has not been
        * reflowed yet, so setupGeometry would otherwise size the canvases to
@@ -4367,10 +4828,9 @@
       document.getElementById('s-f').textContent = '-';
       document.getElementById('s-p').textContent = '-';
     });
-    /* Find by instruction memory address, over the current fetch window. The
-     * query is hexadecimal (a leading 0x is accepted) and matches anywhere in
-     * the normalised PC. The arrows or Enter (Shift+Enter backwards) step
-     * through the matches, focusing each like the fetch-range boxes do. */
+    /* Find by instruction address over the current fetch window. The query is
+     * hexadecimal, a leading 0x accepted, and matches anywhere in the
+     * normalised PC. Arrows or Enter step through the matches. */
     const PCF = { matches: [], cur: -1, highlightRow: -1 };
     function pcNormHex(v) {
       return String(v || '').toLowerCase().trim().replace(/^0x/, '').replace(/[^0-9a-f]/g, '');
@@ -4549,13 +5009,9 @@
       const ctx = max > 0 ? ` <span style="color:#505050">(max ${max})</span>` : '';
       return `<td style="color:${colorizeWait(v, max)}">${v}c${ctx}</td>`;
     }
-    /* Stage indicator (tooltip bottom). getStagesCVA names the drawn cells at
-     * cycle c using the same boundaries as drawBars / renderIF12 and the legend
-     * labels, so the indicator and the picture agree. It returns a list because
-     * some cells carry coincident sub-stages (a miss marker on the IF1 request,
-     * a shared lo-IF2 / hi-IF1 cell, an LSU strip over execute). stageColorCVA
-     * maps a label back to its colour, and legibleOnDark lifts the darkest cell
-     * colours to a readable brightness on the tooltip. */
+    /* Stage indicator for the tooltip. getStagesCVA names the drawn cells at
+     * cycle c on the same boundaries as drawBars, returning a list because some
+     * cells carry coincident sub-stages. stageColorCVA maps a label back. */
     function legibleOnDark(hex) {
       let h = String(hex).replace('#', '');
       if (h.length === 3) h = h.split('').map(c => c + c).join('');
@@ -4752,7 +5208,7 @@
       })() : null;
 
       let html = '';
-      html += `<div style="font-weight:500;color:#e4e2dc">${escapeHtml(dispMnem(r) || (r.fu || ''))}${r.is_compressed ? ' <span style="color:#3ec0b0;font-size:10px">▪ compressed</span>' : ''}${r.wraps_line ? ' <span style="color:#f0a030;font-size:10px">↪ wraps fetch line</span>' : ''}${r.flushed ? ' <span style="color:#c07070;font-size:10px">✗ flushed (wrong path)</span>' : ''}</div>`;
+      html += `<div style="font-weight:500;color:#e4e2dc">${escapeHtml(dispMnem(r, true) || (r.fu || ''))}${r.is_compressed ? ' <span style="color:#3ec0b0;font-size:10px">▪ compressed</span>' : ''}${r.wraps_line ? ' <span style="color:#f0a030;font-size:10px">↪ wraps fetch line</span>' : ''}${r.flushed ? ' <span style="color:#c07070;font-size:10px">✗ flushed (wrong path)</span>' : ''}</div>`;
       html += `<div style="color:#505050;font-size:10px;margin-bottom:6px">${escapeHtml(r.pc || '')} · #${dispId(r.id)}${r.trans_id != null ? ` · tid ${r.trans_id}` : ''}</div>`;
       /* Bubble this instruction caused downstream, shown in the Branch section
        * (or Serialize / flush for non-branches) as MinorFlow does. The bubble
@@ -4766,11 +5222,9 @@
           + `<td><b>${r.bubble_caused_cycles}c</b> ${meta.txt} `
           + `<span style="color:#505050">on resuming ${recDisp}</span></td></tr>`;
       }
-      /* Cycles this instruction waited before its own fetch because an upstream
-       * branch or flush drained the pipeline. Counted by the flush recovery
-       * metric, so it appears both as a Pipeline lead-in and as a Stalls row
-       * feeding the total, as in MinorFlow. Kind and colour come from the
-       * causer. */
+      /* Cycles this instruction waited before its own fetch because an
+       * upstream branch or flush drained the pipeline. Counted by the flush
+       * recovery metric, so it shows as lead-in and as a Stalls row. */
       const sufBubCyc = (r.bubble_from_branch_id != null && r.bubble_cycles != null && r.bubble_cycles >= 1)
         ? r.bubble_cycles : 0;
       const sufBubCauser = sufBubCyc ? ROW_BY_ID.get(r.bubble_from_branch_id) : null;
@@ -4827,9 +5281,8 @@
       }
       html += `<tr><td>CO</td><td>${cyc(r.co_cycle)}</td></tr>`;
       /* Stalls. Rows appear only when positive, as in MinorFlow. FU compute
-       * latency is deliberately not a stall row and not in the total: the
-       * classifier behind the Stall metric does not count compute time either,
-       * so the tooltip and the metric stay consistent. */
+       * latency is deliberately not a stall row and not in the total, matching
+       * the classifier behind the Stall metric. */
       const idkTip = idBufKind(r);
       const idLbl = idkTip === 'memhzd' ? 'ID buf (mem)'
         : idkTip === 'hzd' ? 'ID buf (reg)' : 'ID buf';

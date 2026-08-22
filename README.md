@@ -23,10 +23,7 @@ python3 run_CVA6.py cv64a6_imafdc_sv39_hpdcache daxpy.S
 Then turn the VCD into a trace:
 
 ```bash
-python3 CVA6Flow_tracer.py sim.vcd -o trace.json \
-    --user-entry-pc 0x80003000 \
-    --user-end-pc 0x8000314c \
-    --disasm-list test.dump
+python3 CVA6Flow_tracer.py sim.vcd -o trace.json --disasm-list trace.list
 ```
 
 Then open `CVA6Flow.html` in any browser and drag `trace.json` onto the window. There is nothing to install and nothing to serve. The viewer is a single self-contained HTML file with no dependencies.
@@ -44,8 +41,6 @@ python3 CVA6Flow_tracer.py <vcd_path> [options]
 | `vcd_path` | Path to the Verilator-generated `.vcd` |
 | `-o`, `--output` | Output JSON path. Defaults to `<vcd_basename>.json` |
 | `--scope-prefix` | Hierarchical prefix prepended to each whitelisted signal. Defaults to `TOP.ariane_testharness.i_ariane.i_cva6` |
-| `--user-entry-pc` | Hex PC of `main`, used to find the warmup boundary. Everything committed before the first hit is marked as warmup |
-| `--user-end-pc` | Hex PC of the last instruction of user code, typically the `jal ra, <exit>`. The viewer's `Main code` button uses it as the upper bound of the user-program range |
 | `--disasm-list` | Path to an `objdump -dS` listing of the test ELF. Populates each record's `disasm` field by PC lookup. Records outside the listing, such as bootrom, keep `disasm=None` |
 | `--stages` | Print per-stage resolution diagnostics on stderr |
 | `--quiet` | Suppress the streaming progress indicator |
@@ -70,7 +65,7 @@ What it does, in order:
 
 1. **Rebuilds.** Removes `/cva6/work-ver` so Verilator recompiles the core, unless `--keep-build` says to reuse it. Then sources `verif/sim/setup-env.sh` and runs `cva6.py` against `veri-testharness` with the project's linker script and the `syscalls.c` / `crt.S` runtime. Tracing is enabled through `TRACE_FAST` unless `--no-vcd` is given, and because that is a build-time define, changing it changes the model.
 2. **Disassembles.** Runs `objdump -d -S -l` over the compiled `.o` into `<test>.list`, the full listing the tracer wants for `--disasm-list`, and prints only the measured region, the part between the `MAIN PROGRAM` and `END OF MAIN PROGRAM` markers, saving it as `<test>_report.txt` under a `DISASSEMBLED CODE` banner and closed by an `END OF DISASSEMBLED CODE` one.
-3. **Extracts the metrics.** The test leaves its counter deltas in `s2`–`s10` (`x18`–`x26`) before exiting, and the script recovers them from the simulation log by register.
+3. **Extracts the metrics.** The test leaves its counter deltas in `s2` to `s10` (`x18` to `x26`) before exiting, and the script recovers them from the simulation log by register.
 4. **Prints the table.** Cycles, instructions, I-cache and D-cache misses and accesses, branches, mispredictions plus unpredicted, elapsed microseconds and IPC. Two columns: `OFFICIAL` as measured, and `NET` with the fixed cost of the measurement code itself subtracted, so a short kernel is not swamped by its own instrumentation. The table is appended to `<test>_report.txt` below the disassembly, in its own banner, so the two sections can be told apart at a glance. Its title line names the simulator, the program and the L1 geometry the run used, read from the target's `core/include/<target>_config_pkg.sv`, and the line under it names the CVA6 target.
 
 Outputs land under `verif/sim/out_<date>/`: the VCD and the log in `veri-testharness_sim/`, and the binary, the `.list` and the `_report.txt` in `directed_tests/`.
@@ -89,7 +84,7 @@ The script assumes the CVA6 checkout is at `/cva6`, which is where the Docker im
 
 ### Writing a test
 
-[benchmarks/](benchmarks/) holds the tests used to develop CVA6Flow, and `test_template.c` and `test_template.S` are the starting points. The template configures the PMU (`mhpmevent3` through `mhpmevent8` for cache misses, cache accesses, branches and mispredictions), snapshots `mcycle`, `minstret` and the counters, leaves a `MAIN PROGRAM` / `END OF MAIN PROGRAM` region for your code, and then snapshots again and moves the deltas into `s2`–`s10`. Write inside the markers and the driver measures and disassembles exactly that region.
+[benchmarks/](benchmarks/) holds the tests used to develop CVA6Flow, and `test_template.c` and `test_template.S` are the starting points. The template configures the PMU (`mhpmevent3` through `mhpmevent8` for cache misses, cache accesses, branches and mispredictions), snapshots `mcycle`, `minstret` and the counters, leaves a `MAIN PROGRAM` / `END OF MAIN PROGRAM` region for your code, and then snapshots again and moves the deltas into `s2` to `s10`. Write inside the markers and the driver measures and disassembles exactly that region.
 
 ## Configuration and parameter sweeps
 
@@ -162,12 +157,12 @@ The canonical configuration is `cv64a6_imafdc_sv39_hpdcache_wb`. Scoreboard dept
 
 ## What the viewer shows
 
-Per instruction: fetch, decode, issue, execute, writeback and commit cycles, the allocated trans_id, whether it was flushed and why, and whether it belongs to warmup or to user code. Instruction words are masked to 16 bits when compressed, and disassembly is shown when a listing is supplied.
+Per instruction: fetch, decode, issue, execute, writeback and commit cycles, the allocated trans_id, and whether it was flushed and why. Instruction words are masked to 16 bits when compressed, and disassembly is shown when a listing is supplied.
 
 A few things worth calling out:
 
 - **Forwarding arrows** from each producer to its consumer, distinguishing back-to-back writeback forwarding from values that sat in the scoreboard before issue.
-- **Measurement-region filtering**, so warmup and bootrom are separated from the code you actually care about. For C programs the region is found from the `mcycle` reads, for assembly from the entry PC and the first jump to exit.
+- **Measurement-region filtering**, so the harness and the bootrom are separated from the code you care about. The viewer finds the region itself, from the template's 4096-aligned trampoline, the `mcycle` reads or the jump to `<exit>`, so no addresses have to be supplied.
 - **Miss counts that match the RTL performance counters** (mhpmevent 16 and 17), including the load, store and other split for the dcache, so the tool's numbers can be checked against the hardware's own.
 - **A memory writeback track** showing each dirty line written back to memory and the eviction that caused it.
 - **Stall highlighting** that tints every cycle column containing a stall, kept in step with the stall metric so the picture and the number always agree.
@@ -211,6 +206,16 @@ python3 clean_repo.py [-y] [--dry-run] [-v]
 ```
 
 It lists what it found with its size and asks before deleting. The viewer JSONs are left alone, and `docs/` is kept whole.
+
+### Oversized JSONs
+
+A tracer JSON is never deleted, since it is what the viewer reads, but a long run makes one too big to commit: GitHub warns above 50 MiB and refuses above 100 MiB, and git matches a path and never a size. `ignore_big_json.py` measures the JSONs and the `.js` wrappers in this repository and writes the oversized ones into a block of `.gitignore` that it owns.
+
+```bash
+python3 ignore_big_json.py [-y] [--dry-run] [-v] [-l MIB] [--prune]
+```
+
+It only ever adds, so a second run changes nothing. `--prune` drops the entries whose file has gone or shrunk, and `-l` sets a different threshold in MiB. A file git already tracks is reported rather than ignored.
 
 ## Licence
 

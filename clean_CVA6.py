@@ -1,15 +1,8 @@
 #!/usr/bin/env python3
-"""Remove everything the CVA6 Verilator run scripts generate.
-
-Covers the date-stamped verif/sim/out_<date>/ folders the simulation writes,
-the work-ver/ Verilator build, the batch folder, and the run_results/ each
-runner leaves next to itself.
-
-Only the fixed names listed below and the verif/sim/out_* pattern are ever
-removed, so a tests/ folder or anything else tracked in git cannot be caught
-by mistake. The folders shared by name with the gem5 flow are taken only when
-a Verilator runner sits beside them, so this never sweeps up a gem5 run's
-results.
+"""Remove everything the CVA6 Verilator run scripts generate: the dated
+verif/sim/out_<date>/ folders, work-ver/, the batch folder and each runner's
+run_results/. Only the fixed names below are removed, and only where a
+Verilator runner sits beside them.
 
   python3 clean_CVA6.py               # list, then ask
   python3 clean_CVA6.py -y            # no confirmation
@@ -58,11 +51,9 @@ CVA6_ROOT = "/cva6" if os.path.isdir("/cva6") else REPO_ROOT
 
 
 def search_roots():
-    """The CVA6 root, this repository, and the working directory.
-
-    A run leaves folders in all three: the simulation writes under the CVA6
-    root, run_results/ lands next to the runner script, and a batch collects
-    into the directory it was launched from."""
+    """The CVA6 root, this repository and the working directory. The
+    simulation writes under the CVA6 root, run_results/ lands next to the
+    runner, and a batch collects into the directory it was launched from."""
     roots = []
     seen = set()
     for root in (CVA6_ROOT, REPO_ROOT, os.getcwd()):
@@ -78,10 +69,9 @@ def search_roots():
 
 
 def find_targets(roots, keep_build, extra=()):
-    """Collect every generated folder under the roots, plus any named by hand.
-
-    A match is never descended into: it is about to be deleted whole, so its
-    contents cannot add anything."""
+    """Collect every generated folder under the roots, plus any named by
+    hand. A match is never descended into, it is about to be deleted whole so
+    its contents cannot add anything."""
     found = []
     seen = set()
 

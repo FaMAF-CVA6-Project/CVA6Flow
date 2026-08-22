@@ -1,23 +1,7 @@
 #!/usr/bin/env python3
-"""
-Run the CVA6Flow configuration sweep.
-
-Reads the configuration table out of the swept config package
-(cv64a6_imafdc_sv39_hpdcache_wb_config_pkg.sv) and, for each configuration,
-installs that package with CVA6_CONFIG_SEL pointing at the variant, then runs
-only the workloads that configuration was cut for:
-
-    localparam int CFG_BHT_64 = 4;   // BHTEntries 128 -> 64 : bht_alias_test
-
-A configuration whose workload is 'all' runs every workload named anywhere in
-the table, which is the set the sweep has been exercised with.
-
-Outputs are collected as <test>.config<N>.<ext>, so one configuration's
-results never overwrite another's. Every metrics table is also gathered into
-a single metrics.txt.
-
-The live config package is restored when the sweep ends, fails or is
-interrupted.
+"""Run the CVA6Flow configuration sweep. Each variant of the swept config
+package runs against the workloads it was cut for, outputs carry a .config<N>
+tag, and every metrics table is gathered into one metrics.txt.
 """
 import argparse
 import datetime
@@ -149,10 +133,8 @@ def suggest(name, tests_dir):
 
 
 def resolve_test_file(name, tests_dir):
-    """Turn a workload into a path.
-
-    The table writes a workload as a bare name, but a name carrying its
-    extension and a path to a file are what a person naturally types on
+    """Turn a workload into a path. The table writes a bare name, but a name
+    with its extension and a path to a file are what a person types on
     --tests, so all three resolve rather than only the first."""
     # A path, absolute or relative to the working directory, taken as given.
     if os.path.isfile(name):
@@ -332,12 +314,9 @@ def sim_run_files(test_name, target):
 
 
 def discard_run(results_dir, test_name, target):
-    """Delete what this run left behind, once it has been collected.
-
-    A VCD runs to hundreds of megabytes and one is produced per run, so
-    keeping them would cost far more disk than the sweep is worth. Only this
-    test's files are removed, so a failed run's output survives the rest of
-    the sweep."""
+    """Delete what this run left behind once it has been collected. A VCD runs
+    to hundreds of megabytes per run. Only this test's files go, so a failed
+    run's output survives the rest of the sweep."""
     if os.path.isdir(results_dir):
         shutil.rmtree(results_dir, ignore_errors=True)
     for path in sim_run_files(test_name, target):
@@ -365,11 +344,9 @@ def clear_stale_outputs(results_dir, test_name):
 
 
 def extract_metrics(report_path):
-    """The metrics section of a _report.txt, or None if it holds none.
-
-    A _report.txt is the measured region of the disassembly followed by the
-    metrics table, so everything from the rule above the table's title to the
-    end of the file is the section wanted here."""
+    """The metrics section of a _report.txt, or None if it holds none. The
+    file is the measured disassembly then the metrics table, so everything from
+    the rule above the table's title to the end is what is wanted."""
     try:
         with open(report_path) as f:
             lines = f.read().splitlines()
@@ -387,11 +364,9 @@ def extract_metrics(report_path):
 
 
 def write_metrics_file(out_dir, entries, info):
-    """Gather every run's metrics table into one metrics.txt.
-
-    entries is [(label, report file)] in plan order, so the file reads in the
-    same order as the summary above it. A run whose table is missing is named
-    rather than skipped silently."""
+    """Gather every run's metrics table into one metrics.txt. entries is
+    [(label, report file)] in plan order, so the file reads like the summary
+    above it. A run with no table is named, not skipped."""
     blocks, missing = [], []
     for label, report_path in entries:
         block = extract_metrics(report_path)

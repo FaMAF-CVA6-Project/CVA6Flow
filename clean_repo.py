@@ -46,10 +46,9 @@ def is_kept(path):
 
 
 def find_targets():
-    """Every artefact in the repository, as a list of paths.
-
-    A __pycache__ is taken whole and not descended into, since it is about to
-    be deleted and nothing inside it can add a separate target."""
+    """Every artefact in the repository, as a list of paths. A __pycache__ is
+    taken whole and not descended into, since it is about to be deleted and
+    nothing inside it can add a separate target."""
     targets = []
     for dirpath, dirnames, filenames in os.walk(REPO_ROOT):
         keep = []

@@ -1,10 +1,13 @@
-# Files to big to be tracked
+# Outdated Stuff
+/docs/old_versions
+/docs/parser_phases
+
+# Python
+__pycache__
+
+# Files too big to be tracked
 
 # Testing
 tests/*.vcd*
 tests/*.list*
 tests/*.fst*
-
-# Outdated Stuff
-/docs/old_versions
-/docs/parser_phases

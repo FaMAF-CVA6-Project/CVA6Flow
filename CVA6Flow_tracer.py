@@ -1,40 +1,11 @@
 #!/usr/bin/env python3
-"""
-CVA6 pipeline tracer. Extracts per-instruction lifecycle data from a
-Verilator-generated VCD and emits JSON for the CVA6Flow viewer.
-
-Each in-flight instruction is followed through
-fetch → decode → issue (allocates trans_id) → execute → writeback →
-commit, with stage cycles populated, flushes recorded, and the warmup
-boundary identified via the first commit at `--user-entry-pc`. The JSON
-"instructions" array carries per-record cycle/trans_id/flush fields plus
-instr_word (masked to 16 bits when is_compressed), and separate top-level
-arrays for dirty-victim writeback and dcache miss-handler alloc events.
-
-Per-port signal layout (canonical cv64a6_imafdc_sv39_hpdcache_wb config,
-auto-adapts for parameter sweeps via the scoreboard depth probe in
-stream_and_extract):
-  - wt_valid_i is a packed NR_WB_PORTS-bit bus, while trans_id_i is
-    NR_WB_PORTS separate TRANS_ID_BITS-wide signals indexed by port. Match a
-    writeback by looking up trans_id_i[port] for each set wt_valid bit.
-  - commit_ack_o is a packed NR_COMMIT_PORTS-bit bus, and
-    commit_pointer_q[0]/[1] give the trans_id released on each port.
-
-Per-cycle processing order at each rising edge (ordering is
-correctness-critical: commits must release scoreboard slots before issue
-reuses them, mirroring the hardware FIFO discipline):
-  1. Flush detection (cascade: flush_ex flushes EX + ID + IF)
-  2. Commit (releases scoreboard slots BEFORE issue can reuse them)
-  3. Writeback (updates wb_cycle on still-in-flight instances)
-  4. Issue (decoded → issued, captures trans_id)
-  5. Decode (fetched → decoded)
-  6. Fetch (new instance enters fetched)
+"""CVA6 pipeline tracer. Extracts per-instruction lifecycle data from a
+Verilator VCD and emits JSON for the CVA6Flow viewer, following each
+instruction from fetch through decode, issue, execute, writeback and commit.
 
 Usage:
-    python3 cva6_pipeline_tracer.py <path-to.vcd>
-    python3 cva6_pipeline_tracer.py daxpy.vcd \\
-        --user-entry-pc 0x80003000 \\
-        --output daxpy.json
+    python3 CVA6Flow_tracer.py <path-to.vcd>
+    python3 CVA6Flow_tracer.py daxpy.vcd --output daxpy.json
 """
 
 import argparse
@@ -43,7 +14,8 @@ import json
 import re
 import sys
 import time
-from collections import deque, defaultdict
+from statistics import median
+from collections import deque, defaultdict, Counter
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 
@@ -100,14 +72,11 @@ class Progress:
 
 
 # ============================================================================
-# Config
+# Config (single source of truth)
 # ============================================================================
-# Values are taken from cv64a6_imafdc_sv39_hpdcache_wb_config_pkg.sv +
-# build_config_pkg.sv. The whitelist below and the per-port lookups in
-# stream_and_extract iterate these counts, so changing one constant here
-# regenerates every config-dependent signal path. Other parts of the
-# tracer (FSM enums, sid table, MMU/PTW assumptions) are CVA6-wide and
-# do not vary with this config.
+# Values come from cv64a6_imafdc_sv39_hpdcache_wb_config_pkg.sv and
+# build_config_pkg.sv. Changing one here regenerates every config-dependent
+# signal path. The FSM enums and sid table are CVA6-wide and do not vary.
 
 # Frontend
 SUPERSCALAR_EN = False
@@ -124,18 +93,18 @@ NR_WB_PORTS = 5
 NR_SB_ENTRIES = 8
 TRANS_ID_BITS = 3                         # = $clog2(NR_SB_ENTRIES)
 
-# LSU. Ex_stage has three dcache_req_ports_o slots. This is a CVA6-wide
-# architectural constant (port 0 = load adapter, 1 = MMU/PTW, 2 = store
-# adapter)
+# LSU. ex_stage has three dcache_req_ports_o slots, a CVA6-wide constant:
+# port 0 load adapter, 1 MMU/PTW, 2 store adapter (ex_stage.sv and
+# cva6.sv:1326). It does not vary with the scoreboard or issue-port config.
 DCACHE_REQ_PORTS = 3
 
 
 # ============================================================================
 # I$ controller FSM enum
 # ============================================================================
-# Used by ICacheTimeline.on_cycle to classify each delivery as a hit
-# (state_q == READ at fe2) or miss (state_q == MISS).VCD encodes the
-# 3-bit state as a binary string, e.g. "011" for MISS.
+# Mirrors cva6_icache.sv:122. Used by ICacheTimeline.on_cycle to classify
+# each delivery as a hit (state_q == READ at fe2) or miss (state_q == MISS).
+# VCD encodes the 3-bit state as a binary string, e.g. "011" for MISS.
 
 FSM_FLUSH = "000"
 FSM_IDLE = "001"
@@ -148,10 +117,12 @@ FSM_KILL_MISS = "101"
 # ============================================================================
 # LSU FSM enums
 # ============================================================================
-# SystemVerilog enum without explicit values auto-assigns sequential
-# integers from 0. VCD encodes each as a binary string of the declared
-# width (4 chars for load_unit, 2 for store_unit). Names lifted
-# verbatim from the SV source.
+# load_unit.sv:83 . 4-bit FSM, 9 states
+# store_unit.sv:119. 2-bit FSM, 4 states
+#
+# A SystemVerilog enum with no explicit values counts up from 0, and the VCD
+# encodes each as a binary string of the declared width, 4 chars for
+# load_unit and 2 for store_unit. Names lifted verbatim from the source.
 
 LOAD_FSM_NAMES = {
     0: "IDLE",
@@ -174,16 +145,19 @@ STORE_FSM_NAMES = {
 
 
 # ============================================================================
-# Control-flow type enum
+# Control-flow type enum (branch predictor)
 # ============================================================================
-# The cf_t type is both the prediction carried with each instruction
-# (branchpredict_sbe_t.cf) and the resolution emitted by the branch_unit
-# (bp_resolve_t.cf_type). The value also identifies the predictor source:
-#   NoCF   = 0  : no prediction (non-branch, or branch predicted not-taken)
-#   Branch = 1  : conditional branch predicted taken -> BHT
-#   Jump   = 2  : direct jump, target known at decode -> none (decoder-resolved)
-#   JumpR  = 3  : indirect jump -> BTB
-#   Return = 4  : return -> RAS
+# Per ariane_pkg.sv:170-176. The cf_t type is used both as the prediction
+# carried with each instruction (branchpredict_sbe_t.cf) and as the
+# resolution emitted by the branch_unit (bp_resolve_t.cf_type).
+#
+#   NoCF   = 0  : nothing predicted. Also the value for a branch
+#                 predicted not-taken. Branch = 1 BHT, Jump = 2 direct,
+#                 JumpR = 3 BTB indirect, Return = 4 RAS.
+#
+# A cf value at issue also names the predictor: Branch is the BHT, JumpR the
+# BTB, Return the RAS. Jump needs none, the decoder resolves it, and NoCF
+# means no prediction or a non-branch.
 
 CF_T_NAMES = {
     0: "NoCF",
@@ -210,17 +184,13 @@ def cf_name(s):
 # Per cva6_hpdcache_wrapper.sv (NumPorts=4 in
 # cv64a6_imafdc_sv39_hpdcache_wb_config_pkg.sv) the SID layout is:
 #
-#   - sid 0   : PTW load adapter         (page table walker, MMU)
-#   - sid 1   : LSU load_unit adapter    (data loads, what we care about)
-#   - sid 2   : Accelerator load adapter (acc_cache[0])
-#   - sid 3   : STORE adapter            (NumPorts-1)
-#   - sid 4   : CMO adapter              (NumPorts)
-#   - sid 5   : hwpf_stride prefetcher   (NumPorts+1)
+#   sid 0 PTW load adapter, 1 LSU load_unit (the one we care about),
+#   2 accelerator load adapter, 3 STORE adapter, 4 CMO adapter,
+#   5 hwpf_stride prefetcher.
 #
-# Mapping derived by tracing dcache_req_to_cache[0..3] assignments
-# → port 0=PTW, 1=load_unit, 2=store_unit. The HPDcache wrapper feeds
-# dcache_req_ports_i[0..2] to load adapter slots r=0..2 with
-# hpdcache_req_sid_i = r.
+# Traced through cva6.sv:1321-1327 into load_store_unit.sv:315/586/545. The
+# HPDcache wrapper feeds dcache_req_ports_i[0..2] to load adapter slots
+# r=0..2 with hpdcache_req_sid_i = r.
 
 HPDCACHE_NUM_PORTS = 4
 LOAD_ADAPTER_SIDS = frozenset(range(HPDCACHE_NUM_PORTS - 1))   # {0, 1, 2}
@@ -230,21 +200,24 @@ ACCEL_LOAD_SID = 2
 STORE_ADAPTER_SID = HPDCACHE_NUM_PORTS - 1                     # 3
 CMO_ADAPTER_SID = HPDCACHE_NUM_PORTS                          # 4
 HWPF_ADAPTER_SID = HPDCACHE_NUM_PORTS + 1                      # 5
+
+# REFILL_FSM from hpdcache_miss_handler.sv, widened to 32 bits by Verilator
+# because the typedef has no explicit width (line 397). State 0 is idle, any
+# non-zero value means a refill is in progress.
 REFILL_FSM_IDLE = 0
 
 
 # ============================================================================
-# Whitelist
+# Whitelist (base set + commit_pointer_q for trans_id-based commit matching)
 # ============================================================================
 
 WHITELIST = [
     # Clock
     "clk_i",
 
-    # CSR-equivalent D-cache access: perf counter l1_dcache_access asserts
-    # every cycle ANY of the DCACHE_REQ_PORTS core ports raises data_req
-    # (port 0 = load adapter, 1 = MMU/PTW, 2 = store adapter). Ports appended
-    # programmatically below.
+    # CSR-equivalent D$ access counter, ports 0 load, 1 MMU/PTW, 2 store.
+    # Sampled at ex_stage's output, what perf_counters.sv:128 reads. NOT the
+    # cache-side ports, whose port 2 is the accelerator (cva6.sv:1326).
 
     # I$ request / response
     "i_frontend.icache_dreq_o.req",
@@ -254,9 +227,9 @@ WHITELIST = [
     "i_frontend.icache_dreq_i.valid",
     "i_frontend.icache_dreq_i.vaddr",
 
-    # instr_realign output flag: high while combining a 32-bit instruction
-    # whose upper half came from the next fetch. Aggregate cross-validation
-    # counter against the PC-determinative wraps_line field.
+    # instr_realign output flag, high while the realigner combines an
+    # instruction split across two fetches. Cross-checks wraps_line, and
+    # differs only for records flushed mid-realignment by kill_s2.
     "i_frontend.i_instr_realign.serving_unaligned_o",
 
     # Fetch handshake
@@ -264,8 +237,8 @@ WHITELIST = [
     "id_stage_i.fetch_entry_ready_o",
     "id_stage_i.rvfi_is_compressed_o",
 
-    # Per-instruction frontend payload. fetch_entry_if_id is
-    # [NrIssuePorts-1:0]. Ports appended programmatically below.
+    # Per-instruction payload from frontend. `fetch_entry_if_id` is
+    # declared [NrIssuePorts-1:0]. Ports appended programmatically.
 
     # Decode handshake
     "issue_stage_i.i_scoreboard.decoded_instr_valid_i",
@@ -276,17 +249,21 @@ WHITELIST = [
     "issue_stage_i.i_scoreboard.issue_ack_i",
     "issue_stage_i.i_scoreboard.issue_pointer_q",
 
-    # Decoded-instruction fields (fu, rs1, rs2, rd, bp.cf, bp.predict_address),
-    # decoded_instr_i[NrIssuePorts-1:0], sampled at decode handshake. Per-port
-    # entries appended programmatically below.
+    # Decoded fields at the decode handshake, per-port entries appended
+    # below. bp comes from here, not mem_q[tid].sbe.bp, whose slot holds the
+    # previous occupant post-edge once issue_pointer_q has advanced.
 
-    # Forwarding capture, probed at issue: which source operands came from
-    # the forwarding network vs the regfile, and from which producer slot.
-    #   forward_rsX : 1 when the source had a RAW hazard AND the operand was
-    #                 available from forwarding (producer result in
-    #                 mem_q[tid].sbe or on the writeback bus this cycle).
-    #   idx_hzd_rsX : TRANS_ID_BITS scoreboard slot forwarded FROM (only
-    #                 meaningful when forward_rsX=1), appended below.
+    # Forwarding capture. Probed at the issue cycle to learn
+    # whether each source operand was taken from the regfile or from
+    # the forwarding network, and from which producer slot.
+    #
+    # forward_rsX is 1 when the source had a RAW hazard and the operand was
+    # available on the forwarding network. idx_hzd_rsX is the scoreboard slot
+    # it forwards from, meaningful only when forward_rsX is 1.
+    #
+    # All six are [NrIssuePorts-1:0] in issue_read_operands. forward_rsX is one
+    # bit per port, idx_hzd_rsX is TRANS_ID_BITS per port, and the per-port
+    # idx_hzd_rs slices are appended programmatically below.
     "issue_stage_i.i_issue_read_operands.forward_rs1",
     "issue_stage_i.i_issue_read_operands.forward_rs2",
     "issue_stage_i.i_issue_read_operands.forward_rs3",
@@ -295,14 +272,17 @@ WHITELIST = [
     # trans_id_i slices are appended programmatically below.
     "issue_stage_i.i_scoreboard.wt_valid_i",
 
-    # Branch prediction (bp.cf, bp.predict_address): primary path reads
-    # mem_q[trans_id].sbe.bp.* at writeback (same data commit uses, no timing
-    # ambiguity). The fallback is the pre-edge decoded_instr_i[0].bp.* snapshot
-    # for when mem_q isn't in the VCD or for flushed records.
+    # The scoreboard's registered mem_q ring. Reading fu/rs1/rs2/rd from
+    # mem_q[trans_id].sbe at writeback is authoritative, written at the decode
+    # edge and stable until the slot is reused. Per-slot entries appended below.
 
-    # Branch resolution from the EX branch_unit. bp_resolve_t carries pc,
-    # target_address, is_taken, is_mispredict and cf_type, with valid=1 for one
-    # cycle at the branch's ex_cycle. Captured at the scoreboard's input.
+    # bp.cf and bp.predict_address come from mem_q[trans_id].sbe.bp at
+    # writeback, the same data commit uses. The pre-edge decoded_instr_i.bp
+    # snapshot is the fallback when mem_q is absent or the record is flushed.
+
+    # Branch resolution from the EX branch_unit. bp_resolve_t (cva6.sv:134)
+    # carries pc, target, is_taken, is_mispredict and cf_type for one cycle at
+    # ex_cycle. Bound by PC, oldest is_cycle first when a loop repeats a PC.
     "issue_stage_i.i_scoreboard.resolved_branch_i.valid",
     "issue_stage_i.i_scoreboard.resolved_branch_i.pc",
     "issue_stage_i.i_scoreboard.resolved_branch_i.target_address",
@@ -311,7 +291,8 @@ WHITELIST = [
     "issue_stage_i.i_scoreboard.resolved_branch_i.cf_type",
 
     # Commit. commit_ack_o is a packed NR_COMMIT_PORTS-bit bus. The
-    # per-port commit_pointer_q slices are appended programmatically below.
+    # per-port commit_pointer_q slices (tagging the trans_id released
+    # on each port) are appended programmatically below.
     "commit_stage_i.commit_ack_o",
 
     # Flush
@@ -319,46 +300,43 @@ WHITELIST = [
     "flush_ctrl_id",
     "flush_ctrl_ex",
     "flush_ctrl_bp",
-    # flush_unissued_instr_i gates the scoreboard's actual mem_n write
-    # at the decode handshake
+    # flush_unissued_instr_i gates the scoreboard's mem_n write at the decode
+    # handshake (scoreboard.sv:171). While it is high DV and DA still fire but
+    # no slot is allocated, so firing here would drift `fetched` ahead of HW.
     "issue_stage_i.i_scoreboard.flush_unissued_instr_i",
 
-    # I$ controller FSM state register. Used to distinguish
-    # hits (state_q == READ at fe2) from genuine line misses
-    # (state_q == MISS at fe2).
+    # I$ controller FSM, the 6-state enum at cva6_icache.sv:122. Separates a
+    # hit (READ at fe2) from a line miss (MISS at fe2). The frontend dreq
+    # signals above carry the handshake, this one the internal state.
     "gen_cache_hpd.i_cache_subsystem.i_cva6_icache.state_q",
 
-    # RTL-counter match: I$ miss pulse. cva6_icache asserts miss_o for
-    # one cycle when mem_data_ack_i accepts a cacheable ifill request.
+    # I$ miss pulse. cva6_icache asserts miss_o for one cycle per accepted
+    # cacheable ifill (cva6_icache.sv:301-303), feeding perf_counters event 1.
+    # Counting its high cycles includes wrong-path fills squashed mid-fill.
     "gen_cache_hpd.i_cache_subsystem.i_cva6_icache.miss_o",
 
-    # LSU pipeline FSM state registers. Sampled per rising
-    # edge in parallel with the existing dispatch steps. Transitions
-    # are attributed to the currently-pending record (set by the
-    # scoreboard issue handshake when fu is LOAD or STORE).
+    # LSU pipeline FSM state registers, sampled per rising edge and attributed
+    # to the pending record set by the issue handshake. load_unit.sv:83 has 9
+    # states in 4 bits, store_unit.sv:119 has 4 in 2 bits.
     "ex_stage_i.lsu_i.i_load_unit.state_q",
     "ex_stage_i.lsu_i.i_store_unit.state_q",
-
-    # lsu_ctrl is the combinational wire feeding both FSMs.
-    # Its trans_id at the cycle BEFORE an FSM IDLE→non-IDLE
-    # transition is the admitted record.
+    # lsu_ctrl is the combinational wire feeding both
+    # FSMs (load_store_unit.sv:174). Its trans_id at the cycle
+    # BEFORE an FSM IDLE→non-IDLE transition is the admitted record.
     "ex_stage_i.lsu_i.lsu_ctrl.trans_id",
-
-    # pop_ld / pop_st are asserted by load_unit and
-    # store_unit respectively whenever they consume a request from
-    # lsu_bypass. Pop_ld=1 while load FSM is in SEND_TAG is an
-    # admit-while-busy event.
+    # pop_ld / pop_st fire when the load or store unit consumes a request
+    # from lsu_bypass. pop_ld in SEND_TAG (load_unit.sv:343) or pop_st in
+    # VALID_STORE (store_unit.sv:191) is an admit-while-busy event.
     "ex_stage_i.lsu_i.lsu_bypass_i.pop_ld_i",
     "ex_stage_i.lsu_i.lsu_bypass_i.pop_st_i",
 
-    # HPDcache miss/refill event signals. The `gen_cache_hpd.` generate-block
-    # prefix is mandatory: cva6.sv has 3 cache subsystem variants under
-    # different gen_cache_* blocks for different DCacheType values.
+    # HPDcache miss and refill events. cva6.sv has three cache-subsystem
+    # variants under different gen_cache_* blocks, and this build uses
+    # HPDcache, so everything sits under gen_cache_hpd.
     #
-    # mshr_alloc_* is sampled when mshr_alloc_i pulses (primary miss → fresh
-    # MSHR entry). mshr_alloc_sid_i is the ONLY way to tell a load-adapter miss
-    # from a store/prefetch miss. Without it, allocations would be
-    # misattributed to whichever LSU FSM is currently non-IDLE.
+    # The mshr_alloc_* group is sampled when mshr_alloc_i pulses, a primary
+    # miss. mshr_alloc_sid_i names the requestor and is the only way to tell a
+    # load-adapter miss from a store or prefetch one.
     "gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache."
     "hpdcache_miss_handler_i.mshr_alloc_i",
     "gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache."
@@ -369,39 +347,31 @@ WHITELIST = [
     "hpdcache_miss_handler_i.mshr_alloc_is_prefetch_i",
     "gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache."
     "hpdcache_miss_handler_i.mshr_alloc_nline_i",
-
-    # mshr_check_i / mshr_check_hit_o capture the secondary-miss
+    # mshr_check_i with mshr_check_hit_o on the same cycle is the secondary
+    # miss path, a request whose nline is already in an MSHR entry. This is
+    # the dominant path where loads follow stores to the same line.
     "gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache."
     "hpdcache_miss_handler_i.mshr_check_i",
     "gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache."
     "hpdcache_miss_handler_i.mshr_check_nline_i",
     "gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache."
     "hpdcache_miss_handler_i.mshr_check_hit_o",
-
-    # refill_fsm_q (any non-zero value = active refill) lets us flag
-    # loads that overlap a refill cycle even when not directly
-    # involved in alloc/coalesce.
+    # refill_fsm_q non-zero flags loads that overlap a refill without being
+    # part of the alloc or coalesce. id=142 in fdiv was a hit delayed by a
+    # refill holding the cache port.
     "gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache."
     "hpdcache_miss_handler_i.refill_fsm_q",
-
     # refill_core_rsp_valid_o pulses when refill data is delivered
-    # back to the requesting core port.
+    # back to the requesting core port. Refill_core_rsp_o.tid carries
+    # the requesting tid (see hpdcache_miss_handler.sv:382,397).
     "gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache."
     "hpdcache_miss_handler_i.refill_core_rsp_valid_o",
     "gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache."
     "hpdcache_miss_handler_i.refill_core_rsp_o.tid",
 
-    # dirty victim WRITEBACK path. This config is WRITE-BACK
-    # (wtEn=0, wbEn=1): the write buffer is configured out (gen_no_wbuf),
-    # so stores retire to the cache (dirty) and a line reaches memory only
-    # on eviction, via the flush/wback unit (gen_flush.flush_i). We trace
-    # that lifecycle at the i_hpdcache level:
-    #   ALLOC  flush_alloc && flush_alloc_ready (nline = flush_alloc_nline)
-    #          miss handler hands a dirty victim to the flush unit
-    #   SEND   mem_req_write_flush_valid && _ready (id/addr in the struct)
-    #          writeback request issued to memory
-    #   ACK    mem_resp_write_flush_valid && _ready (id. Flush_ack_nline)
-    #          memory acknowledges
+    # Dirty victim writeback, write-back with the write buffer configured
+    # out. ALLOC is flush_alloc, SEND and ACK are mem_req/resp_write_flush.
+    # Send and ack pair by slot id, alloc and ack by nline.
     "gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.flush_alloc",
     "gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.flush_alloc_ready",
     "gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.flush_alloc_nline",
@@ -414,12 +384,9 @@ WHITELIST = [
     "gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.mem_resp_write_flush.mem_resp_w_id",
     "gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.flush_ack_nline",
 
-    # tie each writeback to the eviction that caused it.
-    # The controller (st2) drives the dirty-victim flush_alloc together with
-    # the miss allocation (same cycle, validated delta=0). The join key is
-    # (set, victim_way): the incoming line X (mshr_alloc_nline_i) and the
-    # evicted victim Y (flush_alloc_nline) share the cache set, and the
-    # victim way matches (one-hot on both sides).
+    # Tie each writeback to its eviction. st2 drives flush_alloc with the miss
+    # allocation on the same cycle, and they join on (set, victim_way), with
+    # 256 sets and 8 ways giving set = nline & 0xff.
     "gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache."
     "hpdcache_miss_handler_i.mshr_alloc_wback_i",
     "gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache."
@@ -429,6 +396,10 @@ WHITELIST = [
 
 # ------------------------------------------------------------------ #
 # Loop-generated per-port / per-entry signal paths.                  #
+#                                                                    #
+# All hardcoded indexed signals from the original WHITELIST were     #
+# moved here so the per-port arrays scale with the constants at the  #
+# top of this file. Adding a port needs only that one change.        #
 # ------------------------------------------------------------------ #
 
 # ex_stage dcache request ports (architectural, NOT scoreboard-derived)
@@ -463,10 +434,9 @@ for _p in range(NR_ISSUE_PORTS):
 for _p in range(NR_WB_PORTS):
     WHITELIST.append(f"issue_stage_i.i_scoreboard.trans_id_i[{_p}]")
 
-# mem_q (per NrScoreboardEntries × {fu, rs1, rs2, rd, bp.cf, bp.predict_address})
-# bp.cf and bp.predict_address let the writeback fixup read the AUTHORITATIVE
-# predictor verdict from the scoreboard's registered slot, avoiding the
-# pre-edge decoded_instr_i.bp.cf misattribution for back-to-back issues.
+# mem_q, per NrScoreboardEntries over fu, rs1, rs2, rd, bp.cf and
+# bp.predict_address. bp comes from the registered slot so the writeback fixup
+# avoids the pre-edge misattribution on back-to-back issues.
 for _i in range(NR_SB_ENTRIES):
     for _f in ("fu", "rs1", "rs2", "rd", "bp.cf", "bp.predict_address"):
         WHITELIST.append(
@@ -498,18 +468,9 @@ REQUIRED_SIGNALS = {
     "commit_stage_i.commit_ack_o",
 }
 
-PHASE3_POPULATES = {
-    "id", "pc", "instr_word", "is_compressed", "is_warmup", "fetch_port",
-    "fe_cycle", "id_cycle", "is_cycle", "ex_cycle", "wb_cycle", "co_cycle",
-    "trans_id", "flushed", "flush_reason",
-}
-
-PHASE4A_POPULATES = PHASE3_POPULATES | {
-    "fu", "fu_category", "rs1", "rs2", "rd"}
-
 
 # ============================================================================
-# Functional-unit metadata (from ariane_pkg.sv fu_t enum)
+# Functional-unit metadata (from ariane_pkg.sv fu_t enum + spec §5.7 rollup)
 # ============================================================================
 
 FU_NAME = {
@@ -557,7 +518,6 @@ class InstructionRecord:
     instr_word: str = None
     disasm: str = None
     is_compressed: bool = False
-    is_warmup: bool = False
     fu: str = None
     fu_category: str = None
     rd: int = None
@@ -565,25 +525,25 @@ class InstructionRecord:
     rs2: int = None
     trans_id: int = None
     fetch_port: int = 0
-    # I$ pipeline cycles per contributing fetch. if1/if2 = request-accept and
-    # data-delivery cycles. _lo is the first (lower-address) fetch, the only
-    # one for aligned instrs. _hi is the second fetch, populated only when
-    # wraps_line. Timing: hit if2=if1+1, cacheable miss if2=if1+~5, NC bypass
-    # if2=if1+4. RVC pairs in one 4-byte word share if1_lo/if2_lo.
+    # Request-accept and data-delivery cycles of the fetch carrying the low
+    # half of the instruction. For an aligned instruction this is the only
+    # fetch. On a hit if2 = if1 + 1, on a cacheable miss about if1 + 5.
     if1_lo: int = None
     if2_lo: int = None
+    # Same for the fetch carrying the high half. Only set when wraps_line,
+    # since an RVI at the last 2-byte slot of its fetch block has its upper
+    # 16 bits in the next block and the realigner combines the two.
     if1_hi: int = None
     if2_hi: int = None
-    # True iff this instruction straddles a fetch-block boundary (realigner
-    # must combine two fetches): (pc & FETCH_OFFSET_MASK) == FETCH_BYTES-2 AND
-    # not compressed. Captured on every record (committed AND flushed) because
-    # realigner bookkeeping runs regardless of whether the instr commits.
+    # The instruction straddles a fetch-block boundary: pc at FETCH_BYTES-2
+    # of its block and not compressed. Set on flushed records too, since the
+    # realigner does its bookkeeping whether or not the instruction commits.
     wraps_line: bool = False
-    # True if the I$ went to memory for this PC's line (state_q==MISS at if2).
-    # False for hits (including "stuck hits" queued behind a prior miss).
+    # The I$ went to memory for this PC's line, state_q == MISS at if2.
+    # False for a hit, including one queued behind an earlier miss.
     ic_miss: bool = None
-    # Hi-side miss, only meaningful when wraps_line. Same source (state_q==MISS
-    # at the hi fetch's fe2). None when there is no hi fetch.
+    # Hi-side miss, from the same signal at the hi fetch's fe2 cycle. Only
+    # meaningful when wraps_line, None when there is no hi fetch.
     ic_miss_hi: bool = None
     fe_cycle: int = None
     id_cycle: int = None
@@ -593,70 +553,70 @@ class InstructionRecord:
     co_cycle: int = None
     flushed: bool = False
     flush_reason: str = None
-    # LSU FSM state history: transitions of load_unit/store_unit.state_q while
-    # the FSM was processing this record's trans_id. Each entry {cycle, state}.
-    # Transitions only: IDLE→non-IDLE opens the trace, non-IDLE→IDLE closes it
-    # (closing IDLE not appended, since lsu_complete_cycle records it instead).
+    # Transitions of load_unit.state_q, or store_unit.state_q for stores,
+    # while the FSM held this trans_id. Entries are {cycle, state}, and only
+    # transitions are kept: the closing IDLE goes to lsu_complete_cycle.
     lsu_state_history: list = None
-    # Cycle the LSU FSM first left IDLE for this record (admission cycle).
-    # Usually is_cycle+1 but later under stalls / TLB-miss inserts.
+    # Cycle the LSU FSM left IDLE for this record, the admission cycle.
+    # Usually is_cycle + 1, later under stalls or a TLB miss insert.
     lsu_admit_cycle: int = None
-    # Cycle the FSM returned to IDLE (admission phase done). For loads the data
-    # response arrives later via ldbuf. This only marks the FSM's release.
+    # Cycle the FSM returned to IDLE. For a load the data arrives later via
+    # ldbuf, so this marks the FSM's release rather than completion.
     lsu_complete_cycle: int = None
 
-    # D$ event correlation for LOAD/STORE, populated by
-    # attribute_dc_events_to_records() from events in [admit, complete]:
-    #   dc_primary_miss   : mshr_alloc with sid==LOAD_UNIT_SID AND matching tid
-    #                       (rare: stores usually allocate and loads coalesce)
-    #   dc_coalesced      : mshr_check_hit fired in the window (approximate,
-    #                       no per-check sid, but a strong signal for loads
-    #                       that piggybacked on a store's miss)
-    #   dc_refill_overlap : refill_fsm_q non-IDLE in the window (load delayed
-    #                       by a concurrent refill consuming the cache port)
-    #   dc_events         : raw chronological list, each {cycle, type} where
-    #                       type is alloc(sid,tid,pf,nline) | check_*(nline) |
-    #                       refill_rsp(tid)
+    # D$ correlation for LOAD and STORE records, filled by
+    # attribute_dc_events_to_records() from the events that fired during
+    # [lsu_admit_cycle, lsu_complete_cycle].
+
+    # An mshr_alloc with sid == LOAD_UNIT_SID and mTID == this trans_id.
+    # Rare when stores allocate first and loads coalesce behind them.
     dc_primary_miss: bool = False
+    # An mshr_check_hit fired in this record's window, so something
+    # coalesced onto an existing MSHR. Approximate, no per-check sid.
     dc_coalesced: bool = False
+    # refill_fsm_q non-IDLE for at least one cycle of the window, catching
+    # loads delayed by a concurrent refill holding the cache port.
     dc_refill_overlap: bool = False
+    # Chronological events, each with 'cycle' and 'type' (alloc, check_hit,
+    # check_miss, refill_rsp) plus that type's own fields.
     dc_events: list = None
 
-    # Branch prediction & resolution, for fu==CTRL_FLOW records.
-    # PREDICTION (captured at issue from mem_q[trans_id].sbe.bp):
-    #   bp_predicted_cf      : NoCF/Branch/Jump/JumpR/Return (also the
-    #                          predictor source, see CF_T_NAMES)
-    #   bp_predicted_target  : VLEN-bit target as int, None for NoCF
-    # RESOLUTION (captured from resolved_branch_i, valid=1 one cycle at ex):
-    #   bp_resolved_cf       : resolved cf type (may differ from predicted
-    #                          if BTB/RAS missed, branch_unit.sv:64-107)
-    #   bp_resolved_target   : actual computed target
-    #   bp_resolved_taken    : actual outcome (False = not-taken/sequential)
-    #   bp_mispredict        : is_mispredict, covering both direction and
-    #                          target mispredicts
-    #   bp_resolution_cycle  : cycle valid=1 fired (== ex_cycle when clean)
+    # Branch prediction and resolution, for records with fu == CTRL_FLOW.
+
+    # "NoCF", "Branch", "Jump", "JumpR" or "Return", which also names the
+    # source: Branch is the BHT, JumpR the BTB, Return the RAS, Jump direct.
+    # Captured at the issue handshake from mem_q[trans_id].sbe.bp.
     bp_predicted_cf: str = None
+    # VLEN-bit target as int, None for NoCF.
     bp_predicted_target: int = None
+    # Resolved type per branch_unit.sv:64-107. May differ from the
+    # predicted one when the BTB or RAS missed. Captured from
+    # resolved_branch_i, which pulses for one cycle at ex_cycle.
     bp_resolved_cf: str = None
     bp_resolved_target: int = None
+    # Actual outcome, False for not-taken.
     bp_resolved_taken: bool = None
+    # is_mispredict straight from resolution, covering both a wrong
+    # direction and a wrong target.
     bp_mispredict: bool = None
+    # Cycle resolved_branch_i.valid fired. Equals ex_cycle for a cleanly
+    # pipelined branch.
     bp_resolution_cycle: int = None
 
-    # Operand forwarding capture, snapshotted pre-edge at issue (signals are
-    # combinational, live one cycle at the issue rising edge).
-    #   fwd_rsX_used     : issue took the operand from forwarding vs regfile
-    #                      (from forward_rsX). Only fires on a successful
-    #                      handshake, so used=False means regfile read.
-    #   fwd_rsX_from_tid : producer scoreboard slot (idx_hzd_rsX[0]), only
-    #                      meaningful when used.
-    #   fwd_rsX_via      : "sb" = producer wrote back earlier, scoreboard holds
-    #                      it (mem_q[from_tid].sbe.result). "wb" = bypassed
-    #                      this same cycle off a writeback port (tightest,
-    #                      ALU-to-ALU back-to-back). Only meaningful when used.
-    # rs3 is for FMA-class 3-source FPU ops, otherwise fwd_rs3_* stay default.
+    # Operand forwarding, snapshotted pre-edge at the issue cycle because
+    # issue_read_operands' signals are combinational and live for one cycle.
+    # rs3 only applies to FMA-class FPU ops, and is None elsewhere.
+
+    # The issue stage took the operand from the forwarding network rather
+    # than the regfile, from i_issue_read_operands.forward_rsX. False also
+    # covers a stall, since capture only runs on a successful handshake.
     fwd_rs1_used: bool = False
+    # Scoreboard slot the operand came from, read from idx_hzd_rsX[0].
+    # Only meaningful when the matching _used is True.
     fwd_rs1_from_tid: int = None
+    # "sb" when the producer had already written back and the scoreboard
+    # holds the result, "wb" when it was bypassed on the same cycle from a
+    # writeback port. "wb" is the tight back-to-back dependent case.
     fwd_rs1_via: str = None
     fwd_rs2_used: bool = False
     fwd_rs2_from_tid: int = None
@@ -665,31 +625,27 @@ class InstructionRecord:
     fwd_rs3_from_tid: int = None
     fwd_rs3_via: str = None
 
-    # Branch / flush bubble attribution, set by tag_branch_bubbles() post-walk.
-    # A non-flushed record R followed by ≥1 flushed then non-flushed R' makes R
-    # the CAUSER and R' the RECOVERY.
-    # ON THE CAUSER:
-    #   bubble_kind            : 'mispred' (bp_mispredict & cf!=NoCF) /
-    #                            'unpred' (bp_mispredict & cf==NoCF, BTB miss) /
-    #                            'flush_other' (CSR flush, FENCE*/AMO commit,
-    #                            exception entry)
-    #   bubble_caused_cycles   : count of flushed records between causer and
-    #                            recovery (= wrong-path fetch bandwidth wasted)
-    #   bubble_recovery_id     : id of the recovery record
-    # ON THE RECOVERY:
-    #   bubble_from_branch_id  : id of the causer
-    #   bubble_cycles          : duplicate of causer's bubble_caused_cycles so
-    #                            either end is queryable without a join
-    # A record is causer of at most one bubble and recovery of at most one.
+    # Branch and flush bubbles, tagged by tag_branch_bubbles() after the walk.
+    # A non-flushed record followed by flushed ones then another non-flushed
+    # one is the CAUSER, and the one that resumes is the RECOVERY.
+
+    # On the causer. 'mispred' when the predictor guessed and was wrong,
+    # 'unpred' when it said NoCF, 'flush_other' for a non-branch cause such
+    # as a CSR write, a FENCE, an AMO commit drain or an exception entry.
     bubble_kind: str = None
+    # Flushed records strictly between causer and recovery, which is the
+    # count of wrong-path instructions that consumed fetch bandwidth.
     bubble_caused_cycles: int = None
+    # Id of the recovery record, for cross-record joins.
     bubble_recovery_id: int = None
+    # On the recovery. Id of the causer, and a copy of its
+    # bubble_caused_cycles so either end can be queried without a join.
     bubble_from_branch_id: int = None
     bubble_cycles: int = None
 
 
 # ============================================================================
-# I$ event timeline (Phase 4b)
+# I$ event timeline
 # ============================================================================
 
 @dataclass
@@ -701,27 +657,9 @@ class ICacheEvent:
 
 
 class ICacheTimeline:
-    """Walks the VCD's I$ signal stream in lockstep with the main tracer
-    and emits one ICacheEvent per successful (non-killed) data delivery.
-
-    fe1 attribution rule:
-
-      A NEW I$ ACCESS starts at the cycle when EITHER:
-        (a) vaddr_o transitions to a different value (consecutive
-            fetches to distinct addresses), or
-        (b) state_q transitions to READ from a non-READ state
-            (a fresh access after an IDLE/KILL_*/FLUSH dwell. Most
-            commonly a branch-misprediction recovery re-fetch).
-
-      fe1_cycle = (cycle the new access started) - 1
-      fe2_cycle = cycle dreq_o.valid==1 and kill_s2==0
-      ic_miss   = (state_q == MISS at fe2)
-
-    The two-path detection is necessary: without (b), a re-fetch where
-    the frontend reissues the SAME address after a transient idle
-    would inherit the ORIGINAL transition cycle for fe1, inflating lat
-    from 1 to (idle_dwell + 1).
-    """
+    """Walks the VCD's I$ signals alongside the main tracer and emits one
+    ICacheEvent per delivered fetch. A new access starts when vaddr_o changes
+    or state_q re-enters READ, the second catching a re-fetch of the same PC."""
 
     NON_READ_STATES = frozenset({
         FSM_FLUSH, FSM_IDLE, FSM_MISS, FSM_KILL_ATRANS, FSM_KILL_MISS, None,
@@ -768,27 +706,16 @@ class ICacheTimeline:
 
 
 def match_records_to_events(records, events):
-    """Bind I$ pipeline timing onto each record.
-
-    Every record: bind if1_lo/if2_lo/ic_miss for the FIRST fetch via the I$
-    event whose vaddr_word == (pc & ~FETCH_OFFSET_MASK) with maximum
-    fe2_cycle <= rec.fe_cycle. RVC pair sharing falls out naturally (both
-    halves have close fe_cycles → same event), while loop iterations have
-    well-separated fe_cycles → their own event.
-
-    wraps_line records also bind if1_hi/if2_hi for the SECOND fetch at
-    ((pc+2) & ~FETCH_OFFSET_MASK) with the same fe2_cycle ordering rule
-    (the upper-half word starts at pc+2 == next block's base).
-
-    Records with no matching event (killed accesses, fui drops) keep None.
-    Returns (n_matched, n_unmatched, n_wraps_with_hi, n_rebound, n_synth)."""
+    """Bind I$ timing onto each record: if1_lo, if2_lo and ic_miss from the
+    event for the record's own word with the highest fe2 at or before fe_cycle,
+    plus if1_hi and if2_hi at pc+2 when it wraps. No match leaves them None."""
 
     by_word = defaultdict(list)
     for ev in events:
         by_word[ev.vaddr_word].append(ev)
-    # Parallel sorted fe2_cycle keys per word so lookups can bisect the event
-    # window. A hot loop accumulates one event per iteration per word, so a
-    # linear scan is quadratic and could hang on a large trace.
+    # fe2_cycle keys per word, sorted alongside the events so each lookup can
+    # binary-search its window. A hot loop puts one event per iteration on a
+    # word, which made the old linear scan quadratic and could hang.
     by_word_fe2 = {}
     for word in by_word:
         by_word[word].sort(key=lambda e: e.fe2_cycle)
@@ -826,19 +753,16 @@ def match_records_to_events(records, events):
             n_matched += 1
         else:
             n_unmatched += 1
-            # Flushed-record fallback: wrong-path fetches killed before the
-            # icache delivers emit no ICacheEvent, but the record has fe_cycle
-            # (FE saw the kill). Synthesize if1/if2 two cycles before fe_cycle
-            # so the timeline draws them instead of an orphan fe_out cell.
+            # Flushed-record fallback. A wrong-path fetch is killed before
+            # the icache responds, so no event exists. Synthesize cycles two
+            # before fe_cycle so the timeline draws if1/if2, not an orphan.
             if rec.flushed and rec.fe_cycle is not None:
                 rec.if2_lo = max(0, rec.fe_cycle - 1)
                 rec.if1_lo = max(0, rec.fe_cycle - 2)
                 rec.ic_miss = False
-        # Second fetch (wraps_line only): upper half lives at pc+2. Extra
-        # constraint fe1_cycle >= rec.if1_lo prevents find_best from picking a
-        # STALE event from a prior iteration's prefetch (CVA6's frontend is
-        # non-blocking on the hi side and can deliver it ahead of the next
-        # iteration's lo word, yielding an if1_hi earlier than this if1_lo).
+        # Second fetch, wraps_line records only, upper half at pc+2.
+        # fe1_cycle >= rec.if1_lo or find_best picks a stale prefetch, the
+        # frontend being non-blocking on the hi side.
         if rec.wraps_line:
             hi_word = (pc_int + 2) & ~FETCH_OFFSET_MASK
             hi_candidates = by_word.get(hi_word, [])
@@ -855,18 +779,19 @@ def match_records_to_events(records, events):
             if best_hi is not None:
                 rec.if1_hi = best_hi.fe1_cycle
                 rec.if2_hi = best_hi.fe2_cycle
-                # Authoritative hi-miss from the icache FSM (state_q==MISS at
-                # the fe2 cycle).
+                # Authoritative hi-miss from the icache FSM. The hi event
+                # carries the same ic_miss bit as the lo one, replacing an
+                # if2-if1 heuristic that over-counted on port-busy stalls.
                 rec.ic_miss_hi = best_hi.ic_miss
                 n_wraps_with_hi += 1
 
-    # Post-process: enforce fetch monotonicity in commit order. find_best
-    # picks the latest event with fe2 <= fe_cycle, but in a loop where the
-    # line stays cached (no fresh event) an iteration-N record can bind to
-    # iteration N-1's delivery. Two strategies in order:
-    #   1. Rebind to a LATER event for the same word with fe1 >= prev_if1.
-    #   2. If none exists, SYNTHESIZE fetch cycles (assume cached hit consumed
-    #      from IQ just before fe_cycle) so rendering respects program order.
+    # Enforce fetch monotonicity in commit order. find_best takes the latest
+    # event with fe2 <= fe_cycle, so in a loop whose line stays cached an
+    # iteration can bind to the previous iteration's delivery.
+    #
+    #   1. Rebind to a later event for the same word with fe1 >= prev_if1.
+    #   2. Failing that, synthesize cycles just before id_stage entry and
+    #      assume a cached hit, which respects program-order fetch.
     prev_if1 = -1
     prev_rec_with_if1 = None
     n_rebound = 0
@@ -921,17 +846,13 @@ def match_records_to_events(records, events):
                     rec.if2_hi = new_hi.fe2_cycle
                     rec.ic_miss_hi = new_hi.ic_miss
         else:
-            # No later event: the line is still resident and the icache never
-            # re-pulsed. Synthesize using sequential FE timing relative to the
-            # previous record's if1 (the FE issues one IF1/cycle in steady
-            # state, and one fetch word can serve multiple records):
-            #   - lo-word == prev's lo-word -> shared lo fetch (RVC pair)
-            #   - lo-word == prev's hi-word -> shared with prev's hi fetch
-            #   - otherwise -> new fetch one cycle after prev's last fetch
-            # fe_cycle is the upper ceiling (pipeline depth must fit before it).
-            # Anchoring at fe_cycle-depth is wrong when a later record stalls in
-            # ID/IS: it invents a fictitious FE gap for an instr that actually
-            # fetched on schedule and just waited in instr_queue.
+            # No later event for this record's lo word. The line is
+            # still resident from an earlier iteration and the icache
+            # state never re-pulsed. Synthesize fetch cycles.
+            #
+            # Sequential FE timing off the previous record's if1. A matching
+            # lo or hi word shares that fetch, anything else takes the next
+            # cycle, and fe_cycle is the ceiling minus the pipeline depth.
             depth = 3 if rec.wraps_line else 2
             seq_if1 = None
             if (prev_rec_with_if1 is not None
@@ -958,7 +879,9 @@ def match_records_to_events(records, events):
                 except (TypeError, ValueError):
                     seq_if1 = None
             if seq_if1 is None:
-                # No usable prev context -> fall back to fe_cycle anchor.
+                # No usable prev context. Anchoring on fe_cycle overstates
+                # the FE gap when the issue stage stalled, since the FE
+                # fetched on time and the instruction sat in instr_queue.
                 seq_if1 = max(prev_if1, rec.fe_cycle - depth)
             synth_if1 = max(seq_if1, prev_if1)
             # Ceiling: synth must leave enough room before fe_cycle
@@ -982,11 +905,9 @@ def match_records_to_events(records, events):
         prev_if1 = rec.if1_lo
         prev_rec_with_if1 = rec
 
-    # RVC-pair sharing: two compressed instrs in the same 32-bit fetch word
-    # come from one icache transaction, so they must share if1_lo/if2_lo/
-    # ic_miss (and hi-side when wraps_line). The main loop processes records
-    # independently and can bind the two halves to different events on a
-    # re-fetch. This pass forces the second to inherit the first's binding.
+    # RVC-pair sharing. Two compressed instructions in one fetch word arrive
+    # in a single transaction, so the second inherits the first's binding. The
+    # main loop is per-record and can otherwise pick different events.
     n_rvc_paired = 0
     for i in range(1, len(records)):
         prev = records[i - 1]
@@ -1000,10 +921,9 @@ def match_records_to_events(records, events):
             curr_pc = int(curr.pc, 16)
         except (TypeError, ValueError):
             continue
-        # Same fetch block AND consecutive 2-byte slots. FETCH_BYTES=4 (this
-        # config) has max 2 RVCs/fetch, while FETCH_BYTES=8 chains the
-        # propagation across up to 4 consecutive compressed records in the
-        # block.
+        # Same FETCH_BYTES-aligned block and consecutive 2-byte slots. At
+        # FETCH_BYTES=4 a pair check suffices, at 8 the iteration chains
+        # across a run of up to 4 compressed records in one block.
         if (prev_pc & ~FETCH_OFFSET_MASK) != (curr_pc & ~FETCH_OFFSET_MASK):
             continue
         if curr_pc != prev_pc + 2:
@@ -1027,27 +947,9 @@ def match_records_to_events(records, events):
 
 
 def tag_branch_bubbles(records):
-    """Attribute each pipeline bubble to its causer + recovery instruction.
-
-    Walk records in id order and find [non-flushed][≥1 flushed][non-flushed].
-    The first non-flushed is the causer, the second the recovery, the flushed
-    run in between is wasted wrong-path fetch bandwidth. completed[] is sorted
-    by id first: the live stream can interleave commit and flush events that
-    finalize the same cycle, so id order is not guaranteed.
-
-    Classification (causer only):
-      - mispred     : bp_mispredict=True AND bp_predicted_cf != 'NoCF'
-      - unpred      : bp_mispredict=True AND bp_predicted_cf == 'NoCF'
-                      (BTB miss / not-predicted-taken branch)
-      - flush_other : else, with a flushed run (CSR side-effect, FENCE*/
-                      SFENCE/HFENCE/AMO commit, exception entry)
-    flush_other is captured ONLY for a non-trivial bubble. Silent CSRs that
-    commit cleanly are not tagged.
-
-    Returns (counts, diag). diag cross-validates against Phase 7a:
-    bp_mispredict_total, and of those _flushed (can't be causers),
-    _no_followers (instant recovery), _end_of_trace (no recovery, truncated).
-    """
+    """Attribute each bubble to its causer and recovery, walking records in id
+    order for [non-flushed][flushed run][non-flushed]. The causer is classified
+    mispred, unpred or flush_other. Returns the kind counts and diagnostics."""
     counts = {"mispred": 0, "unpred": 0, "flush_other": 0, "pred_taken": 0}
     diag = {
         "bp_mispredict_total":         0,
@@ -1058,8 +960,9 @@ def tag_branch_bubbles(records):
     if len(records) < 2:
         return counts, diag
 
-    # Defensive sort by id (flushed records append at flush time, which can
-    # fire the same cycle as a commit, so completed[] is only mostly ordered).
+    # Defensive sort by id. completed[] is mostly ordered already, but a
+    # flushed record is appended at detection time, which can fire on the same
+    # cycle as a commit. At about 50k records the cost is negligible.
     ordered = sorted(records, key=lambda r: r.id if r.id is not None else -1)
     n = len(ordered)
 
@@ -1075,7 +978,7 @@ def tag_branch_bubbles(records):
     i = 0
     while i < n:
         # Advance to the next non-flushed record. Records at the very
-        # start of the trace that are flushed (warmup-era kills) have
+        # start of the trace that are flushed (early kills) have
         # no causer. We skip them silently.
         while i < n and ordered[i].flushed:
             i += 1
@@ -1105,9 +1008,9 @@ def tag_branch_bubbles(records):
         recovery = ordered[j]
         bubble_size = j - i - 1  # count of flushed records between
 
-        # Classify by causer branch state (see docstring). NoCF/None = the
-        # predictor missed this PC (branch_unit.sv stays silent on JAL, which
-        # bypasses resolution, so NoCF regardless of the mispredict bit).
+        # unpred is NoCF, the predictor said nothing. mispred is a guess
+        # that was wrong. pred_taken belongs to the second pass, since a
+        # correct prediction leaves no flushed run behind it.
         pcf = causer.bp_predicted_cf
         if causer.fu == "CTRL_FLOW" and (pcf is None or pcf == "NoCF"):
             kind = "unpred"
@@ -1115,11 +1018,9 @@ def tag_branch_bubbles(records):
             kind = "mispred"
         else:
             kind = "flush_other"
-            # Dual-commit CSR partner. A CSR flush takes effect one cycle after
-            # commit. An unrelated op dual-committed the same cycle can look
-            # like the "last non-flushed before the bubble" when the CSR is the
-            # real cause. If the prior record committed the same cycle and is
-            # fu='CSR', prefer it as the causer.
+            # Dual-commit CSR partner. A CSR flush takes effect a cycle
+            # after commit, so an op that dual-committed beside it looks like
+            # the causer. Prefer a CSR that committed in the same cycle.
             if i > 0:
                 prev = ordered[i - 1]
                 if (not prev.flushed
@@ -1128,6 +1029,22 @@ def tag_branch_bubbles(records):
                         and prev.co_cycle == causer.co_cycle
                         and prev.fu == "CSR"):
                     causer = prev
+            # Self-flushed CSR. A committing CSR write asserts flush_ex_o,
+            # which re-flushes the CSR itself, leaving it flushed with wb_cycle
+            # but no co_cycle. It, not the innocent predecessor, is the cause.
+            #
+            # fu='CSR' with wb_cycle set and flushed=True, anywhere in the
+            # run. Take the first in commit order, and shrink bubble_size by
+            # one since the CSR did real work.
+            if causer.fu != "CSR":
+                for k in range(i + 1, j):
+                    cand = ordered[k]
+                    if (cand.fu == "CSR"
+                            and cand.wb_cycle is not None
+                            and cand.flushed):
+                        causer = cand
+                        bubble_size = (j - i - 1) - 1
+                        break
 
         causer.bubble_kind = kind
         causer.bubble_caused_cycles = bubble_size
@@ -1136,23 +1053,30 @@ def tag_branch_bubbles(records):
         recovery.bubble_cycles = bubble_size
         counts[kind] += 1
 
-        # The recovery may itself be the next bubble's causer, so leave i = j.
+        # Continue from the recovery, which may itself cause the next bubble,
+        # a corrected branch that mispredicts in turn. Leaving i = j lets the
+        # outer scan pick it up immediately.
         i = j
 
-    # Second pass: taken-branch fetch bubbles with NO flushed run. Three cases
-    # survive the flush-based pass, all costing FE1 redirect cycles:
-    #   pred_taken: predictor right. A correctly-predicted taken branch still
-    #               has a 1-2 cycle FE1 gap (BHT/BTB see the decoded branch at
-    #               FE2 and the redirect takes 1-2 cycles). Always no-flush.
-    #   mispred:    predictor wrong, but the wrong-path fetch slots were empty
-    #               at resolution (CVA6's instant-recovery path) so nothing
-    #               was flushed.
-    #   unpred:     predictor silent (default not-taken), with the same
-    #               instant-recovery story when the EX redirect lands with no
-    #               wrong-path fetches to kill.
-    # Scan forward to the next non-flushed record with if1_lo. A FE1 more than
-    # 1 cycle after the causer's is a bubble. The flush-based pass takes
-    # precedence (skip already-tagged causers and already-claimed recoveries).
+    # Second pass. Taken-branch fetch bubbles (no-flush cases).
+    # After the flush-based pass above, three categories of taken
+    # control flow can still be untagged:
+    #
+    #   pred_taken: the predictor was right. Every correctly predicted taken
+    #               branch still leaves a 1 to 2 cycle FE1 gap, since the
+    #               BHT and BTB see the branch at FE2. Always no-flush.
+    #
+    #   mispred:    the predictor guessed and was wrong. Handled by the
+    #               flush-based pass when a flushed run exists. CVA6 also
+    #               recovers instantly with no records flushed.
+    #
+    #   unpred:     the predictor was silent, so not-taken is assumed and a
+    #               branch that resolves taken sets mispredict. Same instant
+    #               recovery, sometimes with no wrong-path fetches to kill.
+    #
+    # All three are found by scanning forward to the next non-flushed record
+    # with if1_lo set, and a gap over 1 cycle is a bubble. The flush-based pass
+    # wins, so causers and recoveries it already tagged are skipped.
     for i in range(n):
         causer = ordered[i]
         if causer.flushed:
@@ -1162,25 +1086,23 @@ def tag_branch_bubbles(records):
         if causer.bubble_kind is not None:
             continue  # already tagged by flush-based pass
 
-        # Guard on fu=='CTRL_FLOW': the RVFI predict bus does not self-clear
-        # between instructions, so a load/ALU op just downstream of a taken
-        # jump can carry stale bp_resolved_taken/bp_predicted_cf and steal
-        # attribution of the next FE gap from the actual branch.
+        # Only a branch, jump or return can cause an FE redirect bubble, and
+        # fu == 'CTRL_FLOW' is required too: the RVFI predict bus does not
+        # self-clear, so a following load can carry a stale prediction.
         if causer.fu != "CTRL_FLOW":
             continue
 
-        # bp_resolved_taken is authoritative, and jumps and returns are always
-        # taken, so predicted_cf alone suffices if resolved_taken was dropped.
+        # Is this taken control flow? bp_resolved_taken is the authoritative
+        # signal and jumps and returns are always taken. A seen prediction is
+        # enough when bp_resolved_taken was dropped.
         is_taken = (causer.bp_resolved_taken is True
                     or causer.bp_predicted_cf in ("Jump", "Return"))
         if not is_taken:
             continue
 
-        # Measure delta from the causer's LAST fetch cycle, not its IF1: the FE
-        # redirect can only happen once the instruction is fully delivered.
-        # Otherwise the causer's own icache stall (which lives in IF1..IF2)
-        # gets absorbed into the bubble, e.g. a predicted-taken branch behind a
-        # cold-line miss would show an N-cycle bubble for a 0-cycle redirect.
+        # Measure from the causer's LAST fetch cycle, if2_hi when it wraps and
+        # if2_lo otherwise. The redirect cannot happen before delivery, and
+        # measuring from if1 would absorb the causer's own icache stall.
         causer_fetch_end = (causer.if2_hi
                             if (causer.wraps_line
                                 and causer.if2_hi is not None)
@@ -1199,9 +1121,9 @@ def tag_branch_bubbles(records):
             delta = nxt.if1_lo - causer_fetch_end
             if delta > 1:
                 bubble_size = delta - 1
-                # Same scheme as the flush-based pass. NoCF/None -> "unpred"
-                # regardless of the mispredict bit (it stays False for
-                # JAL-style direct jumps that bypass branch_unit resolution).
+                # Classify by predictor state, as the flush-based pass does.
+                # NoCF means nothing was predicted, so the redirect is unpred
+                # whatever bp_mispredict says, JAL bypassing resolution.
                 pcf = causer.bp_predicted_cf
                 if pcf is None or pcf == "NoCF":
                     kind = "unpred"
@@ -1209,12 +1131,9 @@ def tag_branch_bubbles(records):
                     kind = "mispred"
                 else:
                     kind = "pred_taken"
-                    # Cap at the architectural FE-redirect latency: CVA6's
-                    # static decoder fires at FE2, so the target fetch issues
-                    # one cycle later. Any excess is IQ backpressure, not the
-                    # predictor's fault. Mispred/unpred are deliberately NOT
-                    # capped: EX must resolve before the FE can redirect, so
-                    # those waits really are caused by the branch.
+                    # CVA6's static decoder fires at FE2, so the FE issues
+                    # the target one cycle later and the redirect costs 1.
+                    # Beyond that is IQ backpressure, not the predictor.
                     bubble_size = min(bubble_size, 1)
                 causer.bubble_kind = kind
                 causer.bubble_caused_cycles = bubble_size
@@ -1235,13 +1154,10 @@ class PipelineTracker:
     """Maintains queues of in-flight instances and applies handshake/flush
     events. Order discipline: each queue is strict FIFO (in-order pipeline)."""
 
-    def __init__(self, user_entry_pc=None,
-                 n_wb_ports=NR_WB_PORTS, n_commit_ports=NR_COMMIT_PORTS):
-        self.user_entry_pc = user_entry_pc
+    def __init__(self, n_wb_ports=NR_WB_PORTS, n_commit_ports=NR_COMMIT_PORTS):
         self.n_wb_ports = n_wb_ports
         self.n_commit_ports = n_commit_ports
 
-        self.warmup_end_cycle = None
 
         self.fetched = deque()        # has fe_cycle, awaiting decode
         self.decoded = deque()        # has id_cycle, awaiting issue
@@ -1256,38 +1172,49 @@ class PipelineTracker:
         self.n_unmatched_writebacks = 0
         self.n_unmatched_commits = 0
 
-        # Realigner counters. serving_unaligned_o (= registered unaligned_q)
-        # goes high while the realigner holds a fetch's upper half. It CHAINS:
-        # a fetch that completes one unaligned and begins another keeps it at 1
-        # with no 0→1 edge, so NEITHER counter equals the wraps_line count.
-        #   - starts (0→1 edges): distinct unaligned RUNS. A run yields 0
-        #     records (killed by kill_s2) or N (chained dispatches).
-        #   - cycles (cycles high): realigner stall time, inflated by icache
-        #     gaps/misses between the contributing fetches. Not an instr count.
-        # wraps_line correctness is instead verified by the lo→hi binding
-        # success rate in match_records_to_events.
+        # Realigner signal counters.
+        #
+        # serving_unaligned_o is registered unaligned_q, high while the
+        # realigner holds a fetch's upper half. It chains: a fetch that
+        # completes one unaligned and begins another has no 0 to 1 edge.
+        #
+        # Therefore neither counter below equals the wraps_line record
+        # count directly. The relationships are:
+        #
+        #   - n_realigner_unaligned_starts, the 0 to 1 transitions, counts
+        #     the unaligned runs the realigner began. A run can yield no
+        #     records if kill_s2 catches it, or several when they chain.
+        #
+        #   - n_realigner_unaligned_cycles, the cycles high, is the stall
+        #     time unaligned_q was held. It inflates with icache gaps between
+        #     the contributing fetches, so it is a stall metric not a count.
+        #
+        # wraps_line tagging is verified separately by the 100% lo to hi
+        # binding rate in match_records_to_events: every such record finds two
+        # distinct I$ events at the expected word addresses.
         self.n_realigner_unaligned_starts = 0
         self.n_realigner_unaligned_cycles = 0
 
-        # Forwarding diagnostics. The per-source counters fire ONLY on a real
-        # forward whose producer slot is on the wb bus that cycle. All zero =>
-        # via=wb is impossible at this signal boundary. Nonzero while the final
-        # via=wb stat is 0 => the via writer in on_decode_issue has a bug.
+        # Forwarding diagnostics, firing only when a real forward coincides
+        # with the producer on the wb bus. All zero means via=wb is impossible
+        # here. Nonzero with a zero via=wb stat means the via writer is wrong.
         self._diag_n_issue_cycles = 0
         self._diag_n_issue_with_any_wb = 0
         self._diag_n_real_match_rs1 = 0
         self._diag_n_real_match_rs2 = 0
         self._diag_n_real_match_rs3 = 0
 
-        # I$ event timeline. match_records_to_events binds if1/if2/ic_miss onto
-        # each record by 4-byte-aligned PC after the walk.
+        # I$ event timeline, filled per cycle by the walker. After the walk
+        # match_records_to_events binds if1/if2/ic_miss onto each record by
+        # 4-byte-aligned PC.
         self.icache_timeline = ICacheTimeline()
 
-        # LSU FSM correlation via lsu_ctrl.trans_id (see on_lsu_fsm_sample).
-        # pop_ld=1 in SEND_TAG / pop_st=1 in VALID_STORE mean a NEW access is
-        # admitted while the FSM still processes the previous one, with no
-        # state_q transition to detect it. `pending_admit_*_tid_str` defers
-        # such an admission by one cycle to align with the FSM's handoff.
+        # LSU FSM correlation via lsu_ctrl.trans_id.
+        # See on_lsu_fsm_sample for details.
+        #
+        # An admit-while-busy is pop_ld=1 in SEND_TAG or pop_st=1 in
+        # VALID_STORE, so state_q does not transition. pending_admit_*_tid_str
+        # defers it a cycle to line up with the FSM's logical handoff.
         self.active_lsu_load = None
         self.active_lsu_store = None
         self.prev_load_state_str = None
@@ -1296,23 +1223,23 @@ class PipelineTracker:
         self.pending_admit_load_tid_str = None
         self.pending_admit_store_tid_str = None
 
-        # D$ event log, filled by on_dcache_sample and bound to records later
-        # by attribute_dc_events_to_records via the [admit, complete] window.
-        # Events are in cycle order because on_dcache_sample runs once per
-        # rising edge in ascending order, and the attribution pass relies on
-        # this invariant instead of re-sorting.
+        # D$ event log, filled by on_dcache_sample during the scan. After it
+        # completes, attribute_dc_events_to_records binds events to records by
+        # the [admit, complete] window, plus tid where the event carries one.
+        #
+        # Events arrive in cycle order, since the caller invokes
+        # on_dcache_sample once per rising edge ascending. The attribution
+        # pass relies on that instead of re-sorting.
         self._dc_events = []
         self._rfsm_active_cycles = set()
 
-        # Phase 7b: dirty victim writeback events (flush/wback unit).
-        # Each handshake is logged in cycle order during the scan. Pairing
-        # and the AXI-write-latency aggregate are computed in
-        # finalize_writebacks() after the walk. Send<->ack pair by flush
-        # slot id. Alloc<->ack join by nline.
+        # Dirty victim writeback events, logged in cycle order. Pairing and
+        # the AXI-write-latency aggregate happen in finalize_writebacks().
+        # Send and ack pair by flush slot id, alloc and ack join by nline.
         self._wb_allocs = []   # (cycle, nline_hex, way_onehot)
         self._wb_sends = []    # (cycle, slot_id_int, addr_hex)
         self._wb_acks = []     # (cycle, slot_id_int, nline_hex)
-        # Phase 7b linkage: dirty-victim evictions from the miss handler.
+        # Dirty-victim evictions from the miss handler.
         # (cycle, incoming_nline_hex, victim_way_onehot). Joined to writebacks
         # by (set, way) in finalize_writebacks.
         self._wb_evicts = []
@@ -1322,14 +1249,17 @@ class PipelineTracker:
     # -- per-stage event handlers ------------------------------------------
 
     def on_fetch(self, cycle, pc, instr_word, is_compressed):
-        # Mask to 16 bits when compressed: the frontend's instruction field
-        # carries the I$ line's lower 32 bits, which for an RVC pair holds BOTH
-        # instructions. The one at this PC lives in the low 16.
+        # Mask the instruction word to 16 bits when compressed. The frontend
+        # field carries the line's lower 32 bits, which for an RVC pair holds
+        # both, and the one at this PC is in the low half.
         if is_compressed and instr_word is not None:
             try:
                 instr_word = f"0x{int(instr_word, 16) & 0xFFFF:04x}"
             except ValueError:
                 pass
+        # wraps_line comes from PC and size: a 32-bit instruction at offset 6
+        # of an 8B block has its upper half in the next fetch. Equivalent to
+        # serving_unaligned_o asserting at the realigner's output cycle.
         wraps = self._compute_wraps_line(pc, is_compressed)
         rec = InstructionRecord(
             id=self.next_id,
@@ -1344,19 +1274,9 @@ class PipelineTracker:
 
     @staticmethod
     def _compute_wraps_line(pc, is_compressed):
-        """True iff this instruction straddles a fetch-block boundary.
-
-        The icache delivers FETCH_BYTES bytes/cycle aligned to FETCH_BYTES
-        (cva6_icache.sv:158, 428), so a 32-bit instruction at offset
-        FETCH_BYTES-2 has its upper 16 bits in the NEXT block and the
-        realigner must combine two fetches (instr_realign.sv realign_bp_32
-        sets unaligned_d at offset 2 for FW=32, realign_bp_64 at offset 6 for
-        FW=64). Equivalent to serving_unaligned_o asserting at the realigner's
-        output cycle.
-
-        The predicate must stay FETCH_BYTES-aware so it covers both FW=32
-        (offset 2) and FW=64 (offset 6) fetch blocks.
-        """
+        """True when the instruction straddles a fetch-block boundary: a 32-bit
+        instruction at offset FETCH_BYTES-2 has its upper half in the next
+        block (cva6_icache.sv:158, 428), so the realigner combines two fetches."""
         if is_compressed or pc is None:
             return False
         try:
@@ -1365,16 +1285,9 @@ class PipelineTracker:
             return False
 
     def on_fetch_dropped(self, cycle, pc, instr_word, is_compressed):
-        """FE handshake fired on a cycle where flush_unissued_instr_i is high.
-
-        Per id_stage.sv:444, id_stage forces issue_n[0].valid=0 when flush_i is
-        high, overriding the valid=1 the FE handshake set at line 433: the
-        frontend pops its instr_queue but id_stage discards the entry.
-
-        Correctness-critical: this record must NOT go on `fetched`. Doing so
-        leaves a phantom at the head that HW's id_stage never had, and every
-        later pop runs +1 ahead of HW's real decode. Record it as flushed
-        instead, for visibility into the discarded speculative path."""
+        """An FE handshake on a cycle where flush_unissued_instr_i is high.
+        id_stage.sv:444 forces issue_n[0].valid=0, so the frontend pops but the
+        entry is discarded. Recorded as flushed and kept out of `fetched`."""
         if is_compressed and instr_word is not None:
             try:
                 instr_word = f"0x{int(instr_word, 16) & 0xFFFF:04x}"
@@ -1395,52 +1308,20 @@ class PipelineTracker:
         self.next_id += 1
         self.n_flushed_if += 1
 
-    def on_decode(self, cycle, fu_val=None, rs1=None, rs2=None, rd=None):
-        if not self.fetched:
-            return
-        rec = self.fetched.popleft()
-        rec.id_cycle = cycle
-        # Phase 4a: decoded fields sampled at the same handshake.
-        if fu_val is not None:
-            rec.fu = FU_NAME.get(fu_val, f"UNK_{fu_val}")
-            rec.fu_category = FU_CATEGORY.get(rec.fu, "Other")
-        rec.rs1 = rs1
-        rec.rs2 = rs2
-        rec.rd = rd
-        self.decoded.append(rec)
-
     def on_decode_issue(self, cycle, trans_id,
                         fu_val=None, rs1=None, rs2=None, rd=None,
                         bp_cf_val=None, bp_predict_target=None,
                         fwd_rs1_used=False, fwd_rs2_used=False, fwd_rs3_used=False,
                         ihz_rs1=None, ihz_rs2=None, ihz_rs3=None,
                         wb_view=None):
-        """Combined decode+issue handler.
-
-        In non-superscalar CVA6 the scoreboard's issue_instr_o is a
-        combinational passthrough of decoded_instr_i (scoreboard.sv:151), so
-        DV/DA and IV/IA fire as a SINGLE handshake. Tracking them as two events
-        reads trans_id from IPTR at the wrong cycle whenever the pipeline
-        stalls between fetches, landing +N ahead of the actual HW slot. Pop
-        fetched and assign trans_id in one step from the IPTR value at the
-        handshake cycle, which is the HW slot being allocated.
-
-        ex_cycle is cycle+1 (CVA6 ALU/FPU pipeline depth invariant).
-
-        bp_cf_val / bp_predict_target come from mem_q[trans_id].sbe.bp, stable
-        from the slot's decode write until slot reuse. Issue is chosen as the
-        capture point because that's when the record acquires trans_id.
-
-        Forwarding: fwd_rsX_used from forward_rsX, ihz_rsX the producer slot
-        from idx_hzd_rsX[0]. wb_view is the same-cycle writeback bus as
-        (port, trans_id) tuples for ports with wt_valid_i=1, and a producer
-        slot present there means via='wb' (same-cycle bypass), else via='sb'.
-        """
+        """Combined decode and issue. issue_instr_o is a combinational passthrough
+        of decoded_instr_i (scoreboard.sv:151), so both handshakes fire together
+        and trans_id must be read from IPTR on that one cycle."""
         if not self.fetched:
             return
-        # Diagnostics. These gate on fwd_rsX_used=True. All-zero here means
-        # via=wb=0 is the true answer for this build, and nonzero means the
-        # via writer has a bug.
+        # Forwarding diagnostics, counted only on a real forward. All zero
+        # means no forward in the trace coincides with the producer's wb, so
+        # via=wb=0 is the true answer for this build.
         self._diag_n_issue_cycles += 1
         wb_tids_set = {tid for _port, tid in (wb_view or [])}
         if wb_view:
@@ -1462,13 +1343,19 @@ class PipelineTracker:
         rec.rs1 = rs1
         rec.rs2 = rs2
         rec.rd = rd
+        # Branch prediction snapshot. bp_cf_val is the cf_t
+        # enum int from mem_q[trans_id].sbe.bp.cf. bp_predict_target
+        # is the VLEN-bit predict_address as int (or None).
         if bp_cf_val is not None:
             rec.bp_predicted_cf = CF_T_NAMES.get(
                 bp_cf_val, f"UNK_{bp_cf_val}")
-            # Leave the target None for NoCF: a prediction-less record would
-            # otherwise carry a misleading 0 target.
+            # Only attach a target when a prediction was made, leaving None
+            # for NoCF to avoid the misleading 0 target.
             if rec.bp_predicted_cf != "NoCF":
                 rec.bp_predicted_target = bp_predict_target
+        # Forwarding capture. Where forwarding fired, look the producer
+        # trans_id up in the same-cycle wb_view to classify the path as "wb",
+        # bypassed off the writeback bus, or "sb", read from the scoreboard.
         wb_tids = {tid for _port, tid in (wb_view or [])}
         if fwd_rs1_used:
             rec.fwd_rs1_used = True
@@ -1483,22 +1370,15 @@ class PipelineTracker:
             rec.fwd_rs3_from_tid = ihz_rs3
             rec.fwd_rs3_via = "wb" if ihz_rs3 in wb_tids else "sb"
         self.issued[trans_id] = rec
-        # No LSU pending-assignment here: correlation happens via
-        # lsu_ctrl.trans_id at FSM-transition time in on_lsu_fsm_sample.
+        # No LSU pending-assignment needed here.
+        # Correlation happens via lsu_ctrl.trans_id at FSM-transition
+        # time in on_lsu_fsm_sample, looking up self.issued[prev_tid].
 
     def on_branch_resolved(self, cycle, pc_str, target_str,
                            is_taken_str, is_mispredict_str, cf_type_str):
-        """Handle a branch resolution pulse.
-
-        bp_resolve_t.valid is high for exactly one cycle when branch_unit
-        resolves a branch (branch_unit.sv:84), and its pc identifies it.
-        Bind by pc among in-flight CTRL_FLOW records, picking the OLDEST
-        (lowest is_cycle) on a tie: loops can have several instances of the
-        same PC in flight and branch_unit resolves them in issue order.
-
-        Unmatched resolutions are silently dropped (flushes can legitimately
-        strand a resolution in the pipeline), not counted as warnings.
-        """
+        """Handle a resolution pulse, high for one cycle when branch_unit resolves
+        (branch_unit.sv:84). Bound to an in-flight CTRL_FLOW record by pc,
+        oldest is_cycle first. A resolution with no match is dropped."""
         if pc_str is None:
             return
         pc_int = binary_to_int(pc_str)
@@ -1513,8 +1393,9 @@ class PipelineTracker:
                 continue
             if rec.pc is None:
                 continue
-            # Compare as ints: binary_to_hex drops leading zeros, so the hex
-            # strings on either side are not directly comparable.
+            # rec.pc is the hex string written by on_fetch. Normalize
+            # both sides for comparison (some pc values lose leading
+            # zeros after binary_to_hex. Compare as ints).
             try:
                 rec_pc_int = int(rec.pc, 16)
             except (TypeError, ValueError):
@@ -1542,73 +1423,55 @@ class PipelineTracker:
         rec.bp_resolved_taken = (is_taken_str == "1")
         rec.bp_mispredict = (is_mispredict_str == "1")
 
-        # Derive the predictor's verdict algebraically from the resolution
-        # signals. Neither direct-read path is reliable: the pre-edge
-        # decoded_instr_i.bp.cf snapshot misattributes the PREVIOUS
-        # instruction's bp.cf for back-to-back issues (the typical loop), and
-        # mem_q[*].sbe.bp isn't always dumped. But branch_unit.sv:99 gives an
-        # invertible relation:
-        #     is_mispredict = comp_res XOR (predict.cf == Branch)
-        # so predict.cf follows exactly from (resolved_cf, taken, mispredict).
-        # This is more authoritative than either capture: it is the same logic
-        # the hardware uses to decide whether to flush.
+        # Derive bp_predicted_cf from the resolution signals. The pre-edge
+        # decoded_instr_i.bp.cf misattributes back-to-back issues and mem_q is
+        # not always dumped, but branch_unit.sv:99 gives an invertible relation:
+        #
+        #   is_mispredict = comp_res XOR (predict.cf == Branch)
+        #
+        # so predict.cf is reconstructable from (resolved_cf, taken,
+        # mispredict) for any record that reached resolution. More
+        # authoritative than either capture, being the logic HW flushes on.
         resolved = rec.bp_resolved_cf
         taken = rec.bp_resolved_taken
         mis = rec.bp_mispredict
         derived = None
         if resolved == "Branch":
-            # branch_unit overwrites cf_type to Branch on the resolution path,
-            # losing the predictor's actual cf. The XOR math recovers it:
-            # predict.cf was Branch (taken-predicted) iff (taken XOR mis) == 1.
+            # Conditional branch. branch_unit overwrites cf_type to Branch on
+            # the resolution path, losing the predictor's cf, but the XOR
+            # recovers it: predict.cf was Branch iff taken XOR mispredict.
             if taken is not None and mis is not None:
                 derived = "Branch" if (taken ^ mis) else "NoCF"
         elif resolved == "Jump":
-            # frontend.sv:256 unconditionally sets cf=Jump for every JAL, so a
-            # direct jump has no NoCF path.
+            # Direct JAL. Frontend.sv:256 unconditionally sets cf=Jump
+            # for every JAL. There is no NoCF path for a direct jump
+            # the front end identifies as such.
             derived = "Jump"
         elif resolved == "JumpR":
-            # JALR only (branch_unit.sv:101-107). A mispredict means either a
-            # BTB miss (NoCF) or a wrong-target JumpR prediction. The BTB-miss
-            # case dominates since the default prediction is fall-through.
+            # JALR. branch_unit.sv:101-107 enters this path only on JALR,
+            # and a mispredict means either a BTB miss or a wrong target. The
+            # BTB-miss case dominates, so use NoCF on mispredict else JumpR.
             if mis is True:
                 derived = "NoCF"
             elif mis is False:
                 derived = "JumpR"
         elif resolved == "Return":
-            # RAS-predicted. predict.cf was Return either way: on a mispredict
-            # (wrong RAS target or underflow) only the address was wrong.
+            # Returns are predicted by the RAS, so predict.cf was Return
+            # either way. No mispredict is a RAS hit, mispredict is a wrong
+            # target or an underflow, and only the address was wrong.
             derived = "Return"
-        # else: keep the pre-edge capture. Rare, and shouldn't happen for the
-        # CTRL_FLOW records resolve_branch is gated on, but guarded anyway.
+        # else leave whatever the pre-edge capture put in. Rare, a record
+        # reaching resolution with a resolved_cf outside the four, which
+        # resolve_branch's gating should prevent.
         if derived is not None:
             rec.bp_predicted_cf = derived
 
     def on_lsu_fsm_sample(self, cycle, load_state_str, store_state_str,
                           lsu_ctrl_trans_id_str=None,
                           pop_ld_str=None, pop_st_str=None):
-        """LSU FSM correlation via lsu_ctrl + pop + state transitions.
-
-        Three admission-detection rules. In all of them trans_id is the
-        PREVIOUS cycle's lsu_ctrl.trans_id:
-
-        A. IDLE → non-IDLE: standard admission.
-
-        B. pop_ld_o=1 while the load FSM is in SEND_TAG (load_unit.sv:343) or
-           pop_st_o=1 while the store FSM is in VALID_STORE
-           (store_unit.sv:191): admit-while-busy with NO state transition
-           (only the access identity changes). Deferred one cycle via
-           `pending_admit_*_tid_str`.
-
-        B'. SEND_TAG → any non-IDLE (load), VALID_STORE → any non-IDLE
-            (store). Per load_unit.sv:332-353 and store_unit.sv:179-206 the
-            only way to leave those states while staying non-IDLE is
-            accepting a new request, so the new record takes over the FSM
-            this cycle. Needed because these admissions (STG→WGT/WPO/ABT,
-            VST→WTL/WSR) never assert pop_ld_o/pop_st_o: the pop fires only
-            on grant or store-buffer-ready, which hasn't happened yet.
-
-        B and B' are mutually exclusive: B requires the state to stay
-        SEND_TAG/VALID_STORE, B' requires it to change out of them."""
+        """Correlate the LSU FSMs. Admissions come from IDLE to non-IDLE, from
+        pop_ld/pop_st while the FSM stays in SEND_TAG or VALID_STORE, and from
+        leaving those two states, which are mutually exclusive by construction."""
 
         # ---- LOAD FSM ----
         if load_state_str is not None:
@@ -1624,7 +1487,8 @@ class PipelineTracker:
             else:
                 handled_admit_this_cycle = False
 
-                # Rule B: pending admit from prev cycle's pop_ld_o + SEND_TAG.
+                # Rule B: pending admit from prev-cycle's
+                # pop_ld_o=1 / SEND_TAG combination.
                 if self.pending_admit_load_tid_str is not None:
                     tid = binary_to_int(self.pending_admit_load_tid_str)
                     rec = self.issued.get(tid) if tid is not None else None
@@ -1643,8 +1507,9 @@ class PipelineTracker:
                     self.pending_admit_load_tid_str = None
                     handled_admit_this_cycle = True
 
-                # Rule A / completion / mid-flight, only if rule B didn't
-                # already handle an admission this cycle.
+                # Rule A: state transition admission / completion /
+                # mid-flight, only if rule B didn't already handle
+                # an admission this cycle.
                 if (not handled_admit_this_cycle
                         and load_state_str != self.prev_load_state_str):
                     try:
@@ -1668,11 +1533,9 @@ class PipelineTracker:
                             rec.lsu_state_history.append({
                                 "cycle": cycle, "state": new_name})
                     elif old_name == "SEND_TAG" and new_name != "IDLE":
-                        # Rule B': admit-while-busy leaving SEND_TAG for any
-                        # non-IDLE state. Per load_unit.sv:320-354 the exits
-                        # are IDLE (completion, below), SEND_TAG (Rule B), and
-                        # WAIT_GNT / WAIT_PAGE_OFFSET / ABORT_TRANSACTION{,_NI},
-                        # which are all NEW admissions.
+                        # Rule B', admit-while-busy: SEND_TAG to any
+                        # non-IDLE state. Per load_unit.sv:320-354 only IDLE
+                        # and SEND_TAG are not new admissions.
                         if self.active_lsu_load is not None:
                             self.active_lsu_load.lsu_complete_cycle = cycle
                         tid = None
@@ -1761,11 +1624,9 @@ class PipelineTracker:
                             rec.lsu_state_history.append({
                                 "cycle": cycle, "state": new_name})
                     elif old_name == "VALID_STORE" and new_name != "IDLE":
-                        # Rule B': admit-while-busy leaving VALID_STORE. Per
-                        # store_unit.sv:179-206 the exits are IDLE
-                        # (completion), VALID_STORE (Rule B), and
-                        # WAIT_TRANSLATION / WAIT_STORE_READY, which are NEW
-                        # admissions.
+                        # Rule B', admit-while-busy out of VALID_STORE. Per
+                        # store_unit.sv:179-206 only IDLE and VALID_STORE are
+                        # not admissions, leaving the two wait states.
                         if self.active_lsu_store is not None:
                             self.active_lsu_store.lsu_complete_cycle = cycle
                         tid = None
@@ -1808,20 +1669,12 @@ class PipelineTracker:
                          mallo, mtid, msid, mpf, mnline_alloc,
                          mchk, mchk_nline, mchkhit,
                          rfsm, rrsp, rtid):
-        """Capture per-cycle HPDcache miss-handler events.
-
-        Each non-zero pulse appends a typed event to `self._dc_events`, and the
-        refill FSM is sampled independently into `self._rfsm_active_cycles`.
-        Attribution to records happens later in
-        attribute_dc_events_to_records.
-
-        Arguments are raw VCD `state` strings, decoded here to keep the
-        per-cycle dispatch slim. None signals (absent from this VCD) are
-        tolerated: their events are simply not generated.
-        """
-        # MSHR allocation pulse. sid distinguishes load-adapter from
-        # store/CMO/HWPF allocations. Only sid in LOAD_ADAPTER_SIDS can become
-        # a dc_primary_miss. Stored raw so consumers can re-classify.
+        """Capture per-cycle HPDcache miss-handler events into `self._dc_events`,
+        with refill-FSM activity tracked separately for the overlap test.
+        Missing signals are tolerated, their events are simply not generated."""
+        # MSHR allocation pulse. The sid separates a load-adapter allocation
+        # from a store, CMO or HWPF one, and only LOAD_ADAPTER_SIDS can become
+        # a dc_primary_miss. Stored raw so it can be reclassified later.
         if mallo == "1":
             self._dc_events.append({
                 "cycle": cycle,
@@ -1832,10 +1685,9 @@ class PipelineTracker:
                 "nline": binary_to_int(mnline_alloc) if mnline_alloc else None,
             })
 
-        # MSHR-check pulse, split by mshr_check_hit_o (combinational, same
-        # edge). check_hit is the coalescing signal: a request found its nline
-        # already pending. The check path has NO sid input, so attribution is
-        # purely by cycle window.
+        # MSHR-check pulse, 'check_hit' or 'check_miss' from the
+        # combinational mshr_check_hit_o on the same edge. check_hit is
+        # coalescing. The check path has no sid, so attribution is by cycle.
         if mchk == "1":
             hit = (mchkhit == "1")
             self._dc_events.append({
@@ -1844,8 +1696,9 @@ class PipelineTracker:
                 "nline": binary_to_int(mchk_nline) if mchk_nline else None,
             })
 
-        # Refill response: refill data reaching the core port for a primary
-        # miss. tid identifies the requestor (hpdcache_miss_handler.sv:382,397).
+        # Refill response: when refill data finally reaches the core
+        # port for a primary miss. Tid identifies which requestor
+        # gets the data (see hpdcache_miss_handler.sv:382,397).
         if rrsp == "1":
             self._dc_events.append({
                 "cycle": cycle,
@@ -1853,39 +1706,29 @@ class PipelineTracker:
                 "tid":   binary_to_int(rtid) if rtid else None,
             })
 
-        # Any non-zero refill FSM state means a refill is writing the data RAM,
-        # updating the directory, or invalidating. The data RAM port is
-        # consumed on those cycles and can stall unrelated loads, which is why
-        # dc_refill_overlap is tracked even for hits.
+        # Any non-zero refill state means a refill is writing the data RAM,
+        # updating the directory or invalidating, consuming the RAM port and
+        # stalling unrelated loads. Hence dc_refill_overlap even for hits.
         if rfsm is not None:
             rfsm_val = binary_to_int(rfsm)
             if rfsm_val is not None and rfsm_val != REFILL_FSM_IDLE:
                 self._rfsm_active_cycles.add(cycle)
 
     def attribute_dc_events_to_records(self):
-        """Bind D$ events back to LOAD/STORE records.
-
-        Runs once after the scan, when `self.completed` is final. For each Mem
-        record with an [admit, complete] window, copies the events falling in
-        it into `dc_events` and sets dc_primary_miss / dc_coalesced /
-        dc_refill_overlap (see the InstructionRecord field docs for their
-        exact meaning). Records without a complete LSU trace (flushed before
-        admission) get `dc_events=[]` and all booleans False, while non-Mem
-        records are untouched.
-        """
-        # ev_cycles / rfsm_sorted are sorted key arrays so each record can
-        # bisect straight to the first event in its window. Events are already
-        # in cycle order (on_dcache_sample runs once per ascending rising
-        # edge), so no re-sort is needed.
+        """Bind D$ events to LOAD and STORE records once the scan is done, copying
+        events inside each record's [admit, complete] window and setting
+        dc_primary_miss, dc_coalesced and dc_refill_overlap from them."""
+        # Index events by cycle so each record binary-searches into its window
+        # instead of rescanning from cycle zero, with rfsm_sorted doing the same
+        # for refill overlap. The old per-record scan looked like a hang.
         evlog = self._dc_events
         n_events = len(evlog)
         ev_cycles = [ev["cycle"] for ev in evlog]
         rfsm_sorted = sorted(self._rfsm_active_cycles)
 
-        # evlog positions of sid=3 allocs already claimed by an earlier store.
-        # Required because HPDCACHE_STORE_LOOKAHEAD widens store windows, and
-        # two stores dispatched within the lookahead would otherwise both see
-        # the SAME alloc and double-count it.
+        # Positions in evlog already claimed by an earlier store. The store
+        # window is extended by HPDCACHE_STORE_LOOKAHEAD, so without this two
+        # nearby stores would both count the same alloc.
         consumed_store_alloc_idx = set()
 
         n_loads = n_stores = 0
@@ -1905,15 +1748,16 @@ class PipelineTracker:
                 rec.dc_events = []
                 continue
 
+            # Bounded to this record's [admit, window_end] via the bisect
+            # below, so the work per record is proportional to the events in
+            # its window, not the whole log.
             events_in_window = []
             primary_miss = False
             coalesced = False
 
-            # Stores complete (FSM → IDLE) as soon as the cache acks, but the
-            # MSHR alloc fires several cycles later in the cache's st0→st1→st2
-            # pipeline, so extend the store window by that depth. Loads keep
-            # their window: load_unit waits for data, so complete is already
-            # past the alloc.
+            # A store's FSM reaches IDLE when the cache acks, but its MSHR
+            # alloc fires several cycles later in st0-st1-st2. Loads keep the
+            # plain window, since load_unit waits for the data.
             HPDCACHE_STORE_LOOKAHEAD = 5
             if rec.fu == "STORE":
                 window_end = complete + HPDCACHE_STORE_LOOKAHEAD
@@ -1930,17 +1774,15 @@ class PipelineTracker:
                 etype = ev["type"]
                 if etype == "alloc":
                     sid = ev.get("sid")
-                    # Both LSU FSMs are serial (at most one load in WAIT_GNT,
-                    # stores likewise), so a sid=1 alloc in a LOAD's window
-                    # belongs to that load and a sid=3 alloc in a STORE's
-                    # window to that store. The cache's `tid` cannot
-                    # disambiguate: it is cva6_req_i.data_id, which is
-                    # ldbuf_windex for loads (not the scoreboard trans_id) and
-                    # hard-wired to '0 for stores.
+                    # Both LSU FSMs are serial, so a sid=1 alloc in a LOAD's
+                    # window is that load and sid=3 in a STORE's is that
+                    # store. The cache's tid cannot disambiguate.
                     if rec.fu == "LOAD" and sid == LOAD_UNIT_SID:
                         primary_miss = True
                     elif rec.fu == "STORE" and sid == STORE_ADAPTER_SID:
-                        # Skip allocs already claimed by an earlier store.
+                        # Skip if a previous store already claimed
+                        # this alloc. Prevents double-counting when
+                        # store windows overlap due to the lookahead.
                         if ev_idx in consumed_store_alloc_idx:
                             continue
                         consumed_store_alloc_idx.add(ev_idx)
@@ -1948,18 +1790,21 @@ class PipelineTracker:
                 elif etype == "check_hit":
                     coalesced = True
 
-            # Refill overlap: any cycle in [admit, complete] is rFSM-active.
+            # Refill overlap: any cycle in [admit, complete] in the
+            # rFSM-active set. Set lookup is O(1) per cycle.
             rf_lo = bisect.bisect_left(rfsm_sorted, admit)
             refill_overlap = (rf_lo < len(rfsm_sorted)
                               and rfsm_sorted[rf_lo] <= complete)
 
             rec.dc_events = events_in_window
 
-            # check_hit has no source-ID input, so attribution leans on
-            # load_unit being single-threaded: a check_hit in a LOAD's window
-            # is overwhelmingly that load's. dc_coalesced/dc_refill_overlap
-            # stay LOAD-only: stores allocate rather than coalesce (no
-            # check_i), and a concurrent refill is not "this store's miss".
+            # check_hit has no source-ID on the miss handler, but load_unit's
+            # FSM is single-threaded and holds at most one load in WGT, so a
+            # check_hit inside a LOAD's window is almost surely that load's.
+            #
+            # For STOREs, an sid=3 alloc in their window sets
+            # dc_primary_miss, store_unit being serial too. dc_coalesced and
+            # dc_refill_overlap stay LOAD-only, stores do not emit check_i.
             if rec.fu == "LOAD":
                 rec.dc_primary_miss = primary_miss
                 rec.dc_coalesced = coalesced
@@ -1976,12 +1821,9 @@ class PipelineTracker:
                 if primary_miss:
                     n_prim += 1
 
-        # Perf-counter-equivalent totals. HPDcache exports
-        # evt_cache_read_miss_o = ~st2_mshr_alloc_is_prefetch_i
-        # (hpdcache_ctrl_pe.sv:368), counting ALL non-prefetch MSHR allocs.
-        # n_primary_miss_loads is a strict subset (only sid==1 allocs bound to
-        # a LOAD record). Stores, PTW, accel and CMO allocs count here but
-        # never set dc_primary_miss. Computed so the viewer can show both views.
+        # Perf-counter view of misses. evt_cache_read_miss_o counts every
+        # non-prefetch MSHR alloc (hpdcache_ctrl_pe.sv:368), where
+        # n_primary_miss_loads counts only those attributed to a LOAD.
         n_miss_total = 0
         n_miss_loads_g = 0   # global, sid==LOAD_UNIT_SID, regardless of tid match
         n_miss_stores = 0   # sid==STORE_ADAPTER_SID
@@ -2014,17 +1856,15 @@ class PipelineTracker:
             "n_dcache_miss_events_other":  n_miss_other,
         }
 
-    # -- Phase 7b: dirty victim writeback (flush/wback unit) ---------------
+    # -- Dirty victim writeback (flush/wback unit) ----------------------
 
     def on_wback_sample(self, cycle,
                         alloc_v, alloc_r, alloc_nline, alloc_way,
                         send_v, send_r, send_id, send_addr,
                         ack_v, ack_r, ack_id, ack_nline):
-        """Log writeback handshakes. Called once per rising edge (cycle
-        order). Alloc = victim handed to flush unit. Send = mem write
-        request issued. Ack = memory response. Pairing is deferred to
-        finalize_writebacks(). Alloc_way is the one-hot victim way (used for
-        the eviction join)."""
+        """Log writeback handshakes in cycle order: alloc hands the victim to the
+        flush unit, send issues the memory write, ack is the response. Pairing
+        is deferred to finalize_writebacks()."""
         if alloc_v == "1" and alloc_r == "1":
             self._wb_allocs.append((cycle, binary_to_hex(alloc_nline),
                                     binary_to_int(alloc_way)))
@@ -2036,22 +1876,17 @@ class PipelineTracker:
                                   binary_to_hex(ack_nline)))
 
     def on_evict_sample(self, cycle, alloc_v, wback, mshr_nline, victim_way):
-        """Log a dirty-victim eviction whenever the miss handler allocates a
-        miss whose selected victim way is dirty (mshr_alloc_i && wback). The
-        incoming line is mshr_nline (X). The victim Y (same set, same way) is
-        written back. Joined to a writeback in finalize_writebacks by
-        (set, way). No ready-gate: the (set,way)+window join is robust to the
-        held-high duplicate cycles."""
+        """Log a dirty-victim eviction when the miss handler allocates with wback.
+        The victim shares the set and way with the incoming line, which is how
+        finalize_writebacks joins it to its writeback."""
         if alloc_v == "1" and wback == "1":
             self._wb_evicts.append((cycle, binary_to_hex(mshr_nline),
                                     binary_to_int(victim_way)))
 
     def finalize_writebacks(self):
-        """Pair send<->ack by flush slot id (FIFO per id) for AXI write
-        latency, join alloc<->ack by nline (FIFO per nline) for residency, and
-        build the writeback event list + latency aggregate."""
-        from statistics import median
-
+        """Pair send with ack by flush slot id for the AXI write latency, join
+        alloc with ack by nline for total residency, and build the event list
+        and latency aggregate."""
         send_q = defaultdict(deque)
         for c, sid, addr in self._wb_sends:
             send_q[sid].append((c, addr))
@@ -2097,9 +1932,9 @@ class PipelineTracker:
 
         events.sort(key=lambda e: e["send_cycle"])
 
-        # Eviction linkage: join each writeback to the dirty eviction that
-        # caused it by (set, victim_way), nearest within a small window
-        # (evictions are same-cycle in practice, and the window absorbs skew).
+        # --- eviction linkage: join each writeback to the dirty eviction
+        # that caused it, by (set, victim_way) nearest within a small window
+        # (validated: same-cycle, delta=0. Window absorbs handshake skew).
         SET_MASK = (1 << 8) - 1          # 256 sets -> setWidth 8
         WINDOW = 4
         n_linked = 0
@@ -2164,16 +1999,6 @@ class PipelineTracker:
         }
         return self.writeback_stats
 
-    def on_issue(self, cycle, trans_id):
-        if self.decoded:
-            rec = self.decoded.popleft()
-            rec.is_cycle = cycle
-            rec.ex_cycle = cycle + 1     # CVA6 invariant
-            rec.trans_id = trans_id
-            # If the slot is already occupied (shouldn't happen given commit
-            # runs first) the old occupant is unrecoverable.
-            self.issued[trans_id] = rec
-
     def on_writeback(self, cycle, port, trans_id,
                      mq_fu=None, mq_rs1=None, mq_rs2=None, mq_rd=None,
                      mq_bp_cf=None):
@@ -2183,10 +2008,9 @@ class PipelineTracker:
             return
         if rec.wb_cycle is None:
             rec.wb_cycle = cycle
-        # Overwrite decoded fields with the AUTHORITATIVE values from the
-        # scoreboard's registered mem_q ring buffer: stable from decode+1 to
-        # commit, so reading at writeback has no timing ambiguity. When mem_q
-        # isn't in the VCD the caller passes None and the pre-edge values stay.
+        # Overwrite the decoded fields with the authoritative values from the
+        # registered mem_q ring, stable from decode+1 to commit. When mem_q is
+        # absent the caller passes mq_* = None and the pre-edge values stay.
         if mq_fu is not None:
             rec.fu = FU_NAME.get(mq_fu, f"UNK_{mq_fu}")
             rec.fu_category = FU_CATEGORY.get(rec.fu, "Unknown")
@@ -2196,11 +2020,9 @@ class PipelineTracker:
             rec.rs2 = mq_rs2
         if mq_rd is not None:
             rec.rd = mq_rd
-        # Same authoritative correction for the predictor verdict: the pre-edge
-        # decoded_instr_i.bp.cf snapshot is wrong for back-to-back issues (it
-        # holds the previous instruction's bp, since issue_q only flips at the
-        # rising edge), while mem_q[trans_id].sbe.bp.cf is registered a cycle
-        # later and stable through commit.
+        # Same correction for the predictor verdict. The pre-edge
+        # decoded_instr_i.bp.cf holds the previous instruction on back-to-back
+        # issue, while mem_q[trans_id].sbe.bp.cf is stable through commit.
         if mq_bp_cf is not None:
             rec.bp_predicted_cf = CF_T_NAMES.get(mq_bp_cf, f"UNK_{mq_bp_cf}")
 
@@ -2212,9 +2034,9 @@ class PipelineTracker:
             self.n_unmatched_commits += 1
             return
         rec.co_cycle = cycle
-        # Apply mem_q fields if rec.fu wasn't set at writeback: NONE-fu
-        # instructions auto-validate without using a writeback port
-        # (scoreboard.sv:189).
+        # Apply mem_q decoded fields if rec.fu wasn't set at
+        # writeback (e.g., NONE-fu instructions auto-validate without going
+        # through a writeback port. See scoreboard.sv line 189).
         if mq_fu is not None and rec.fu is None:
             rec.fu = FU_NAME.get(mq_fu, f"UNK_{mq_fu}")
             rec.fu_category = FU_CATEGORY.get(rec.fu, "Unknown")
@@ -2224,22 +2046,13 @@ class PipelineTracker:
             rec.rs2 = mq_rs2
         if mq_rd is not None and rec.rd is None:
             rec.rd = mq_rd
-        # Same fallback for bp.cf: NONE-fu instructions reach commit without
-        # ever passing a wb port, so the writeback fixup misses them.
+        # Same fallback for bp.cf on no-writeback paths
+        # (NONE-fu instructions). The writeback fixup catches most, but
+        # NONE-fu ones reach commit without ever going through a wb port.
         if mq_bp_cf is not None and rec.bp_predicted_cf is None:
             rec.bp_predicted_cf = CF_T_NAMES.get(mq_bp_cf, f"UNK_{mq_bp_cf}")
         self.completed.append(rec)
         self.n_committed += 1
-        # Warmup boundary = the FETCH cycle of the first instance committed at
-        # user_entry_pc, NOT its commit cycle, so that main's entry instruction
-        # and its immediate successors classify as user code, not warmup.
-        if (self.warmup_end_cycle is None
-                and self.user_entry_pc is not None
-                and rec.pc is not None
-                and rec.fe_cycle is not None
-                and int(rec.pc, 16) == int(self.user_entry_pc, 16)):
-            self.warmup_end_cycle = rec.fe_cycle
-
     # -- flush handlers ----------------------------------------------------
 
     def _flush_fetched(self, reason):
@@ -2290,11 +2103,6 @@ class PipelineTracker:
             self._flush_issued("eof")
         # Restore id-sorted order. Flushes can interleave.
         self.completed.sort(key=lambda r: r.id)
-        # Apply warmup classification.
-        if self.warmup_end_cycle is not None:
-            for rec in self.completed:
-                if rec.fe_cycle is not None:
-                    rec.is_warmup = rec.fe_cycle < self.warmup_end_cycle
 
 
 # ============================================================================
@@ -2365,18 +2173,14 @@ def match_whitelist(whitelist, path_to_id, scope_prefix):
     return matches
 
 
-# Matches the tail "mem_q[<N>].sbe.fu" or "mem_q[<N>].sbe.fu[3:0]" of a VCD
-# signal path. Used to probe the actual scoreboard depth in the build before
-# the whitelist match runs, so we can refuse to process VCDs from builds
-# with NrScoreboardEntries > NR_SB_ENTRIES (the tracer's compile-time max).
+# Matches the "mem_q[<N>].sbe.fu" tail of a VCD path, with or without a bit
+# range. Probes the build's real scoreboard depth before the whitelist runs,
+# so a build with more slots than NR_SB_ENTRIES can be refused.
 _MEMQ_SLOT_PROBE_RE = re.compile(r"mem_q\[(\d+)\]\.sbe\.fu(?:\[[\d:]+\])?$")
 
-# Probes used by the pre-flight guards in main(). Each detects a config
-# parameter that the tracer cannot handle by deviating from its compile-time
-# default. Larger values mean silent wrong output (signals on the high
-# indices are not in the whitelist and never read), so the pre-flight
-# aborts with a clear instruction to bump the corresponding NR_* constant.
-# Smaller values are fine. The unused slots stay None at runtime.
+# Probes for the pre-flight guards in main(). A larger value than the
+# compile-time default means silent wrong output, since the high indices are
+# not in the whitelist. Smaller is fine, the unused slots stay None.
 _DECODED_PORT1_RE = re.compile(
     r"decoded_instr_i\[1\]\.fu(?:\[[\d:]+\])?$")
 _COMMIT_PTR_RE = re.compile(
@@ -2386,11 +2190,9 @@ _WB_TRANSID_RE = re.compile(
 
 
 def probe_max_scoreboard_slot(path_to_id):
-    """Find the largest N such that mem_q[N].sbe.fu exists in the VCD.
-    Returns -1 if no mem_q slots are present (e.g., a non-CVA6 dump or
-    a scoreboard without struct tracing). The scan walks all VCD signal
-    paths, not just the whitelisted ones, so it can see slots beyond
-    what the tracer would enumerate at compile time."""
+    """Largest N with mem_q[N].sbe.fu in the VCD, or -1 when none are present.
+    Scans every signal path, not just whitelisted ones, so it sees slots past
+    what the tracer enumerates at compile time."""
     max_n = -1
     for path in path_to_id:
         m = _MEMQ_SLOT_PROBE_RE.search(path)
@@ -2519,7 +2321,6 @@ def stream_and_extract(f, matches, args, n_wb_ports, n_commit_ports):
 
     state = {}
     tracker = PipelineTracker(
-        user_entry_pc=args.user_entry_pc,
         n_wb_ports=n_wb_ports,
         n_commit_ports=n_commit_ports,
     )
@@ -2534,21 +2335,22 @@ def stream_and_extract(f, matches, args, n_wb_ports, n_commit_ports):
 
     DV = single_id.get("issue_stage_i.i_scoreboard.decoded_instr_valid_i")
     DA = single_id.get("issue_stage_i.i_scoreboard.decoded_instr_ack_o")
-    # Phase 4a: decoded_instr_i fields sampled at decode handshake.
+    # decoded_instr_i fields sampled at decode handshake.
     DFU = single_id.get("issue_stage_i.i_scoreboard.decoded_instr_i[0].fu")
     DRS1 = single_id.get("issue_stage_i.i_scoreboard.decoded_instr_i[0].rs1")
     DRS2 = single_id.get("issue_stage_i.i_scoreboard.decoded_instr_i[0].rs2")
     DRD = single_id.get("issue_stage_i.i_scoreboard.decoded_instr_i[0].rd")
-    # decoded_instr_i.bp.{cf,predict_address}, captured via pre-edge snapshot
-    # to dodge the same advance-on-rising-edge issue as fu/rs1/rs2/rd.
+    # decoded_instr_i.bp.{cf,predict_address} at the decode handshake, taken
+    # from the pre-edge snapshot to avoid the same advance-on-rising-edge
+    # problem as fu/rs1/rs2/rd.
     DBP_CF = single_id.get(
         "issue_stage_i.i_scoreboard.decoded_instr_i[0].bp.cf")
     DBP_TGT = single_id.get(
         "issue_stage_i.i_scoreboard.decoded_instr_i[0].bp.predict_address")
 
-    # Forwarding signals from issue_read_operands. forward_rsX/idx_hzd_rsX are
-    # combinational and advance to the next instruction's view on the rising
-    # edge, so they need the same pre-edge snapshot as decoded_instr_i.*.
+    # Forwarding signals from issue_read_operands, snapshotted pre-edge like
+    # decoded_instr_i.*, since forward_rsX and idx_hzd_rsX are combinational
+    # too and advance to the next instruction's view on the edge.
     FWD_RS1 = single_id.get("issue_stage_i.i_issue_read_operands.forward_rs1")
     FWD_RS2 = single_id.get("issue_stage_i.i_issue_read_operands.forward_rs2")
     FWD_RS3 = single_id.get("issue_stage_i.i_issue_read_operands.forward_rs3")
@@ -2561,17 +2363,17 @@ def stream_and_extract(f, matches, args, n_wb_ports, n_commit_ports):
     FWD_AVAILABLE = all(s is not None for s in (
         FWD_RS1, FWD_RS2, FWD_RS3, IHZ_RS1, IHZ_RS2, IHZ_RS3))
     if FWD_AVAILABLE:
-        stagelog("Phase 8a: issue_read_operands forwarding signals resolved",
-                 file=sys.stderr)
+        stagelog("issue_read_operands forwarding signals resolved",
+              file=sys.stderr)
     else:
         missing = [name for name, sig in [
             ("forward_rs1",   FWD_RS1), ("forward_rs2", FWD_RS2),
             ("forward_rs3",   FWD_RS3), ("idx_hzd_rs1[0]", IHZ_RS1),
             ("idx_hzd_rs2[0]", IHZ_RS2), ("idx_hzd_rs3[0]", IHZ_RS3),
         ] if sig is None]
-        stagelog("WARNING: Phase 8a - forwarding signals not resolved. "
-                 "fwd_rsX_* fields will be left null on all records. "
-                 "Missing: " + ", ".join(missing), file=sys.stderr)
+        stagelog("WARNING: Forwarding signals not resolved. "
+              "fwd_rsX_* fields will be left null on all records. "
+              "Missing: " + ", ".join(missing), file=sys.stderr)
     IV = single_id.get("issue_stage_i.i_scoreboard.issue_instr_valid_o")
     IA = single_id.get("issue_stage_i.i_scoreboard.issue_ack_i")
     IPTR = single_id.get("issue_stage_i.i_scoreboard.issue_pointer_q")
@@ -2584,19 +2386,16 @@ def stream_and_extract(f, matches, args, n_wb_ports, n_commit_ports):
         if vid is not None:
             TID_MAP[port] = vid
 
-    # Per-slot maps for the scoreboard's registered mem_q.
+    # Per-slot maps for scoreboard's registered mem_q.
     # MEMQ_FU[N] = vcd_id of mem_q[N].sbe.fu (None if slot not exposed).
     NR_SB = NR_SB_ENTRIES
     MEMQ_FU = [None] * NR_SB
     MEMQ_RS1 = [None] * NR_SB
     MEMQ_RS2 = [None] * NR_SB
     MEMQ_RD = [None] * NR_SB
-    # Authoritative bp.cf source. The decoded_instr_i pre-edge snapshot is
-    # unreliable for back-to-back issues: when the instruction enters issue_q
-    # on the same rising edge as iss_ack, the sample holds the PREVIOUS
-    # instruction's bp.cf (NoCF for non-CTRL_FLOW). mem_q[tid].sbe.bp.cf is
-    # stable from a cycle after issue through commit, so reading it at
-    # writeback gives the true predictor verdict.
+    # Authoritative bp.cf. The pre-edge decoded_instr_i snapshot holds the
+    # PREVIOUS instruction's bp.cf on back-to-back issue, while registered
+    # mem_q[trans_id].sbe.bp.cf is stable from issue+1 through commit.
     MEMQ_BP_CF = [None] * NR_SB
     memq_resolved = 0
     memq_bp_resolved = 0
@@ -2619,12 +2418,9 @@ def stream_and_extract(f, matches, args, n_wb_ports, n_commit_ports):
         if bp_cf_vid is not None:
             memq_bp_resolved += 1
 
-    # Detect the actual scoreboard depth from MEMQ_FU presence: parameter-sweep
-    # builds may use a smaller scoreboard than the compile-time NR_SB_ENTRIES.
-    # Without adapting, `memq_resolved == NR_SB` fails and we fall through to
-    # the pre-edge fallback, which is off-by-one for back-to-back issues and
-    # yields wrong FU types throughout. (The pre-flight probe in main() bails
-    # out for builds with MORE slots than the tracer default.)
+    # Detect the real scoreboard depth from MEMQ_FU presence. A sweep build
+    # may be smaller, and without shrinking NR_SB the memq check fails and the
+    # off-by-one pre-edge fallback produces wrong FU types throughout.
     detected_nr_sb = 0
     for n in range(NR_SB):
         if MEMQ_FU[n] is not None:
@@ -2633,11 +2429,11 @@ def stream_and_extract(f, matches, args, n_wb_ports, n_commit_ports):
             break
     if 0 < detected_nr_sb < NR_SB:
         stagelog(f"Scoreboard depth: detected {detected_nr_sb} slots in VCD "
-                 f"(tracer default NR_SB_ENTRIES={NR_SB}). Adapting NR_SB and "
-                 f"per-slot arrays. This usually means the build has "
-                 f"NrScoreboardEntries={detected_nr_sb} (TRANS_ID_BITS="
-                 f"{(detected_nr_sb - 1).bit_length()}).",
-                 file=sys.stderr)
+              f"(tracer default NR_SB_ENTRIES={NR_SB}). Adapting NR_SB and "
+              f"per-slot arrays. This usually means the build has "
+              f"NrScoreboardEntries={detected_nr_sb} (TRANS_ID_BITS="
+              f"{(detected_nr_sb - 1).bit_length()}).",
+              file=sys.stderr)
         NR_SB = detected_nr_sb
         MEMQ_FU = MEMQ_FU[:NR_SB]
         MEMQ_RS1 = MEMQ_RS1[:NR_SB]
@@ -2650,48 +2446,48 @@ def stream_and_extract(f, matches, args, n_wb_ports, n_commit_ports):
     MEMQ_AVAILABLE = (memq_resolved == NR_SB)
     MEMQ_BP_AVAILABLE = (memq_bp_resolved == NR_SB)
     if MEMQ_BP_AVAILABLE:
-        stagelog("Phase 7a: mem_q[*].sbe.bp.cf resolved. Using authoritative "
-                 "reads at writeback to correct the pre-edge decoded_instr_i "
-                 "bp.cf misattribution for back-to-back issues",
-                 file=sys.stderr)
+        stagelog("mem_q[*].sbe.bp.cf resolved. Using authoritative "
+              "reads at writeback to correct the pre-edge decoded_instr_i "
+              "bp.cf misattribution for back-to-back issues",
+              file=sys.stderr)
     else:
-        stagelog(f"WARNING: Phase 7a. mem_q[*].sbe.bp.cf not resolved "
-                 f"({memq_bp_resolved}/{NR_SB} slots found). Falling back to "
-                 f"the pre-edge decoded_instr_i.bp.cf snapshot, which is "
-                 f"INCORRECT for back-to-back issues (the typical loop case): "
-                 f"the pre-edge sample reads the PREVIOUS instruction's bp.cf "
-                 f"because issue_q only flips at the rising edge. Most loop "
-                 f"branches will appear as predicted_cf=NoCF in the output. "
-                 f"To fix: ensure your Verilator dump includes mem_q[N].sbe.bp "
-                 f"for all scoreboard slots.",
-                 file=sys.stderr)
+        stagelog(f"WARNING: mem_q[*].sbe.bp.cf not resolved "
+              f"({memq_bp_resolved}/{NR_SB} slots found). Falling back to "
+              f"the pre-edge decoded_instr_i.bp.cf snapshot, which is "
+              f"INCORRECT for back-to-back issues (the typical loop case): "
+              f"the pre-edge sample reads the PREVIOUS instruction's bp.cf "
+              f"because issue_q only flips at the rising edge. Most loop "
+              f"branches will appear as predicted_cf=NoCF in the output. "
+              f"To fix: ensure your Verilator dump includes mem_q[N].sbe.bp "
+              f"for all scoreboard slots.",
+              file=sys.stderr)
 
-    # Phase 7a: decoded_instr_i[0].bp.{cf,predict_address} availability.
+    # decoded_instr_i[0].bp.{cf,predict_address} availability.
     BP_DECODE_AVAILABLE = (DBP_CF is not None and DBP_TGT is not None)
     if BP_DECODE_AVAILABLE:
-        stagelog("Phase 7a: decoded_instr_i[0].bp.{cf,predict_address} resolved. "
-                 "using pre-edge snapshot for prediction capture",
-                 file=sys.stderr)
+        stagelog("decoded_instr_i[0].bp.{cf,predict_address} resolved. "
+              "using pre-edge snapshot for prediction capture",
+              file=sys.stderr)
     else:
         missing = [name for name, sig in [
             ("decoded_instr_i[0].bp.cf", DBP_CF),
             ("decoded_instr_i[0].bp.predict_address", DBP_TGT),
         ] if sig is None]
-        stagelog("WARNING: Phase 7a. Decoded_instr_i.bp.* not resolved. "
-                 "bp_predicted_* fields will be left None on all records. "
-                 "Missing: " + ", ".join(missing), file=sys.stderr)
+        stagelog("WARNING: decoded_instr_i.bp.* not resolved. "
+              "bp_predicted_* fields will be left None on all records. "
+              "Missing: " + ", ".join(missing), file=sys.stderr)
 
     if MEMQ_AVAILABLE:
         stagelog(f"mem_q ring buffer: all {NR_SB} slots resolved. Using authoritative reads",
-                 file=sys.stderr)
+              file=sys.stderr)
     elif memq_resolved > 0:
         stagelog(f"mem_q ring buffer: only {memq_resolved}/{NR_SB} slots resolved. "
-                 "falling back to decode-time pre-edge capture",
-                 file=sys.stderr)
+              "falling back to decode-time pre-edge capture",
+              file=sys.stderr)
         MEMQ_AVAILABLE = False
     else:
         stagelog("mem_q ring buffer: NOT exposed in VCD. Falling back to decode-time pre-edge capture",
-                 file=sys.stderr)
+              file=sys.stderr)
 
     CA = single_id.get("commit_stage_i.commit_ack_o")
     CPTR_PORTS = [single_id.get(
@@ -2701,20 +2497,16 @@ def stream_and_extract(f, matches, args, n_wb_ports, n_commit_ports):
     FIF = single_id.get("flush_ctrl_if")
     FID = single_id.get("flush_ctrl_id")
     FEX = single_id.get("flush_ctrl_ex")
-    # flush_unissued_instr_i gates the decode+issue handshake and the fetch.
+    # Gate the decode handshake by !flush_unissued_instr_i.
     FUI = single_id.get("issue_stage_i.i_scoreboard.flush_unissued_instr_i")
     if FUI is None:
         stagelog("WARNING: flush_unissued_instr_i not resolved. Phantom-decode "
-                 "gating will be DISABLED and the +N slot drift may return.",
-                 file=sys.stderr)
+              "gating will be DISABLED and the +N slot drift may return.",
+              file=sys.stderr)
 
-    # I$ signal lookups for ICacheTimeline.on_cycle. STATE_Q is the I$
-    # controller FSM (cva6_icache.sv:122). The dreq_o signals come from the
-    # FRONTEND-side mirror (i_frontend.icache_dreq_i), electrically the same
-    # as the I$'s dreq_o but reachable without an I$-scoped lookup.
-    # CSR-equivalent access sources: the perf counters increment on any cycle
-    # icache_dreq_o.req is high (I$) or any ex_stage core port raises data_req
-    # (D$). Handles resolved once here, sampled in at_rising_edge.
+    # I$ lookups for ICacheTimeline.on_cycle. STATE_Q is the controller FSM
+    # (cva6_icache.sv:122), dreq_o the frontend-side mirror. Access counters
+    # increment on icache_dreq_o.req or any ex_stage data_req.
     IC_REQ = single_id.get("i_frontend.icache_dreq_o.req")
     DC_REQ_PORTS = [single_id.get(
         f"ex_stage_i.dcache_req_ports_o[{p}].data_req")
@@ -2726,8 +2518,8 @@ def stream_and_extract(f, matches, args, n_wb_ports, n_commit_ports):
             f"ex_stage_i.dcache_req_ports_o[{p}].data_req"
             for p in range(DCACHE_REQ_PORTS))
         stagelog("CSR-equivalent access counters enabled "
-                 f"(icache_dreq_o.req + {port_list})",
-                 file=sys.stderr)
+              f"(icache_dreq_o.req + {port_list})",
+              file=sys.stderr)
     else:
         missing = []
         if IC_REQ is None:
@@ -2736,17 +2528,18 @@ def stream_and_extract(f, matches, args, n_wb_ports, n_commit_ports):
             if s is None:
                 missing.append(f"ex_stage_i.dcache_req_ports_o[{p}].data_req")
         stagelog(f"WARNING: CSR-equivalent access counters not all resolved. "
-                 f"viewer will fall back to record-derived access counts. "
-                 f"Missing: {', '.join(missing)}",
-                 file=sys.stderr)
+              f"viewer will fall back to record-derived access counts. "
+              f"Missing: {', '.join(missing)}",
+              file=sys.stderr)
 
-    # Per-cycle access-event cycle lists, filled by at_rising_edge when the
-    # signal is high at the edge (i.e. the elapsed cycle had the request
-    # asserted). The viewer windows these for the CSR-equivalent access count.
+    # Per-cycle access-event lists, filled by at_rising_edge when the signal
+    # was high at the edge, meaning the elapsed cycle had the request up. The
+    # viewer windows them for the CSR-equivalent access count.
     ic_access_cycles = []
     dc_access_cycles = []
-    # RTL-counter-equivalent I$ miss pulse cycles (miss_o high). len() equals
-    # perf_counters.sv event 1, the hardware L1 I$ miss count.
+    # I$ miss pulse cycles, filled where miss_o was high. len() equals
+    # perf_counters.sv event 1, and the viewer windows it like the access
+    # lists for a region-scoped figure that tracks the counter.
     icache_miss_cycles = []
 
     STATE_Q = single_id.get(
@@ -2759,47 +2552,48 @@ def stream_and_extract(f, matches, args, n_wb_ports, n_commit_ports):
     icache_resolved = all(s is not None
                           for s in (STATE_Q, IC_VLD, IC_VADDR, IC_K2))
     if not icache_resolved:
-        stagelog("WARNING: Phase 4b I$ signals not all resolved. "
-                 "if1_lo/if2_lo/if1_hi/if2_hi/ic_miss will be left as None "
-                 "on every record. Missing: " +
-                 ", ".join(name for name, s in [
-                     ("state_q", STATE_Q),
-                     ("dreq_o.valid", IC_VLD),
-                     ("dreq_o.vaddr", IC_VADDR),
-                     ("dreq_i.kill_s2", IC_K2),
-                 ] if s is None),
-                 file=sys.stderr)
+        stagelog("WARNING: I$ signals not all resolved. "
+              "if1_lo/if2_lo/if1_hi/if2_hi/ic_miss will be left as None "
+              "on every record. Missing: " +
+              ", ".join(name for name, s in [
+                  ("state_q", STATE_Q),
+                  ("dreq_o.valid", IC_VLD),
+                  ("dreq_o.vaddr", IC_VADDR),
+                  ("dreq_i.kill_s2", IC_K2),
+              ] if s is None),
+              file=sys.stderr)
     else:
-        stagelog("Phase 4b I$ tracking enabled (state_q + frontend dreq mirror)",
-                 file=sys.stderr)
+        stagelog("I$ tracking enabled (state_q + frontend dreq mirror)",
+              file=sys.stderr)
 
-    # instr_realign flag for the per-cycle pulse counter. Optional: if absent,
-    # wraps_line is still populated from PC, just without cross-validation.
+    # instr_realign output flag for the per-cycle pulse
+    # counter. Optional. If absent, wraps_line is still populated
+    # from PC, just without the cross-validation counter.
     SVU = single_id.get("i_frontend.i_instr_realign.serving_unaligned_o")
     if SVU is None:
-        stagelog("WARNING: Phase 8b serving_unaligned_o not resolved. "
-                 "wraps_line will still be set per record from PC, but the "
-                 "realigner-pulse cross-validation count will be 0",
-                 file=sys.stderr)
+        stagelog("WARNING: serving_unaligned_o not resolved. "
+              "wraps_line will still be set per record from PC, but the "
+              "realigner-pulse cross-validation count will be 0",
+              file=sys.stderr)
     else:
-        stagelog("Phase 8b instr_realign tracking enabled "
-                 "(serving_unaligned_o pulse counter for wraps_line "
-                 "cross-validation)",
-                 file=sys.stderr)
+        stagelog("instr_realign tracking enabled "
+              "(serving_unaligned_o pulse counter for wraps_line "
+              "cross-validation)",
+              file=sys.stderr)
 
-    # LSU FSM state registers, plus lsu_ctrl.trans_id for admission
-    # correlation and pop_ld/pop_st for admit-while-busy detection.
+    # LSU FSM state register lookups.
     LOAD_STATE = single_id.get("ex_stage_i.lsu_i.i_load_unit.state_q")
     STORE_STATE = single_id.get("ex_stage_i.lsu_i.i_store_unit.state_q")
+    # lsu_ctrl.trans_id for FSM admission correlation.
     LSU_CTRL_TID = single_id.get("ex_stage_i.lsu_i.lsu_ctrl.trans_id")
+    # pop_ld / pop_st for admit-while-busy detection.
     POP_LD = single_id.get("ex_stage_i.lsu_i.lsu_bypass_i.pop_ld_i")
     POP_ST = single_id.get("ex_stage_i.lsu_i.lsu_bypass_i.pop_st_i")
     lsu_resolved = (LOAD_STATE is not None and STORE_STATE is not None)
 
-    # HPDcache miss-handler signal IDs. The `gen_cache_hpd.` prefix is
-    # mandatory: cva6.sv instantiates three cache subsystem variants under
-    # different generate branches (gen_cache_std, gen_cache_wt) and this
-    # build's signals live under gen_cache_hpd only.
+    # HPDcache miss-handler signals. The gen_cache_hpd. prefix is mandatory:
+    # cva6.sv instantiates three cache variants under different generate
+    # branches, the others being gen_cache_std and gen_cache_wt.
     _DC_BASE = ("gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache."
                 "hpdcache_miss_handler_i.")
     DC_MALLO = single_id.get(_DC_BASE + "mshr_alloc_i")
@@ -2818,9 +2612,9 @@ def stream_and_extract(f, matches, args, n_wb_ports, n_commit_ports):
         DC_MCHK, DC_MCHKN, DC_MCHKH, DC_RFSM, DC_RRSP, DC_RTID,
     ])
 
-    # Dirty-victim writeback (flush/wback unit) signals at the i_hpdcache
-    # level. Send/ack are the live flush channel, and the wbuf channel is dead
-    # in this write-back config (gen_no_wbuf).
+    # Dirty victim writeback (flush/wback unit) signals, all at
+    # the i_hpdcache level. Send/ack are the live flush channel. The wbuf
+    # channel is dead in this WB config (gen_no_wbuf).
     _WB_BASE = "gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache."
     WB_ALLOC_V = single_id.get(_WB_BASE + "flush_alloc")
     WB_ALLOC_R = single_id.get(_WB_BASE + "flush_alloc_ready")
@@ -2838,8 +2632,9 @@ def stream_and_extract(f, matches, args, n_wb_ports, n_commit_ports):
         WB_SEND_V, WB_SEND_R, WB_SEND_ID, WB_SEND_AD,
         WB_ACK_V, WB_ACK_R, WB_ACK_ID, WB_ACK_NL,
     ])
-    # Linkage: flush-side victim way + miss-handler eviction signals
-    # (mshr_alloc_i / mshr_alloc_nline_i reused as DC_MALLO / DC_MNLINE).
+    # Flush-side victim way + miss-handler eviction signals
+    # (mshr_alloc_i / mshr_alloc_nline_i reused from the miss-handler group as
+    # DC_MALLO / DC_MNLINE).
     WB_FWAY = single_id.get(_WB_BASE + "flush_alloc_way")
     EV_WBACK = single_id.get(_DC_BASE + "mshr_alloc_wback_i")
     EV_VWAY = single_id.get(_DC_BASE + "mshr_alloc_victim_way_i")
@@ -2847,8 +2642,9 @@ def stream_and_extract(f, matches, args, n_wb_ports, n_commit_ports):
         WB_FWAY, EV_WBACK, EV_VWAY, DC_MALLO, DC_MNLINE,
     ])
 
-    # Branch resolution signals (bp_resolve_t). valid pulses for one cycle
-    # when branch_unit emits a resolution, and the rest carry the payload.
+    # Branch resolution, the bp_resolve_t fields under
+    # issue_stage_i.i_scoreboard.resolved_branch_i. valid pulses for one cycle
+    # when branch_unit emits a resolution, the rest carry the payload.
     _RB = "issue_stage_i.i_scoreboard.resolved_branch_i."
     RB_VLD = single_id.get(_RB + "valid")
     RB_PC = single_id.get(_RB + "pc")
@@ -2867,14 +2663,14 @@ def stream_and_extract(f, matches, args, n_wb_ports, n_commit_ports):
             ("resolved_branch_i.is_mispredict", RB_MISP),
             ("resolved_branch_i.cf_type", RB_CFT),
         ] if sig is None]
-        stagelog("WARNING: Phase 7a branch-resolve signals not all "
-                 "resolved. bp_resolved_* fields will be left None "
-                 "on all records. Missing: " + ", ".join(missing),
-                 file=sys.stderr)
+        stagelog("WARNING: branch-resolve signals not all "
+              "resolved. bp_resolved_* fields will be left None "
+              "on all records. Missing: " + ", ".join(missing),
+              file=sys.stderr)
     else:
-        stagelog("Phase 7a branch resolution tracking enabled "
-                 "(resolved_branch_i: valid + pc + target + taken + "
-                 "mispredict + cf_type)", file=sys.stderr)
+        stagelog("Branch resolution tracking enabled "
+              "(resolved_branch_i: valid + pc + target + taken + "
+              "mispredict + cf_type)", file=sys.stderr)
 
     if not lsu_resolved:
         missing = []
@@ -2882,9 +2678,9 @@ def stream_and_extract(f, matches, args, n_wb_ports, n_commit_ports):
             missing.append("i_load_unit.state_q")
         if STORE_STATE is None:
             missing.append("i_store_unit.state_q")
-        stagelog("WARNING: Phase 6a LSU signals not all resolved. "
-                 "lsu_state_history will be left as None on every record. "
-                 "Missing: " + ", ".join(missing), file=sys.stderr)
+        stagelog("WARNING: LSU signals not all resolved. "
+              "lsu_state_history will be left as None on every record. "
+              "Missing: " + ", ".join(missing), file=sys.stderr)
     else:
         extras = []
         if not LSU_CTRL_TID:
@@ -2895,12 +2691,12 @@ def stream_and_extract(f, matches, args, n_wb_ports, n_commit_ports):
             extras.append("pop_st")
         extras_msg = ("" if not extras
                       else f". Degraded (missing: {', '.join(extras)})")
-        stagelog("Phase 6a LSU FSM tracking enabled "
-                 f"(load_unit.state_q + store_unit.state_q + "
-                 f"lsu_ctrl.trans_id + pop_ld + pop_st){extras_msg}",
-                 file=sys.stderr)
+        stagelog("LSU FSM tracking enabled "
+              f"(load_unit.state_q + store_unit.state_q + "
+              f"lsu_ctrl.trans_id + pop_ld + pop_st){extras_msg}",
+              file=sys.stderr)
 
-    # Phase 6b: announce dcache event tracking status.
+    # Announce dcache event tracking status.
     if not dcache_resolved:
         missing = [name for name, sig in [
             ("mshr_alloc_i", DC_MALLO),
@@ -2915,15 +2711,15 @@ def stream_and_extract(f, matches, args, n_wb_ports, n_commit_ports):
             ("refill_core_rsp_valid_o", DC_RRSP),
             ("refill_core_rsp_o.tid", DC_RTID),
         ] if sig is None]
-        stagelog(f"WARNING: Phase 6b dcache signals not all resolved. "
-                 f"dc_* fields will be left at defaults. "
-                 f"Missing: {', '.join(missing)}", file=sys.stderr)
+        stagelog(f"WARNING: Dcache signals not all resolved. "
+              f"dc_* fields will be left at defaults. "
+              f"Missing: {', '.join(missing)}", file=sys.stderr)
     else:
-        stagelog("Phase 6b D$ event tracking enabled "
-                 "(mshr_alloc + mshr_check + refill_fsm + refill_rsp)",
-                 file=sys.stderr)
+        stagelog("D$ event tracking enabled "
+              "(mshr_alloc + mshr_check + refill_fsm + refill_rsp)",
+              file=sys.stderr)
 
-    # Phase 7b: announce writeback (flush/wback) tracking status.
+    # Announce writeback (flush/wback) tracking status.
     if not wback_resolved:
         missing = [name for name, sig in [
             ("flush_alloc", WB_ALLOC_V),
@@ -2938,22 +2734,22 @@ def stream_and_extract(f, matches, args, n_wb_ports, n_commit_ports):
             ("mem_resp_write_flush.mem_resp_w_id", WB_ACK_ID),
             ("flush_ack_nline", WB_ACK_NL),
         ] if sig is None]
-        stagelog("WARNING: Phase 7b writeback signals not all resolved. "
-                 "writebacks[] will be empty. Missing: " + ", ".join(missing),
-                 file=sys.stderr)
+        stagelog("WARNING: Writeback signals not all resolved. "
+              "writebacks[] will be empty. Missing: " + ", ".join(missing),
+              file=sys.stderr)
     else:
-        stagelog("Phase 7b dirty-victim writeback tracking enabled "
-                 "(flush alloc + mem_req_write_flush + mem_resp_write_flush)",
-                 file=sys.stderr)
+        stagelog("dirty-victim writeback tracking enabled "
+              "(flush alloc + mem_req_write_flush + mem_resp_write_flush)",
+              file=sys.stderr)
         if link_resolved:
-            stagelog("Phase 7b writeback<->eviction linkage enabled "
-                     "(mshr_alloc_wback + victim_way + flush_alloc_way, "
-                     "join by (set,way))", file=sys.stderr)
+            stagelog("writeback<->eviction linkage enabled "
+                  "(mshr_alloc_wback + victim_way + flush_alloc_way, "
+                  "join by (set,way))", file=sys.stderr)
         else:
-            stagelog("WARNING: Phase 7b linkage signals not all resolved. "
-                     "writebacks will have linked=false. (need "
-                     "mshr_alloc_wback_i, mshr_alloc_victim_way_i, "
-                     "flush_alloc_way)", file=sys.stderr)
+            stagelog("WARNING: Linkage signals not all resolved. "
+                  "writebacks will have linked=false. (need "
+                  "mshr_alloc_wback_i, mshr_alloc_victim_way_i, "
+                  "flush_alloc_way)", file=sys.stderr)
 
     cycle = -1
     first_ts_seen = False
@@ -2962,32 +2758,28 @@ def stream_and_extract(f, matches, args, n_wb_ports, n_commit_ports):
     prev_flush_id = "0"
     prev_flush_ex = "0"
 
-    # Pre-edge snapshot of decoded_instr_i fields, sourced from id_stage's
-    # registered `issue_q`, which advances AT the rising edge of every decode
-    # handshake. Verilator dumps the post-edge value, so a naive state[DFU]
-    # read at the rising-edge timestamp yields the *next* instruction's
-    # fields. Snapshot at each `#` before applying that timestamp's changes,
-    # so when the following `#` reveals a rising edge, the snapshot is correct.
+    # Pre-edge snapshot of decoded_instr_i, sourced from id_stage's registered
+    # issue_q which advances at the decode edge. Verilator dumps post-edge, so
+    # a naive read at the rising edge yields the NEXT instruction's fields.
     pre_dfu = None
     pre_drs1 = None
     pre_drs2 = None
     pre_drd = None
-    # Same pre-edge treatment for decoded_instr_i[0].bp.*: issue_q advances on
-    # the same edge that latches the handshake.
+    # Pre-edge snapshots of decoded_instr_i[0].bp. Reading them from state at
+    # the rising-edge timestamp lands on the next instruction, id_stage's
+    # issue_q advancing at the same edge that latches the handshake.
     pre_dbp_cf = None
     pre_dbp_tgt = None
+    # Pre-edge snapshot of forwarding signals.
     pre_fwd_rs1 = None
     pre_fwd_rs2 = None
     pre_fwd_rs3 = None
     pre_ihz_rs1 = None
     pre_ihz_rs2 = None
     pre_ihz_rs3 = None
-    # Pre-edge snapshot of the writeback bus (wt_valid_i + per-port
-    # trans_id_i), needed for via=sb/wb classification. A 1-cycle FU's wb pulse
-    # is high during P.wb_cycle and gone by P.wb_cycle+1, but the consumer Q's
-    # handshake fires at the rising edge of P.wb_cycle+1. Reading state[WTV]
-    # inside at_rising_edge would sample post-edge, after the pulse ended. The
-    # pre-edge snapshot captures Q's at-head cycle, when the override fired.
+    # Pre-edge snapshot of the writeback bus, for the via=sb/wb call. A
+    # 1-cycle FU's wb pulse is gone by the consumer's is_cycle, so only the
+    # pre-edge value lands on the cycle the wb override fired.
     pre_wtv = None
     pre_tids = {}     # port -> pre-edge trans_id_i[port] (raw VCD string)
 
@@ -2996,11 +2788,13 @@ def stream_and_extract(f, matches, args, n_wb_ports, n_commit_ports):
     last_ts = 0
     last_report = 0
     start = time.time()
-    # Previous-cycle serving_unaligned_o, for detecting 0→1 transitions.
+    # Previous-cycle value of serving_unaligned_o, used by
+    # at_rising_edge to detect 0→1 transitions = the count of distinct
+    # unaligned-instr attempts.
     last_svu = None
-    # Clock period detection: the gap between the first two rising-edge
-    # timestamps is one period, letting downstream tools convert cycles to
-    # real time with no external knowledge of the sim clock frequency.
+    # Clock period detection. The absolute timestamps of the first two rising
+    # edges differ by one period, which lets downstream tools convert cycles
+    # to real time with no external knowledge of the clock.
     first_re_ts = None
     clock_period_ts = None
 
@@ -3008,34 +2802,40 @@ def stream_and_extract(f, matches, args, n_wb_ports, n_commit_ports):
         nonlocal cycle, prev_flush_if, prev_flush_id, prev_flush_ex, last_svu
         cycle += 1
 
-        # CSR-equivalent access sampling. perf_counters.sv increments every
-        # cycle the request is HIGH (I$: icache_dreq_o.req, D$: any of
-        # dcache_req_ports_i[0..2].data_req). Sample the PRE-EDGE value: that
-        # is the value during the elapsed cycle, what the synchronous counter
-        # sees.
+        # CSR-equivalent access sampling. perf_counters.sv increments while
+        # icache_dreq_o.req or any dcache_req_ports_i[0..2].data_req is high.
+        # The pre-edge value is what the synchronous counter sees.
         if csr_access_resolved:
             if state.get(IC_REQ, "0") == "1":
                 ic_access_cycles.append(cycle)
             if any(state.get(s, "0") == "1" for s in DC_REQ_PORTS):
                 dc_access_cycles.append(cycle)
 
-        # RTL-counter-equivalent I$ miss (pre-edge miss_o). The icache FSM
-        # asserts it for one cycle per accepted cacheable ifill
-        # (cva6_icache.sv:301-303), so this records one cycle per
-        # hardware-counted miss, INCLUDING wrong-path fills squashed before
-        # delivery that never produce an icache_event.
+        # I$ miss, pre-edge miss_o. The counter adds one per high cycle and
+        # the FSM asserts it once per accepted cacheable ifill
+        # (cva6_icache.sv:301-303), wrong-path fills included.
         if IC_MISS_O is not None and state.get(IC_MISS_O, "0") == "1":
             icache_miss_cycles.append(cycle)
 
-        # 1. Commit, BEFORE flush detection.
-        #
-        # Ordering is architectural, not cosmetic. A serialising instruction
-        # (CSR, AMO, fence) commits and raises flush_ctrl_ex in the same
-        # cycle: the flush it causes is meant for the instructions BEHIND it,
-        # never for itself. Once commit_ack_o is asserted the instruction has
-        # architecturally retired and must not be flushed, so commit runs
-        # first. Commit also precedes issue, releasing scoreboard slots before
-        # issue can claim them.
+        # No drain step. Correlation is via lsu_ctrl.trans_id at
+        # FSM-transition time, see on_lsu_fsm_sample, rather than a deferred
+        # pending slot. lsu_ctrl is what the FSM itself sees.
+
+        # 1. Flush detection on rising edges of flush_ctrl_*.
+        flush_if_now = state.get(FIF, "0") if FIF else "0"
+        flush_id_now = state.get(FID, "0") if FID else "0"
+        flush_ex_now = state.get(FEX, "0") if FEX else "0"
+        # EX cascade covers ID + IF, so check it first.
+        if flush_ex_now == "1" and prev_flush_ex == "0":
+            tracker.on_flush_ex(cycle)
+        elif flush_id_now == "1" and prev_flush_id == "0":
+            tracker.on_flush_id(cycle)
+        elif flush_if_now == "1" and prev_flush_if == "0":
+            tracker.on_flush_if(cycle)
+        prev_flush_if, prev_flush_id, prev_flush_ex = (
+            flush_if_now, flush_id_now, flush_ex_now)
+
+        # 2. Commit (release scoreboard slots before issue can claim them).
         if CA is not None:
             ca_bus = state.get(CA, "0")
             for port in range(n_commit_ports):
@@ -3060,20 +2860,6 @@ def stream_and_extract(f, matches, args, n_wb_ports, n_commit_ports):
                             tracker.on_commit(cycle, port, tid,
                                               mq_fu, mq_rs1, mq_rs2, mq_rd,
                                               mq_bp_cf)
-
-        # 2. Flush detection on rising edges of flush_ctrl_*.
-        flush_if_now = state.get(FIF, "0") if FIF else "0"
-        flush_id_now = state.get(FID, "0") if FID else "0"
-        flush_ex_now = state.get(FEX, "0") if FEX else "0"
-        # EX cascade covers ID + IF, so check it first.
-        if flush_ex_now == "1" and prev_flush_ex == "0":
-            tracker.on_flush_ex(cycle)
-        elif flush_id_now == "1" and prev_flush_id == "0":
-            tracker.on_flush_id(cycle)
-        elif flush_if_now == "1" and prev_flush_if == "0":
-            tracker.on_flush_if(cycle)
-        prev_flush_if, prev_flush_id, prev_flush_ex = (
-            flush_if_now, flush_id_now, flush_ex_now)
 
         # 3. Writeback.
         if WTV is not None:
@@ -3100,12 +2886,9 @@ def stream_and_extract(f, matches, args, n_wb_ports, n_commit_ports):
                                                  mq_fu, mq_rs1, mq_rs2, mq_rd,
                                                  mq_bp_cf)
 
-        # 4+5. Combined decode+issue handshake: in non-superscalar CVA6,
-        # issue_instr_o is a combinational passthrough of decoded_instr_i
-        # (scoreboard.sv:151), so DV/DA and IV/IA fire the same cycle for the
-        # same instruction. Treating them separately reads IPTR cycles late
-        # under stalls, putting trans_id +N ahead of the HW slot and landing
-        # every mem_q lookup on the wrong slot.
+        # 4+5. Combined decode+issue handshake. issue_instr_o is a
+        # combinational passthrough of decoded_instr_i (scoreboard.sv:151), so
+        # DV/DA and IV/IA fire together and must be read as one event.
         if DV and DA and state.get(DV) == "1" and state.get(DA) == "1":
             flush_unissued = (FUI is not None and state.get(FUI) == "1")
             if not flush_unissued:
@@ -3115,19 +2898,16 @@ def stream_and_extract(f, matches, args, n_wb_ports, n_commit_ports):
                     rs1 = binary_to_int(pre_drs1)
                     rs2 = binary_to_int(pre_drs2)
                     rd = binary_to_int(pre_drd)
-                    # bp.* uses the same pre-edge snapshot as fu/rs1/rs2/rd:
-                    # mem_q[tid].sbe.bp read at this edge is the PREVIOUS slot
-                    # occupant's (issue_pointer_q advances on this same edge),
-                    # so pre-edge decoded_instr_i.bp is the only live source.
+                    # bp.cf and bp.predict_address use the same pre-edge
+                    # pattern as fu/rs1/rs2/rd. issue_pointer_q advances on
+                    # this edge, so mem_q[tid].sbe.bp is the previous slot.
                     bp_cf_val = (binary_to_int(pre_dbp_cf)
                                  if BP_DECODE_AVAILABLE else None)
                     bp_target = (binary_to_int(pre_dbp_tgt)
                                  if BP_DECODE_AVAILABLE else None)
-                    # Forwarding uses LIVE (post-edge) state, unlike the fields
-                    # above: forward_rsX is combinational off the CURRENT
-                    # issue_q[0], which at post-edge of K holds the K-issued
-                    # instruction and thus ITS hazard. The pre-edge value is
-                    # the K-1 instruction's check and would misattribute.
+                    # Forwarding snapshot. forward_rsX is combinational off
+                    # the current issue_q[0], so post-edge it reflects the
+                    # instruction just issued and pre-edge the one before.
                     if FWD_AVAILABLE:
                         live_fwd_rs1 = state.get(FWD_RS1) if FWD_RS1 else None
                         live_fwd_rs2 = state.get(FWD_RS2) if FWD_RS2 else None
@@ -3144,10 +2924,9 @@ def stream_and_extract(f, matches, args, n_wb_ports, n_commit_ports):
                     else:
                         fwd_rs1_bit = fwd_rs2_bit = fwd_rs3_bit = False
                         ihz_rs1_v = ihz_rs2_v = ihz_rs3_v = None
-                    # wb_view uses the PRE-EDGE writeback bus: that is Q's
-                    # at-head cycle, when the wb override actually fired and
-                    # made Q issuable. Live state would read wt_valid_i during
-                    # Q.is_cycle, after P's wb pulse has ended.
+                    # wb_view from the pre-edge writeback bus, which is Q's
+                    # at-head cycle and when the wb override made Q issuable.
+                    # Live state would read post-edge, after P's pulse ended.
                     wb_view = []
                     if WTV is not None and pre_wtv is not None:
                         wt_bits = pre_wtv
@@ -3166,14 +2945,15 @@ def stream_and_extract(f, matches, args, n_wb_ports, n_commit_ports):
                                             ihz_rs1_v, ihz_rs2_v, ihz_rs3_v,
                                             wb_view)
 
-        # 6. Fetch, gated on flush_unissued_instr_i (fui). With fui=1 on an FE
-        # handshake cycle, id_stage.sv:444 forces issue_n[0].valid=0, so the
-        # frontend pops its instr_queue but id_stage discards the entry.
-        # Pushing such a fetch to `fetched` would leave a phantom record HW's
-        # id_stage never had, making every later pop +1 ahead of the true
-        # decode (a stable +1 trans_id offset for all subsequent records).
-        # Route them to on_fetch_dropped instead: recorded as flushed for
-        # visibility, but kept out of `fetched`.
+        # 6. Fetch.
+        #
+        # Gate on flush_unissued_instr_i. With it high at an FE handshake,
+        # id_stage.sv:444 forces issue_n[0].valid=0 over the valid=1 set at
+        # line 433: the frontend pops but id_stage discards the entry.
+        #
+        # Pushing every FE handshake to `fetched` would leave a phantom that
+        # HW's id_stage never had, putting later pops +1 ahead. These go to
+        # on_fetch_dropped, recorded as flushed but not queued.
         if FE_V and FE_R and state.get(FE_V) == "1" and state.get(FE_R) == "1":
             pc = binary_to_hex(state.get(PC_ID))
             instr = binary_to_hex(state.get(IN_ID))
@@ -3184,8 +2964,9 @@ def stream_and_extract(f, matches, args, n_wb_ports, n_commit_ports):
             else:
                 tracker.on_fetch(cycle, pc, instr, rvc)
 
-        # 7. Feed the I$ event timeline (independent of the record handlers, as
-        # it just observes the I$ FSM and dreq handshake).
+        # 7. Feed the I$ event timeline, independent of the record handlers.
+        # It observes the controller FSM and dreq handshake, and
+        # match_records_to_events binds the events on afterwards by PC.
         if icache_resolved:
             tracker.icache_timeline.on_cycle(
                 cycle,
@@ -3195,9 +2976,9 @@ def stream_and_extract(f, matches, args, n_wb_ports, n_commit_ports):
                 state.get(IC_K2),
             )
 
-        # 7b. Realigner sampling: starts (0→1) counts unaligned RUNS, cycles
-        # counts stall cycles. See PipelineTracker.__init__ for why neither
-        # equals the wraps_line record count.
+        # 7b. Realigner sampling. starts counts unaligned runs, cycles counts
+        # the stall cycles unaligned_q was high. wraps_line correctness comes
+        # from the lo to hi I$ binding, not from these.
         if SVU is not None:
             curr_svu = state.get(SVU)
             if curr_svu == "1":
@@ -3206,7 +2987,9 @@ def stream_and_extract(f, matches, args, n_wb_ports, n_commit_ports):
                     tracker.n_realigner_unaligned_starts += 1
             last_svu = curr_svu
 
-        # 8. Sample the LSU FSMs (see on_lsu_fsm_sample for the rules).
+        # 8. Sample LSU FSMs. Admissions come from IDL to non-IDL transitions
+        # via the previous lsu_ctrl.trans_id, and from pop_ld/pop_st in
+        # SEND_TAG or VALID_STORE for the admit-while-busy case.
         if lsu_resolved:
             tracker.on_lsu_fsm_sample(
                 cycle,
@@ -3217,8 +3000,9 @@ def stream_and_extract(f, matches, args, n_wb_ports, n_commit_ports):
                 state.get(POP_ST) if POP_ST else None,
             )
 
-        # 9. Sample HPDcache miss-handler signals into the global cycle-keyed
-        # log. Attribution happens after the scan.
+        # 9. Sample HPDcache miss-handler signals, capturing alloc, check and
+        # refill_rsp pulses plus rFSM-active cycles into a log keyed by cycle.
+        # attribute_dc_events_to_records binds them after the scan.
         if dcache_resolved:
             tracker.on_dcache_sample(
                 cycle,
@@ -3235,7 +3019,8 @@ def stream_and_extract(f, matches, args, n_wb_ports, n_commit_ports):
                 state.get(DC_RTID),
             )
 
-        # 9b. Sample the flush/wback unit handshakes. They are paired in
+        # 9b. Sample the flush/wback unit handshakes. Logged in
+        # cycle order. Pairing + AXI-write-latency aggregate computed in
         # finalize_writebacks() after the walk.
         if wback_resolved:
             tracker.on_wback_sample(
@@ -3254,8 +3039,8 @@ def stream_and_extract(f, matches, args, n_wb_ports, n_commit_ports):
                 state.get(WB_ACK_NL),
             )
 
-        # 9c. Log dirty-victim evictions (mshr_alloc with wback=1). These are
-        # joined to writebacks by (set, way) in finalize.
+        # 9c. Log dirty-victim evictions (mshr_alloc with
+        # wback=1). Joined to writebacks by (set, way) in finalize.
         if link_resolved:
             tracker.on_evict_sample(
                 cycle,
@@ -3265,8 +3050,9 @@ def stream_and_extract(f, matches, args, n_wb_ports, n_commit_ports):
                 state.get(EV_VWAY),
             )
 
-        # 10. Branch resolution pulse: valid goes high for one cycle at the
-        # branch's ex_cycle (or shortly after under contention).
+        # 10. Branch resolution. resolved_branch_o.valid goes high for one
+        # cycle at the branch's ex_cycle, or just after under contention, and
+        # on_branch_resolved binds it by PC, oldest in-flight on a tie.
         if bp_resolved and state.get(RB_VLD) == "1":
             tracker.on_branch_resolved(
                 cycle,
@@ -3290,8 +3076,9 @@ def stream_and_extract(f, matches, args, n_wb_ports, n_commit_ports):
             if first_ts_seen:
                 curr_clk = state.get(CLK, "0")
                 if clk_at_ts_start == "0" and curr_clk == "1":
-                    # last_ts is the timestamp BEFORE this rising edge took
-                    # effect, i.e. the exact rising-edge time.
+                    # Clock period from the first two rising edges. last_ts
+                    # is the timestamp before this edge took effect, which is
+                    # the exact rising-edge time.
                     if first_re_ts is None:
                         first_re_ts = last_ts
                     elif clock_period_ts is None:
@@ -3304,9 +3091,9 @@ def stream_and_extract(f, matches, args, n_wb_ports, n_commit_ports):
             except ValueError:
                 pass
             clk_at_ts_start = state.get(CLK) or "0"
-            # Snapshot decoded fields BEFORE this timestamp's changes apply, so
-            # at_rising_edge() sees pre-edge values if the next `#` reveals a
-            # rising edge here.
+            # Snapshot decoded fields before this timestamp's changes apply.
+            # If the next `#` shows a rising edge happened here, at_rising_edge
+            # reads these pre-edge values for the handshake.
             if DFU:
                 pre_dfu = state.get(DFU)
             if DRS1:
@@ -3315,10 +3102,14 @@ def stream_and_extract(f, matches, args, n_wb_ports, n_commit_ports):
                 pre_drs2 = state.get(DRS2)
             if DRD:
                 pre_drd = state.get(DRD)
+            # Pre-edge snapshot of decoded_instr_i[0].bp.
             if DBP_CF:
                 pre_dbp_cf = state.get(DBP_CF)
             if DBP_TGT:
                 pre_dbp_tgt = state.get(DBP_TGT)
+            # Pre-edge snapshot of the forwarding signals, same
+            # advance-on-rising-edge concern as decoded_instr_i.*. Post-edge
+            # they show the next issue candidate's hazard view.
             if FWD_RS1:
                 pre_fwd_rs1 = state.get(FWD_RS1)
             if FWD_RS2:
@@ -3331,7 +3122,9 @@ def stream_and_extract(f, matches, args, n_wb_ports, n_commit_ports):
                 pre_ihz_rs2 = state.get(IHZ_RS2)
             if IHZ_RS3:
                 pre_ihz_rs3 = state.get(IHZ_RS3)
-            # Pre-edge writeback bus snapshot (see pre_wtv above for why).
+            # Pre-edge snapshot of the writeback bus. A 1-cycle FU's wb
+            # pulse is gone by the consumer's is_cycle, so only the pre-edge
+            # read lands on the cycle the wb override fired.
             if WTV:
                 pre_wtv = state.get(WTV)
             if TID_MAP:
@@ -3376,7 +3169,9 @@ def stream_and_extract(f, matches, args, n_wb_ports, n_commit_ports):
 
     tracker.finalize()
 
-    # Bind I$ timeline events onto records by 4-byte-aligned PC.
+    # Bind I$ events onto records by 4-byte-aligned PC, giving each if1_lo,
+    # if2_lo and ic_miss for its first fetch, plus if1_hi and if2_hi when it
+    # wraps. No match leaves them None, usually a kill before delivery.
     n_ic_events = len(tracker.icache_timeline.events)
     n_ic_hits = sum(1 for ev in tracker.icache_timeline.events
                     if not ev.ic_miss)
@@ -3389,13 +3184,14 @@ def stream_and_extract(f, matches, args, n_wb_ports, n_commit_ports):
     if n_synth:
         extra.append(f"{n_synth} synthesized (cached, no fresh event)")
     extra_str = (", " + ", ".join(extra)) if extra else ""
-    stagelog(f"Phase 4b: {n_ic_events} I$ events "
-             f"({n_ic_hits} hits, {n_ic_misses} misses). "
-             f"{n_matched} records matched, {n_unmatched} unmatched"
-             + extra_str,
-             file=sys.stderr)
-    # wraps_line summary: cross-validate the PC-determinative count against
-    # the realigner pulse counter (agree up to flushed-mid-realignment cases).
+    stagelog(f"{n_ic_events} I$ events "
+          f"({n_ic_hits} hits, {n_ic_misses} misses). "
+          f"{n_matched} records matched, {n_unmatched} unmatched"
+          + extra_str,
+          file=sys.stderr)
+    # wraps_line summary. Compare PC-determinative count to
+    # the realigner-signal pulse counter for cross-validation. The two
+    # should agree up to flushed-mid-realignment edge cases.
     n_wraps = sum(1 for r in tracker.completed if r.wraps_line)
     n_wraps_committed = sum(1 for r in tracker.completed
                             if r.wraps_line and not r.flushed)
@@ -3405,52 +3201,53 @@ def stream_and_extract(f, matches, args, n_wb_ports, n_commit_ports):
             f"{n_wraps / tracker.n_realigner_unaligned_starts:.2f}")
     else:
         records_per_run = "records/run = N/A"
-    stagelog(f"Phase 8b: wraps_line records = {n_wraps} total "
-             f"({n_wraps_committed} committed, "
-             f"{n_wraps - n_wraps_committed} flushed). "
-             f"{n_wraps_with_hi} bound second fetch (if1_hi/if2_hi). "
-             f"Realigner: {tracker.n_realigner_unaligned_starts} runs "
-             f"(0→1 transitions), {tracker.n_realigner_unaligned_cycles} "
-             f"stall cycles. {records_per_run}.",
-             file=sys.stderr)
+    stagelog(f"wraps_line records = {n_wraps} total "
+          f"({n_wraps_committed} committed, "
+          f"{n_wraps - n_wraps_committed} flushed). "
+          f"{n_wraps_with_hi} bound second fetch (if1_hi/if2_hi). "
+          f"Realigner: {tracker.n_realigner_unaligned_starts} runs "
+          f"(0→1 transitions), {tracker.n_realigner_unaligned_cycles} "
+          f"stall cycles. {records_per_run}.",
+          file=sys.stderr)
 
-    # Attribute bubbles to their causer + recovery instructions.
+    # Attribute bubbles to causer and recovery. Walks completed[] in id order
+    # for [non-flushed][flushed run][non-flushed], classifies the causer and
+    # tags both ends. A CSR that causes no flushed run is not tagged.
     bubble_counts, bubble_diag = tag_branch_bubbles(tracker.completed)
     n_bub_total = sum(bubble_counts.values())
     n_bub_flushed_total = sum(r.bubble_caused_cycles or 0
                               for r in tracker.completed
                               if r.bubble_caused_cycles)
-    stagelog(f"Phase 8c: branch bubbles. "
-             f"mispred={bubble_counts['mispred']}, "
-             f"unpred={bubble_counts['unpred']}, "
-             f"flush_other={bubble_counts['flush_other']}, "
-             f"pred_taken={bubble_counts['pred_taken']} "
-             f"({n_bub_total} causers, {n_bub_flushed_total} total "
-             f"wrong-path records flushed).",
-             file=sys.stderr)
-    # Accounting tripwire:
-    #   total = flushed + classified + no_followers + end_of_trace + unaccounted
-    # "unaccounted" must be 0. A nonzero value means some bp_mispredict=True
-    # record fell through every category.
+    stagelog(f"Branch bubbles. "
+          f"mispred={bubble_counts['mispred']}, "
+          f"unpred={bubble_counts['unpred']}, "
+          f"flush_other={bubble_counts['flush_other']}, "
+          f"pred_taken={bubble_counts['pred_taken']} "
+          f"({n_bub_total} causers, {n_bub_flushed_total} total "
+          f"wrong-path records flushed).",
+          file=sys.stderr)
+    # Diagnostic: how bp_mispredict breaks down against the bubble classes.
+    # total = flushed + classified + no_followers + end_of_trace + unaccounted,
+    # and unaccounted must be 0. A tripwire for records falling through.
     classified = bubble_counts["mispred"] + bubble_counts["unpred"]
     unaccounted = (bubble_diag["bp_mispredict_total"]
                    - bubble_diag["bp_mispredict_flushed"]
                    - classified
                    - bubble_diag["bp_mispredict_no_followers"]
                    - bubble_diag["bp_mispredict_end_of_trace"])
-    stagelog(f"Phase 8c diag: {bubble_diag['bp_mispredict_total']} records "
-             f"have bp_mispredict=True "
-             f"({bubble_diag['bp_mispredict_flushed']} flushed, "
-             f"{classified} tagged as causers, "
-             f"{bubble_diag['bp_mispredict_no_followers']} had no "
-             f"flushed followers, "
-             f"{bubble_diag['bp_mispredict_end_of_trace']} were end-of-trace, "
-             f"{unaccounted} unaccounted).",
-             file=sys.stderr)
+    stagelog(f"Bubble diag: {bubble_diag['bp_mispredict_total']} records "
+          f"have bp_mispredict=True "
+          f"({bubble_diag['bp_mispredict_flushed']} flushed, "
+          f"{classified} tagged as causers, "
+          f"{bubble_diag['bp_mispredict_no_followers']} had no "
+          f"flushed followers, "
+          f"{bubble_diag['bp_mispredict_end_of_trace']} were end-of-trace, "
+          f"{unaccounted} unaccounted).",
+          file=sys.stderr)
 
-    # Count LOAD/STORE records with an FSM trace (lsu_state_history non-empty).
-    # Untraced means the FSM never moved while the record was pending, which
-    # only happens on an immediate flush.
+    # Count LOAD/STORE records that got an FSM trace, meaning at least one
+    # entry in lsu_state_history. A record whose FSM never moved while pending
+    # ends up untraced, which needs an immediate flush and is very rare.
     n_load_traced = 0
     n_load_untraced = 0
     n_store_traced = 0
@@ -3466,16 +3263,16 @@ def stream_and_extract(f, matches, args, n_wb_ports, n_commit_ports):
                 n_store_traced += 1
             else:
                 n_store_untraced += 1
-    stagelog(f"Phase 6a: LSU FSM traces. "
-             f"loads {n_load_traced} traced / {n_load_untraced} untraced. "
-             f"stores {n_store_traced} traced / {n_store_untraced} untraced",
-             file=sys.stderr)
+    stagelog(f"LSU FSM traces. "
+          f"loads {n_load_traced} traced / {n_load_untraced} untraced. "
+          f"stores {n_store_traced} traced / {n_store_untraced} untraced",
+          file=sys.stderr)
 
-    # Phase 6b: attribute D$ events to records.
+    # Attribute D$ events to records.
     if dcache_resolved:
         dc_stats = tracker.attribute_dc_events_to_records()
         stagelog(
-            f"Phase 6b: D$ events. {dc_stats['total_dc_events']} total "
+            f"D$ events. {dc_stats['total_dc_events']} total "
             f"alloc/check/refill_rsp pulses. "
             f"{dc_stats['rfsm_active_cycles']} refill-active cycles. "
             f"Per-record summary: "
@@ -3485,11 +3282,11 @@ def stream_and_extract(f, matches, args, n_wb_ports, n_commit_ports):
             f"(of {dc_stats['n_loads']} LOAD + "
             f"{dc_stats['n_stores']} STORE)",
             file=sys.stderr)
-        # Perf-counter-equivalent miss breakdown by allocating adapter. The
-        # store adapter typically dominates because loads coalesce onto
-        # pending store misses via st1_mshr_hit_i.
+        # Perf-counter miss breakdown, the total non-prefetch MSHR allocation
+        # count split by allocating adapter. The store adapter usually
+        # dominates, loads coalescing onto pending store misses.
         stagelog(
-            f"Phase 6b: D$ miss events (perf counter view). "
+            f"D$ miss events (perf counter view). "
             f"{dc_stats['n_dcache_miss_events_total']} total non-prefetch allocs "
             f"({dc_stats['n_dcache_miss_events_loads']} from LOAD adapter, "
             f"{dc_stats['n_dcache_miss_events_stores']} from STORE adapter, "
@@ -3498,9 +3295,9 @@ def stream_and_extract(f, matches, args, n_wb_ports, n_commit_ports):
     else:
         dc_stats = {}
 
-    # Branch prediction stats. A branch is any fu=CTRL_FLOW record. "predicted"
-    # means bp_predicted_cf is set and not 'NoCF', and "resolved" means
-    # bp_resolution_cycle is set.
+    # Branch prediction stats over the completed records. A branch is any
+    # record with fu=CTRL_FLOW, predicted means bp_predicted_cf is set and not
+    # 'NoCF', resolved means bp_resolution_cycle is set.
     n_cf = 0
     n_pred = 0
     n_resolved = 0
@@ -3523,13 +3320,14 @@ def stream_and_extract(f, matches, args, n_wb_ports, n_commit_ports):
                 key = r.bp_resolved_cf or "NoCF"
                 n_misp_by_cf[key] = n_misp_by_cf.get(key, 0) + 1
         elif r.flush_reason == "flush_ex_branch_mispredict":
-            # Flushed before the scan saw its resolution pulse. Possible when
-            # the resolution cycle coincides with the flush handshake.
+            # The branch itself was flushed before our scan saw the
+            # resolution pulse. Rare but possible if the resolution
+            # cycle coincides with the flush handshake.
             n_misp_flushed_before_resolve += 1
     bp_hit_rate = (
         100.0 * (n_resolved - n_misp) / n_resolved if n_resolved else 0.0)
     stagelog(
-        f"Phase 7a: branches. {n_cf} CTRL_FLOW records. "
+        f"Branches. {n_cf} CTRL_FLOW records. "
         f"{n_pred} got a non-NoCF prediction "
         f"({n_pred_by_cf}). "
         f"{n_resolved} reached resolution. "
@@ -3549,12 +3347,12 @@ def stream_and_extract(f, matches, args, n_wb_ports, n_commit_ports):
         "n_flushed_before_resolve": n_misp_flushed_before_resolve,
     }
 
-    # Phase 7b: pair writeback send<->ack, build event list + latency agg.
+    # Pair writeback send<->ack, build event list + latency agg.
     if wback_resolved:
         wb_stats = tracker.finalize_writebacks()
         awl = wb_stats.get("axi_write_latency", {})
         stagelog(
-            f"Phase 7b: writebacks. {wb_stats['n_allocs']} alloc / "
+            f"Writebacks. {wb_stats['n_allocs']} alloc / "
             f"{wb_stats['n_sends']} send / {wb_stats['n_acks']} ack. "
             f"{wb_stats['matched_pairs']} paired "
             f"({wb_stats['acks_no_prior_send']} acks w/o send, "
@@ -3564,7 +3362,7 @@ def stream_and_extract(f, matches, args, n_wb_ports, n_commit_ports):
             f"max={awl.get('max')} cyc",
             file=sys.stderr)
         stagelog(
-            f"Phase 7b: writeback<->eviction linkage. "
+            f"writeback<->eviction linkage. "
             f"{wb_stats.get('n_evictions', 0)} eviction samples. "
             f"{wb_stats.get('n_linked', 0)} writebacks linked / "
             f"{wb_stats.get('n_unlinked', 0)} unlinked",
@@ -3572,7 +3370,7 @@ def stream_and_extract(f, matches, args, n_wb_ports, n_commit_ports):
     else:
         wb_stats = {}
 
-    # Phase 8a: forwarding summary across committed records.
+    # Forwarding summary across committed records.
     n_fwd_any = 0
     n_fwd_rs1 = n_fwd_rs2 = n_fwd_rs3 = 0
     n_via_sb = n_via_wb = 0
@@ -3604,8 +3402,9 @@ def stream_and_extract(f, matches, args, n_wb_ports, n_commit_ports):
         "n_rs3_forwarded":    n_fwd_rs3,
         "n_via_sb":           n_via_sb,
         "n_via_wb":           n_via_wb,
-        # Ground truth for whether via=wb should ever fire: real forwards
-        # (fwd_rsX_used=True) whose producer slot was on the wb bus that cycle.
+        # How many real forwards had the producer slot on the wb bus in the
+        # same cycle, per source. Ground truth for whether via=wb should ever
+        # fire.
         "n_issue_cycles":             tracker._diag_n_issue_cycles,
         "n_issue_cycles_with_any_wb": tracker._diag_n_issue_with_any_wb,
         "n_real_match_rs1":           tracker._diag_n_real_match_rs1,
@@ -3615,17 +3414,20 @@ def stream_and_extract(f, matches, args, n_wb_ports, n_commit_ports):
     if n_committed_seen:
         pct = 100.0 * n_fwd_any / n_committed_seen
         stagelog(
-            f"Phase 8a: forwarding - {n_fwd_any}/{n_committed_seen} "
+            f"Forwarding - {n_fwd_any}/{n_committed_seen} "
             f"committed records ({pct:.1f}%) used at least one forwarded "
             f"operand. Rs1={n_fwd_rs1} rs2={n_fwd_rs2} rs3={n_fwd_rs3}. "
             f"via sb/wb = {n_via_sb}/{n_via_wb}",
             file=sys.stderr)
+        # Diagnostic: count real forwards (fwd_rsX_used=True) where the
+        # producer slot was also on the wb bus this same cycle. These
+        # are the cases where via=wb SHOULD fire.
         n_real_match_total = (
             tracker._diag_n_real_match_rs1
             + tracker._diag_n_real_match_rs2
             + tracker._diag_n_real_match_rs3)
         stagelog(
-            f"Phase 8a diag: {tracker._diag_n_issue_cycles} issue cycles, "
+            f"Forwarding diag: {tracker._diag_n_issue_cycles} issue cycles, "
             f"{tracker._diag_n_issue_with_any_wb} had any wt_valid_i bit set. "
             f"Real forward AND producer on wb bus: "
             f"rs1={tracker._diag_n_real_match_rs1} "
@@ -3639,9 +3441,9 @@ def stream_and_extract(f, matches, args, n_wb_ports, n_commit_ports):
         "n_changes": n_changes,
         "last_ts": last_ts,
         "n_cycles": cycle + 1,
-        # Scoreboard depth detected from the mem_q[N].sbe.fu presence scan.
-        # Consumers should prefer this over the compile-time default in
-        # CV64A6_HPDC_WB_DEFAULTS when reporting per-run configuration.
+        # Scoreboard depth from the mem_q[N].sbe.fu presence scan. Smaller
+        # than NR_SB_ENTRIES on a parameterised-down build. Consumers should
+        # prefer this over the compile-time default.
         "detected_nr_sb_entries": NR_SB,
         "icache_event_count": n_ic_events,
         "icache_event_hits": n_ic_hits,
@@ -3652,21 +3454,23 @@ def stream_and_extract(f, matches, args, n_wb_ports, n_commit_ports):
         "lsu_load_records_untraced": n_load_untraced,
         "lsu_store_records_traced": n_store_traced,
         "lsu_store_records_untraced": n_store_untraced,
-        "phase6b": dc_stats,
-        "phase7a": bp_stats,
-        "phase7b": wb_stats,
-        "phase8a": fwd_stats,
-        # Clock period in VCD timescale units (ps for cva6_testharness sims),
-        # from the first two rising edges. None if fewer than two were seen.
+        "dcache": dc_stats,
+        "branch_pred": bp_stats,
+        "writeback": wb_stats,
+        "forwarding": fwd_stats,
+        # Clock period in VCD timescale units, picoseconds for the
+        # cva6_testharness sims. Derived from the first two rising edges, None
+        # if fewer than two were seen.
         "clock_period_ts": clock_period_ts,
         "first_rising_edge_ts": first_re_ts,
-        # CSR-equivalent access cycle lists: cycles where the request signal
-        # was high. Counting entries in [cMin, cMax] matches the hardware perf
-        # counters exactly. Empty when the signals weren't resolved.
+        # CSR-equivalent access cycle lists, one entry per cycle the request
+        # signal was high. The viewer counts entries in [cMin, cMax] to match
+        # the hardware counters. Empty when the signals were not resolved.
         "ic_access_cycles": ic_access_cycles,
         "dc_access_cycles": dc_access_cycles,
-        # I$ miss_o high cycles, where len() matches perf_counters.sv event 1,
-        # wrong-path fills included.
+        # I$ miss pulse cycles. len() matches perf_counters.sv event 1, and
+        # the viewer windows it like the access lists for a figure that tracks
+        # the hardware counter, wrong-path fills included.
         "icache_miss_cycles": icache_miss_cycles,
         "icache_miss_pulses": len(icache_miss_cycles),
     }
@@ -3677,14 +3481,19 @@ def stream_and_extract(f, matches, args, n_wb_ports, n_commit_ports):
 # Disassembly listing
 # ============================================================================
 #
-# Binds a human-readable disasm string onto each InstructionRecord from a
-# pre-built objdump -dS listing passed via --disasm-list, so the tracer has
-# no RISC-V toolchain dependency.
+# The disassembly pass binds a readable string onto each InstructionRecord
+# from an objdump -dS listing passed in with --disasm-list, which keeps any
+# toolchain dependency out of the tracer's own environment.
 #
-# The regex intentionally requires LEADING WHITESPACE on the PC line so the
-# all-hex 64-bit address labels (which start at column 0) never match. Source
-# lines, labels, section headers and directives start with characters outside
-# [0-9a-f], so they never match either.
+# The listing format we parse (from riscv64-unknown-elf-objdump -dS):
+#
+#     _start:                                       <- function label
+#     0000000080003000 <main>:                      <- address-tagged label
+#         80003000:<tab>715d                 <tab>addi<tab>sp,sp,-80
+#
+# The regex below requires leading whitespace on the PC line, so the 64-bit
+# address labels at column 0 never match. Source lines, labels, headers and
+# directives all start outside [0-9a-f], so they never match either.
 
 _DISASM_LINE_RE = re.compile(
     r'^\s+([0-9a-fA-F]+):\s+([0-9a-fA-F]+)\s+(.+)$'
@@ -3692,11 +3501,9 @@ _DISASM_LINE_RE = re.compile(
 
 
 def parse_disasm_list(path):
-    """Parse an objdump-style disassembly listing into a PC→string map.
-
-    Maps integer PC to a compact "mnemonic operands" string with whitespace
-    runs collapsed. Permissive by design: non-instruction lines are ignored.
-    Raises FileNotFoundError if the path doesn't exist."""
+    """Parse an objdump listing into a PC to string map, whitespace collapsed.
+    Anything that does not look like an instruction is ignored. Raises
+    FileNotFoundError when the path does not exist."""
     disasm = {}
     with open(path) as f:
         for line in f:
@@ -3704,69 +3511,18 @@ def parse_disasm_list(path):
             if not m:
                 continue
             pc = int(m.group(1), 16)
-            # group(3) is everything after the raw bytes: mnemonic + operands
-            # + any objdump-resolved symbolic comment.
+            # m.group(3) is everything after the raw bytes: mnemonic +
+            # operands + any objdump-resolved symbolic comment. Collapse
+            # tabs/spaces into a single space and strip.
             text = re.sub(r'\s+', ' ', m.group(3)).strip()
             disasm[pc] = text
     return disasm
 
 
-_AMO_FUNCT5 = {
-    0x00: "amoadd", 0x01: "amoswap", 0x02: "lr", 0x03: "sc",
-    0x04: "amoxor", 0x08: "amoor", 0x0C: "amoand",
-    0x10: "amomin", 0x14: "amomax", 0x18: "amominu", 0x1C: "amomaxu",
-}
-_AMO_WIDTH = {0b010: ".w", 0b011: ".d"}
-_FENCE_FUNCT3 = {0b000: "fence", 0b001: "fence.i"}
-
-
-def fallback_disasm(instr_word, is_compressed=False):
-    """Minimal decoder for instructions the objdump listing did not cover.
-
-    Only the A extension and FENCE are named. Everything else returns a
-    `.4byte`/`.2byte` literal so the field is never left null, which keeps the
-    viewer's mnemonic column and any downstream mnemonic grouping usable.
-
-    Covers PCs missing from the listing (wrong -march when the .dump was
-    produced, a stale listing, bootrom code outside the ELF). Returns None
-    when there is no word to decode.
-    """
-    if instr_word is None:
-        return None
-    try:
-        word = int(instr_word, 16)
-    except (TypeError, ValueError):
-        return None
-    if is_compressed or (word & 0x3) != 0x3:
-        return f".2byte 0x{word & 0xFFFF:04x}"
-    opcode = word & 0x7F
-    if opcode == 0x2F:
-        name = _AMO_FUNCT5.get((word >> 27) & 0x1F)
-        width = _AMO_WIDTH.get((word >> 12) & 0x7)
-        if name is not None and width is not None:
-            aq = (word >> 26) & 0x1
-            rl = (word >> 25) & 0x1
-            suffix = (".aq" if aq else "") + (".rl" if rl else "")
-            rd = (word >> 7) & 0x1F
-            rs1 = (word >> 15) & 0x1F
-            rs2 = (word >> 20) & 0x1F
-            if name == "lr":
-                return f"{name}{width}{suffix} x{rd},(x{rs1})"
-            return f"{name}{width}{suffix} x{rd},x{rs2},(x{rs1})"
-    elif opcode == 0x0F:
-        name = _FENCE_FUNCT3.get((word >> 12) & 0x7)
-        if name is not None:
-            return name
-    return f".4byte 0x{word:08x}"
-
-
 def apply_disasm(records, disasm_map):
-    """Annotate each record's `disasm` field by PC lookup.
-
-    Returns (n_annotated, n_no_pc, n_unmapped), where n_unmapped covers PCs
-    outside the listing, e.g. bootrom code at 0x10000 not part of the user
-    ELF. Unmapped records fall back to fallback_disasm() so the field is
-    never null; they are still counted as unmapped."""
+    """Annotate each record's `disasm` by PC lookup. Returns (n_annotated,
+    n_no_pc, n_unmapped), the last counting PCs outside the listing such as
+    bootrom code that is not part of the user program."""
     n_annotated = 0
     n_no_pc = 0
     n_unmapped = 0
@@ -3782,9 +3538,6 @@ def apply_disasm(records, disasm_map):
         text = disasm_map.get(pc_int)
         if text is None:
             n_unmapped += 1
-            text = fallback_disasm(rec.instr_word, rec.is_compressed)
-            if text is not None:
-                rec.disasm = text
         else:
             rec.disasm = text
             n_annotated += 1
@@ -3796,10 +3549,9 @@ def apply_disasm(records, disasm_map):
 # ============================================================================
 
 CV64A6_HPDC_WB_DEFAULTS = {
-    # Mirrors the module-level Config block (which is the single source
-    # of truth driving the whitelist + lookups). Cache geometry rows
-    # are kept as literals because they only feed the viewer's config
-    # panel and don't gate any tracer logic.
+    # Mirrors the module-level Config block, which is the single source of
+    # truth for the whitelist and lookups. Cache geometry stays literal, it
+    # only feeds the viewer's config panel and gates no tracer logic.
     "SuperscalarEn":       SUPERSCALAR_EN,
     "RVC":                 RVC_EN,
     "CvxifEn":             True,
@@ -3822,24 +3574,23 @@ CV64A6_HPDC_WB_DEFAULTS = {
 }
 
 
-# Subset of CV64A6_HPDC_WB_DEFAULTS emitted to the JSON's config_params. The
-# rest are tracer assumptions rather than measurements, and stay out so the
-# viewer's panel can't contradict the actual build (parameter sweeps vary
-# DcacheSetAssoc, NrLoadBufEntries, etc.). Two tiers qualify a field:
-#   Tier 1, auto-detected from the VCD: NrScoreboardEntries (probed from the
-#     mem_q[N] enumeration) and TRANS_ID_BITS ($clog2 of it).
-#   Tier 2, verified by trace success. A different value would break the
-#     whitelist or produce garbage: NrCommitPorts, NrWbPorts, and
-#     FETCH_WIDTH / INSTR_PER_FETCH (realign + wraps_line assume 32-bit
-#     fetch with RVC pairs).
-# To add a field: probe it (Tier 1) or argue structural verification (Tier 2).
+# The CV64A6_HPDC_WB_DEFAULTS keys emitted to config_params. The rest are
+# tracer assumptions rather than measurements, and stay out so the panel
+# cannot contradict a sweep build that varied them.
+#
+# NrScoreboardEntries is auto-detected from the mem_q[N] enumeration and
+# TRANS_ID_BITS derived from it. The rest are verified by the trace working
+# at all, since a different value makes the whitelist fail.
+#
+# To add more verified fields: probe the VCD (Tier 1) or argue
+# structural verification (Tier 2), and add the key here.
 VERIFIED_CONFIG_FIELDS = frozenset({
     # Tier 1, auto-detected from the VCD.
     "NrScoreboardEntries",
     "TRANS_ID_BITS",
-    # Auto-detected from the largest probed commit_pointer_q / trans_id_i port
-    # index plus one: a smaller build omits the high ports from the dump, so
-    # these follow the actual build rather than the compile-time maxima.
+    # Auto-detected from the probed commit_pointer_q and trans_id_i indices,
+    # largest seen plus one. A smaller build leaves the high ports out of the
+    # dump, so these follow the build rather than the compile-time maxima.
     "NrCommitPorts",
     "NrWbPorts",
     "FETCH_WIDTH",
@@ -3853,14 +3604,12 @@ def write_output_json(output_path, args, stats, tracker):
         "elf_path": None,
         "disasm_list_path": stats.get("disasm_list_path"),
         "vcd_path": str(args.vcd_path),
-        "user_entry_pc": args.user_entry_pc,
-        "user_end_pc": args.user_end_pc,
-        "warmup_end_cycle": tracker.warmup_end_cycle,
         "tohost_cycle": None,
         "vcd_scope_prefix": args.scope_prefix,
         "invariants_verified": [],
-        # Time base: cycle duration in VCD timescale units plus the VCD's
-        # $timescale value, together enough to convert cycles to real time.
+        # Time base. clock_period_ts is the cycle duration in VCD timescale
+        # units and timescale_unit is the VCD's $timescale, '1ps' for the CVA6
+        # sims. Together they let the viewer convert cycles to real time.
         "clock_period_ts": stats.get("clock_period_ts"),
         "timescale_unit": stats.get("timescale_unit"),
         "stats": {
@@ -3870,20 +3619,23 @@ def write_output_json(output_path, args, stats, tracker):
             "n_flushed_ex": tracker.n_flushed_ex,
             "n_unmatched_writebacks": tracker.n_unmatched_writebacks,
             "n_unmatched_commits": tracker.n_unmatched_commits,
+            # I$ event counts and record-match results.
             "icache_event_count": stats.get("icache_event_count", 0),
             "icache_event_hits": stats.get("icache_event_hits", 0),
             "icache_event_misses": stats.get("icache_event_misses", 0),
-            # miss_o high cycles = perf_counters.sv event 1, which unlike
-            # icache_event_misses includes wrong-path fills squashed before
-            # delivery. The per-cycle list is top-level.
+            # len(icache_miss_cycles) is miss_o high cycles, which is
+            # perf_counters.sv event 1. Unlike icache_event_misses it includes
+            # wrong-path fills squashed before delivery.
             "icache_miss_pulses": stats.get("icache_miss_pulses", 0),
             "icache_records_matched": stats.get(
                 "icache_records_matched", 0),
             "icache_records_unmatched": stats.get(
                 "icache_records_unmatched", 0),
+            # Disassembly coverage.
             "disasm_annotated": stats.get("disasm_annotated", 0),
             "disasm_unmapped": stats.get("disasm_unmapped", 0),
             "disasm_no_pc": stats.get("disasm_no_pc", 0),
+            # LSU FSM tracking coverage.
             "lsu_load_records_traced": stats.get(
                 "lsu_load_records_traced", 0),
             "lsu_store_records_traced": stats.get(
@@ -3892,14 +3644,19 @@ def write_output_json(output_path, args, stats, tracker):
                 "lsu_load_records_untraced", 0),
             "lsu_store_records_untraced": stats.get(
                 "lsu_store_records_untraced", 0),
-            "phase6b": stats.get("phase6b", {}),   # D$ event attribution
-            "phase7a": stats.get("phase7a", {}),   # branch prediction
-            "phase7b": stats.get("phase7b", {}),   # writeback + AXI latency
-            "phase8a": stats.get("phase8a", {}),   # forwarding aggregates
+            # D$ event attribution coverage.
+            "dcache": stats.get("dcache", {}),
+            # Branch prediction tracking coverage.
+            "branch_pred": stats.get("branch_pred", {}),
+            # Dirty victim writeback + AXI write latency.
+            "writeback": stats.get("writeback", {}),
+            # Forwarding aggregates.
+            "forwarding": stats.get("forwarding", {}),
         },
     }
-    # Compile-time defaults, then runtime-detected overrides, then filtered to
-    # VERIFIED_CONFIG_FIELDS (see its comment for why unverified keys drop).
+    # Build config_params: start from the compile-time defaults, apply the
+    # runtime-detected overrides, then filter to VERIFIED_CONFIG_FIELDS so the
+    # panel cannot contradict the build.
     config_params = dict(CV64A6_HPDC_WB_DEFAULTS)
     detected_sb = stats.get("detected_nr_sb_entries")
     if detected_sb is not None:
@@ -3925,19 +3682,18 @@ def write_output_json(output_path, args, stats, tracker):
             comma = "," if i < len(recs) - 1 else ""
             f.write(f"    {json.dumps(d)}{comma}\n")
         f.write("  ],\n")
-        # Dirty-victim writebacks are a separate track, not per-instruction: a
-        # writeback is per-evicted-line, many stores coalesce into one line,
-        # and it is decoupled in time from those stores.
+        # Dirty victim writeback events (separate track, not
+        # per-instruction. A writeback is per-evicted-line, many stores
+        # coalesce into one line, decoupled in time from the stores).
         wbs = tracker.writeback_events
         f.write('  "writebacks": [\n')
         for i, wb in enumerate(wbs):
             comma = "," if i < len(wbs) - 1 else ""
             f.write(f"    {json.dumps(wb)}{comma}\n")
         f.write("  ],\n")
-        # Flat dcache MSHR alloc array for the viewer's window-scoped
-        # perf-counter-equivalent miss count, including PTW (sid=0), accel
-        # (sid=2) and CMO misses that map to no instruction record. Only
-        # allocs: check_hit and refill_rsp are not perf-counter sources.
+        # Dcache MSHR allocations as (cycle, sid, pf), so the viewer can
+        # compute the perf-counter miss count for any window including PTW,
+        # accel and CMO. Only allocs count, check_hit and refill_rsp do not.
         allocs = [ev for ev in tracker._dc_events if ev.get("type") == "alloc"]
         f.write('  "dcache_alloc_events": [\n')
         for i, ev in enumerate(allocs):
@@ -3946,9 +3702,9 @@ def write_output_json(output_path, args, stats, tracker):
                 "sid"), "pf": ev.get("pf", 0)}
             f.write(f"    {json.dumps(row)}{comma}\n")
         f.write("  ],\n")
-        # Flat icache event array so the viewer can window icache access/miss
-        # counts straight from the cache FSM signal, sidestepping any
-        # record-derived dedup ambiguity.
+        # Icache events as a flat (fe1, fe2, ic_miss) array, so the viewer can
+        # compute window-filtered access and miss counts from the FSM signal
+        # without any record-derived dedup ambiguity.
         ic_events = tracker.icache_timeline.events
         f.write('  "icache_events": [\n')
         for i, ev in enumerate(ic_events):
@@ -3956,10 +3712,9 @@ def write_output_json(output_path, args, stats, tracker):
             row = {"fe1": ev.fe1_cycle, "fe2": ev.fe2_cycle, "miss": ev.ic_miss}
             f.write(f"    {json.dumps(row)}{comma}\n")
         f.write("  ],\n")
-        # CSR-equivalent access cycle lists (I$: icache_dreq_o.req, D$: any of
-        # the three core ports' data_req). Filtering by [cMin, cMax] in the
-        # viewer lines up exactly with mhpmevent 16/17
-        # (perf_counters.sv:126-128).
+        # Cycles where each request signal was high: icache_dreq_o.req, and
+        # any of the three core ports' data_req. Filtering by window gives
+        # counts matching mhpmevent 16/17 (perf_counters.sv:126-128).
         ic_acc = stats.get("ic_access_cycles") or []
         dc_acc = stats.get("dc_access_cycles") or []
         ic_miss_cyc = stats.get("icache_miss_cycles") or []
@@ -4017,19 +3772,6 @@ def main():
         help="Output JSON path. Defaults to <vcd_basename>.json.",
     )
     parser.add_argument(
-        "--user-entry-pc",
-        default=None,
-        help="Hex PC of `main` (e.g. 0x80003000) for warmup detection.",
-    )
-    parser.add_argument(
-        "--user-end-pc",
-        default=None,
-        help="Hex PC of the last instruction of user code (e.g. 0x8000314c, "
-             "typically the `jal ra, <exit>`). Emitted to metadata.user_end_pc. "
-             "the viewer's `Main code` button reads it as the upper bound of "
-             "the user-program range.",
-    )
-    parser.add_argument(
         "--disasm-list",
         default=None,
         help="Path to an objdump -dS listing of the test ELF. When provided, "
@@ -4060,10 +3802,7 @@ def main():
     n_commit_ports = CV64A6_HPDC_WB_DEFAULTS["NrCommitPorts"]
 
     file_size = vcd_path.stat().st_size
-    print(
-        f"[INFO] Reading {vcd_path} ({file_size / (1024 ** 3):.3f} GB)", file=sys.stderr)
-    if args.user_entry_pc:
-        print(f"[INFO] User entry PC: {args.user_entry_pc}", file=sys.stderr)
+    print(f"[INFO] Reading {vcd_path} ({file_size / (1024 ** 3):.3f} GB)", file=sys.stderr)
     start = time.time()
 
     with vcd_path.open("r", errors="replace") as f:
@@ -4071,11 +3810,9 @@ def main():
         print(
             f"[INFO] Header: {len(path_to_id):,} signals, timescale={timescale}", file=sys.stderr)
 
-        # Pre-flight: refuse VCDs whose scoreboard exceeds the compile-time
-        # max. The SMALLER case is auto-handled in stream_and_extract. The
-        # LARGER case cannot be, because the whitelist only enumerates slots
-        # 0..NR_SB_ENTRIES-1 and higher slots would silently produce wrong
-        # output.
+        # Refuse a VCD whose scoreboard is larger than the compile-time max.
+        # The smaller case is auto-handled by shrinking NR_SB, but the
+        # whitelist only enumerates slots 0..NR_SB_ENTRIES-1.
         max_sb_slot = probe_max_scoreboard_slot(path_to_id)
         if max_sb_slot >= NR_SB_ENTRIES:
             actual_depth = max_sb_slot + 1
@@ -4100,11 +3837,9 @@ def main():
             print("Aborting.", file=sys.stderr)
             return 2
 
-        # Pre-flight: refuse superscalar builds. The decode+issue handshake,
-        # IPTR tracking and per-cycle allocation all assume one instruction per
-        # cycle. A superscalar build would silently drop port-1 instructions,
-        # drift the fetched/decoded queues from the first multi-issue cycle,
-        # and apply the FETCH_BYTES=4 wraps_line predicate to 8-byte blocks.
+        # Refuse superscalar builds. The handshake, IPTR tracking and
+        # allocation all assume one instruction per cycle, and wraps_line
+        # would use FETCH_BYTES=4 against 8-byte blocks.
         if probe_superscalar(path_to_id):
             print(file=sys.stderr)
             print("ERROR: VCD contains decoded_instr_i[1].fu, implying the "
@@ -4123,10 +3858,9 @@ def main():
             print("Aborting.", file=sys.stderr)
             return 2
 
-        # Pre-flight: refuse builds with more commit ports than the whitelist
-        # enumerates. Commits on the extra ports would silently vanish,
-        # leaving records that never commit and inflated unmatched counters.
-        # Smaller builds are fine (unused slots stay None at runtime).
+        # Refuse builds with more commit ports than the whitelist enumerates.
+        # Commits on the high ports would fall off the radar, leaving records
+        # that never commit. Smaller builds are fine.
         max_cp = probe_max_commit_port(path_to_id)
         if max_cp >= NR_COMMIT_PORTS:
             actual = max_cp + 1
@@ -4144,8 +3878,9 @@ def main():
             print("Aborting.", file=sys.stderr)
             return 2
 
-        # Same check for writeback ports (trans_id_i[0..NR_WB_PORTS-1]), where
-        # unenumerated ports would leave records orphaned in flight.
+        # Pre-flight: refuse builds with more writeback ports than the
+        # tracer enumerates. Same logic as the commit-port check, applied
+        # to trans_id_i[0..NR_WB_PORTS-1]. Smaller builds work transparently.
         max_wb = probe_max_wb_port(path_to_id)
         if max_wb >= NR_WB_PORTS:
             actual = max_wb + 1
@@ -4173,7 +3908,7 @@ def main():
             for s in sorted(missing_required):
                 print(
                     f"ERROR: required signal '{s}' not found.", file=sys.stderr)
-            print("Aborting. Phase 3 cannot proceed.", file=sys.stderr)
+            print("Aborting, the trace cannot be walked.", file=sys.stderr)
             return 2
 
         tracked = sum(len(m["vcd_ids"]) for m in matches)
@@ -4183,14 +3918,13 @@ def main():
         _PROG = Progress('parse', enabled=not args.quiet)
         tracker, stats = stream_and_extract(
             f, matches, args, n_wb_ports, n_commit_ports)
-        # The output writer builds metadata outside this `with` block and
-        # doesn't otherwise see the timescale.
+        # Make the parsed timescale available downstream for the
+        # output writer (which builds metadata outside this `with`
+        # block and doesn't otherwise see timescale).
         stats["timescale_unit"] = timescale
-        # Surface the probed port counts so the writer reports the build's
-        # ACTUAL NrCommitPorts / NrWbPorts: a smaller build omits the high
-        # ports from the VCD, so the compile-time defaults would overstate
-        # them (a 1-commit-port build wrongly showing 2). The probe returns -1
-        # when absent, in which case the default stands.
+        # Report the probed commit and writeback port counts rather than the
+        # compile-time maxima, since a smaller build leaves the high ports out
+        # of the VCD. Probe returns -1 when absent, leaving the default.
         if max_cp >= 0:
             stats["detected_nr_commit_ports"] = max_cp + 1
         if max_wb >= 0:
@@ -4199,15 +3933,15 @@ def main():
     if _PROG is not None:
         _PROG.done()
     elapsed = time.time() - start
-    # Known limitation: the first-two-rising-edges interval can pick up a
-    # sub-cycle artifact during reset / initial value setup instead of a real
-    # cycle, so the pretty-print is gated on plausibility (period >= 1 ns,
-    # i.e. clock < 1 GHz) to avoid nonsense like "2 ps / 500 GHz". Diagnostic
-    # only: the viewer ignores this field and hardcodes 50 MHz.
+    # The derived clock period, for sanity-checking the time base. Detection
+    # uses the first two rising edges and can catch a reset artifact, so the
+    # pretty-print is gated on plausibility. The viewer hardcodes 50 MHz.
     cp_ts = stats.get("clock_period_ts")
     if cp_ts is not None and cp_ts >= 1000:  # >= 1 ns, plausible cycle
         ts_unit = stats.get("timescale_unit", "1ps")
-        # Best-effort timescale→ps conversion. Unrecognized units print raw.
+        # Best-effort conversion of the parsed timescale string into
+        # picoseconds for human-readable output. Anything we don't
+        # recognize prints as raw timescale units.
         unit_to_ps = {"1fs": 1e-3, "1ps": 1, "1ns": 1e3,
                       "1us": 1e6, "1ms": 1e9, "1s": 1e12}
         ps = cp_ts * unit_to_ps.get(ts_unit.strip(), 1)
@@ -4221,8 +3955,9 @@ def main():
         print(f"[INFO] clock period {period_disp} ({freq_disp}), "
               f"timescale {ts_unit}", file=sys.stderr)
     elif cp_ts is not None:
-        # Implausibly short: first-edge detection tripped on a reset-time
-        # sub-cycle event, so don't pretty-print the bogus frequency.
+        # Implausibly short, almost certainly first-edge detection tripping on
+        # a reset-time sub-cycle event. Do not print the bogus frequency, just
+        # note that the viewer falls back to its hardcoded clock.
         print(f"[INFO] clock period: detected {cp_ts} VCD ticks (implausibly "
               f"short. First-edge detection tripped on a sub-cycle "
               f"artifact). Viewer will use its hardcoded 50 MHz.",
@@ -4231,8 +3966,9 @@ def main():
         print("[INFO] clock period: could not determine "
               "(need at least 2 rising edges)", file=sys.stderr)
 
-    # Whole-trace totals. These should match hardware perf counters mhpmevent
-    # 16 (l1_icache_access) and 17 (l1_dcache_access) exactly.
+    # CSR-equivalent access totals over the whole trace, which should match
+    # mhpmevent 16 and 17 exactly. Empty when the underlying signals were not
+    # dumped.
     ic_acc_total = len(stats.get("ic_access_cycles") or [])
     dc_acc_total = len(stats.get("dc_access_cycles") or [])
     if ic_acc_total or dc_acc_total:
@@ -4244,41 +3980,34 @@ def main():
         print(f"[INFO] RTL-counter I-cache misses (miss_o pulses, whole "
               f"trace): {ic_miss_total:,}", file=sys.stderr)
 
-    # Annotate with disassembly after the walk, so we cover exactly the
+    # Annotate records with disassembly text, if a listing was
+    # provided. Done after the walk completes so we annotate exactly the
     # records that will be serialized (committed + flushed).
-    #
-    # apply_disasm() is called even when no listing was given, because its
-    # fallback decoder still names the A extension and FENCE and emits a
-    # .2byte/.4byte literal for everything else, so disasm is never left null.
     if args.disasm_list:
         disasm_path = Path(args.disasm_list)
         if not disasm_path.exists():
             print(f"WARNING: --disasm-list {disasm_path} not found. "
-                  "falling back to built-in decoding.", file=sys.stderr)
-            n_ann, n_no_pc, n_unmapped = apply_disasm(tracker.completed, {})
-            stats["disasm_annotated"] = n_ann
-            stats["disasm_unmapped"] = n_unmapped
-            stats["disasm_no_pc"] = n_no_pc
+                  "skipping disasm annotation.", file=sys.stderr)
+            stats["disasm_annotated"] = 0
+            stats["disasm_unmapped"] = 0
+            stats["disasm_no_pc"] = 0
             stats["disasm_list_path"] = None
         else:
             disasm_map = parse_disasm_list(disasm_path)
             n_ann, n_no_pc, n_unmapped = apply_disasm(
                 tracker.completed, disasm_map)
-            stagelog(f"Phase 5: parsed {len(disasm_map):,} disasm entries from "
-                     f"{disasm_path.name}. Annotated {n_ann:,} records "
-                     f"({n_unmapped:,} unmapped, {n_no_pc:,} without PC)",
-                     file=sys.stderr)
+            stagelog(f"Parsed {len(disasm_map):,} disasm entries from "
+                  f"{disasm_path.name}. Annotated {n_ann:,} records "
+                  f"({n_unmapped:,} unmapped, {n_no_pc:,} without PC)",
+                  file=sys.stderr)
             stats["disasm_annotated"] = n_ann
             stats["disasm_unmapped"] = n_unmapped
             stats["disasm_no_pc"] = n_no_pc
             stats["disasm_list_path"] = str(disasm_path)
     else:
-        n_ann, n_no_pc, n_unmapped = apply_disasm(tracker.completed, {})
-        stagelog(f"Phase 5: no disasm listing given. Built-in fallback named "
-                 f"{n_unmapped - n_no_pc:,} records by opcode.", file=sys.stderr)
-        stats["disasm_annotated"] = n_ann
-        stats["disasm_unmapped"] = n_unmapped
-        stats["disasm_no_pc"] = n_no_pc
+        stats["disasm_annotated"] = 0
+        stats["disasm_unmapped"] = 0
+        stats["disasm_no_pc"] = 0
         stats["disasm_list_path"] = None
 
     if len(tracker.completed) == 0:
@@ -4309,18 +4038,14 @@ def main():
     print(f" Elapsed               : {elapsed:>14.1f}s ({speed:.1f} MB/s)")
     print()
     n_total = len(tracker.completed)
-    n_warmup = sum(1 for r in tracker.completed if r.is_warmup)
     n_compr = sum(1 for r in tracker.completed if r.is_compressed)
     n_flushed = sum(1 for r in tracker.completed if r.flushed)
     print(f" Records total         : {n_total:>15,}")
     print(f"   committed           : {tracker.n_committed:>15,}")
     print(f"   flushed             : {n_flushed:>15,}  "
           f"(IF={tracker.n_flushed_if}, ID={tracker.n_flushed_id}, EX={tracker.n_flushed_ex})")
-    print(f"   warmup              : {n_warmup:>15,}")
-    print(f"   user code           : {n_total - n_warmup:>15,}")
     print(f"   compressed (RVC)    : {n_compr:>15,}")
     print()
-    print(f" warmup_end_cycle      : {tracker.warmup_end_cycle}")
     if tracker.n_unmatched_writebacks:
         print(f" UNMATCHED writebacks  : {tracker.n_unmatched_writebacks}  "
               f"(possible signal/timing issue)")
@@ -4328,7 +4053,7 @@ def main():
         print(f" UNMATCHED commits     : {tracker.n_unmatched_commits}  "
               f"(possible signal/timing issue)")
 
-    # Phase 5 disasm coverage summary.
+    # Disasm coverage summary.
     if args.disasm_list:
         print()
         print(f" Disassembly listing   : {args.disasm_list}")
@@ -4340,11 +4065,10 @@ def main():
             print(f"   without PC          : {stats['disasm_no_pc']:>15,}")
 
     if n_total:
-        first_user = next(
-            (r for r in tracker.completed if not r.is_warmup), None)
+        first_user = next(iter(tracker.completed), None)
         if first_user:
             print()
-            print(f" First user-code record:")
+            print(f" First record:")
             print(f"   id={first_user.id}, pc={first_user.pc}, "
                   f"instr={first_user.instr_word}, compressed={first_user.is_compressed}")
             if first_user.disasm:
@@ -4358,25 +4082,20 @@ def main():
                 f"   trans_id={first_user.trans_id}, flushed={first_user.flushed}")
 
         # FU / FU-category distribution over committed records.
-        from collections import Counter as _Counter
-        cat_warm = _Counter()
-        cat_user = _Counter()
-        fu_user = _Counter()
+        cat_user = Counter()
+        fu_user = Counter()
         for r in tracker.completed:
             if r.flushed or r.fu_category is None:
                 continue
-            (cat_warm if r.is_warmup else cat_user)[r.fu_category] += 1
-            if not r.is_warmup:
-                fu_user[r.fu] += 1
+            cat_user[r.fu_category] += 1
+            fu_user[r.fu] += 1
         print()
         print(" FU category. Committed records")
-        print(f"   {'category':<10} {'warmup':>8} {'user':>8}")
-        cats = sorted(set(cat_warm) | set(cat_user))
-        for c in cats:
-            print(f"   {c:<10} {cat_warm.get(c, 0):>8} {cat_user.get(c, 0):>8}")
+        for c in sorted(cat_user):
+            print(f"   {c:<10} {cat_user[c]:>8}")
         if fu_user:
             print()
-            print(" FU breakdown. User-code committed records")
+            print(" FU breakdown. Committed records")
             for fu, n in fu_user.most_common():
                 print(f"   {fu:<12} {n:>5}")
     print()
