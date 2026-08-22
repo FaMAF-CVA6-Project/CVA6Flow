@@ -202,6 +202,16 @@ Both come out of an undergraduate thesis at FaMAF, Universidad Nacional de Córd
 
 CVA6 itself is developed by the [OpenHW Group](https://github.com/openhwgroup/cva6).
 
+## Cleaning up
+
+`clean_repo.py` deletes what a run leaves in this repository: every `.list`, `.vcd` and `.fst`, and every `__pycache__`.
+
+```bash
+python3 clean_repo.py [-y] [--dry-run] [-v]
+```
+
+It lists what it found with its size and asks before deleting. The viewer JSONs are left alone, and `docs/` is kept whole.
+
 ## Licence
 
 Released under the MIT Licence. See [LICENSE](LICENSE).
