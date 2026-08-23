@@ -1857,9 +1857,9 @@
       };
       r.readAsText(f);
     }
-    /* Bundled sample trace, two paths relative to this file. When served,
-     * fetch the JSON. From a file:// URL, where browsers block fetch of local
-     * files, a script tag assigns the same object to window.__SAMPLE_TRACE__. */
+    /* Optional sample trace, not shipped in the repo. Generate it into tests/
+     * to enable the sample button. When served the JSON is fetched, under
+     * file:// a script tag sets window.__SAMPLE_TRACE__ instead. */
     const SAMPLE_URL = 'tests/daxpy.config1.json';
     const SAMPLE_URL_JS = 'tests/daxpy.config1.js';
 
