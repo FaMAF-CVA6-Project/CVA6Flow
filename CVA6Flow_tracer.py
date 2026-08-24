@@ -2091,7 +2091,7 @@ class PipelineTracker:
         # EX flush cascades back through ID and IF.
         self._flush_fetched("flush_ex_cascade_if")
         self._flush_decoded("flush_ex_cascade_id")
-        self._flush_issued("flush_ex_branch_mispredict")
+        self._flush_issued("flush_ex_commit_drain")
 
     # -- finalization ------------------------------------------------------
 
@@ -2821,21 +2821,8 @@ def stream_and_extract(f, matches, args, n_wb_ports, n_commit_ports):
         # FSM-transition time, see on_lsu_fsm_sample, rather than a deferred
         # pending slot. lsu_ctrl is what the FSM itself sees.
 
-        # 1. Flush detection on rising edges of flush_ctrl_*.
-        flush_if_now = state.get(FIF, "0") if FIF else "0"
-        flush_id_now = state.get(FID, "0") if FID else "0"
-        flush_ex_now = state.get(FEX, "0") if FEX else "0"
-        # EX cascade covers ID + IF, so check it first.
-        if flush_ex_now == "1" and prev_flush_ex == "0":
-            tracker.on_flush_ex(cycle)
-        elif flush_id_now == "1" and prev_flush_id == "0":
-            tracker.on_flush_id(cycle)
-        elif flush_if_now == "1" and prev_flush_if == "0":
-            tracker.on_flush_if(cycle)
-        prev_flush_if, prev_flush_id, prev_flush_ex = (
-            flush_if_now, flush_id_now, flush_ex_now)
-
-        # 2. Commit (release scoreboard slots before issue can claim them).
+        # 1. Commit, before the flush below and before issue can claim the
+        # scoreboard slots it releases.
         if CA is not None:
             ca_bus = state.get(CA, "0")
             for port in range(n_commit_ports):
@@ -2860,6 +2847,20 @@ def stream_and_extract(f, matches, args, n_wb_ports, n_commit_ports):
                             tracker.on_commit(cycle, port, tid,
                                               mq_fu, mq_rs1, mq_rs2, mq_rd,
                                               mq_bp_cf)
+
+        # 2. Flush detection on rising edges of flush_ctrl_*.
+        flush_if_now = state.get(FIF, "0") if FIF else "0"
+        flush_id_now = state.get(FID, "0") if FID else "0"
+        flush_ex_now = state.get(FEX, "0") if FEX else "0"
+        # EX cascade covers ID + IF, so check it first.
+        if flush_ex_now == "1" and prev_flush_ex == "0":
+            tracker.on_flush_ex(cycle)
+        elif flush_id_now == "1" and prev_flush_id == "0":
+            tracker.on_flush_id(cycle)
+        elif flush_if_now == "1" and prev_flush_if == "0":
+            tracker.on_flush_if(cycle)
+        prev_flush_if, prev_flush_id, prev_flush_ex = (
+            flush_if_now, flush_id_now, flush_ex_now)
 
         # 3. Writeback.
         if WTV is not None:
