@@ -2541,6 +2541,7 @@ def stream_and_extract(f, matches, args, n_wb_ports, n_commit_ports):
     # perf_counters.sv event 1, and the viewer windows it like the access
     # lists for a region-scoped figure that tracks the counter.
     icache_miss_cycles = []
+    icache_miss_addrs = []
 
     STATE_Q = single_id.get(
         "gen_cache_hpd.i_cache_subsystem.i_cva6_icache.state_q")
@@ -2816,6 +2817,11 @@ def stream_and_extract(f, matches, args, n_wb_ports, n_commit_ports):
         # (cva6_icache.sv:301-303), wrong-path fills included.
         if IC_MISS_O is not None and state.get(IC_MISS_O, "0") == "1":
             icache_miss_cycles.append(cycle)
+            _va = state.get(IC_VADDR) if IC_VADDR is not None else None
+            try:
+                icache_miss_addrs.append(int(_va, 2) if _va else None)
+            except ValueError:
+                icache_miss_addrs.append(None)
 
         # No drain step. Correlation is via lsu_ctrl.trans_id at
         # FSM-transition time, see on_lsu_fsm_sample, rather than a deferred
@@ -3473,6 +3479,7 @@ def stream_and_extract(f, matches, args, n_wb_ports, n_commit_ports):
         # the viewer windows it like the access lists for a figure that tracks
         # the hardware counter, wrong-path fills included.
         "icache_miss_cycles": icache_miss_cycles,
+        "icache_miss_addrs": icache_miss_addrs,
         "icache_miss_pulses": len(icache_miss_cycles),
     }
     return tracker, stats
@@ -3721,7 +3728,9 @@ def write_output_json(output_path, args, stats, tracker):
         ic_miss_cyc = stats.get("icache_miss_cycles") or []
         f.write('  "ic_access_cycles": ' + json.dumps(ic_acc) + ',\n')
         f.write('  "dc_access_cycles": ' + json.dumps(dc_acc) + ',\n')
-        f.write('  "icache_miss_cycles": ' + json.dumps(ic_miss_cyc) + '\n')
+        f.write('  "icache_miss_cycles": ' + json.dumps(ic_miss_cyc) + ',\n')
+        ic_miss_adr = stats.get("icache_miss_addrs") or []
+        f.write('  "icache_miss_addrs": ' + json.dumps(ic_miss_adr) + '\n')
         f.write("}\n")
 
 
