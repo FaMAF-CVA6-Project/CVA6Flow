@@ -2541,7 +2541,6 @@ def stream_and_extract(f, matches, args, n_wb_ports, n_commit_ports):
     # perf_counters.sv event 1, and the viewer windows it like the access
     # lists for a region-scoped figure that tracks the counter.
     icache_miss_cycles = []
-    icache_miss_addrs = []
 
     STATE_Q = single_id.get(
         "gen_cache_hpd.i_cache_subsystem.i_cva6_icache.state_q")
@@ -2772,12 +2771,6 @@ def stream_and_extract(f, matches, args, n_wb_ports, n_commit_ports):
     pre_dbp_cf = None
     pre_dbp_tgt = None
     # Pre-edge snapshot of forwarding signals.
-    pre_fwd_rs1 = None
-    pre_fwd_rs2 = None
-    pre_fwd_rs3 = None
-    pre_ihz_rs1 = None
-    pre_ihz_rs2 = None
-    pre_ihz_rs3 = None
     # Pre-edge snapshot of the writeback bus, for the via=sb/wb call. A
     # 1-cycle FU's wb pulse is gone by the consumer's is_cycle, so only the
     # pre-edge value lands on the cycle the wb override fired.
@@ -2817,11 +2810,6 @@ def stream_and_extract(f, matches, args, n_wb_ports, n_commit_ports):
         # (cva6_icache.sv:301-303), wrong-path fills included.
         if IC_MISS_O is not None and state.get(IC_MISS_O, "0") == "1":
             icache_miss_cycles.append(cycle)
-            _va = state.get(IC_VADDR) if IC_VADDR is not None else None
-            try:
-                icache_miss_addrs.append(int(_va, 2) if _va else None)
-            except ValueError:
-                icache_miss_addrs.append(None)
 
         # No drain step. Correlation is via lsu_ctrl.trans_id at
         # FSM-transition time, see on_lsu_fsm_sample, rather than a deferred
@@ -3114,21 +3102,6 @@ def stream_and_extract(f, matches, args, n_wb_ports, n_commit_ports):
                 pre_dbp_cf = state.get(DBP_CF)
             if DBP_TGT:
                 pre_dbp_tgt = state.get(DBP_TGT)
-            # Pre-edge snapshot of the forwarding signals, same
-            # advance-on-rising-edge concern as decoded_instr_i.*. Post-edge
-            # they show the next issue candidate's hazard view.
-            if FWD_RS1:
-                pre_fwd_rs1 = state.get(FWD_RS1)
-            if FWD_RS2:
-                pre_fwd_rs2 = state.get(FWD_RS2)
-            if FWD_RS3:
-                pre_fwd_rs3 = state.get(FWD_RS3)
-            if IHZ_RS1:
-                pre_ihz_rs1 = state.get(IHZ_RS1)
-            if IHZ_RS2:
-                pre_ihz_rs2 = state.get(IHZ_RS2)
-            if IHZ_RS3:
-                pre_ihz_rs3 = state.get(IHZ_RS3)
             # Pre-edge snapshot of the writeback bus. A 1-cycle FU's wb
             # pulse is gone by the consumer's is_cycle, so only the pre-edge
             # read lands on the cycle the wb override fired.
@@ -3479,7 +3452,6 @@ def stream_and_extract(f, matches, args, n_wb_ports, n_commit_ports):
         # the viewer windows it like the access lists for a figure that tracks
         # the hardware counter, wrong-path fills included.
         "icache_miss_cycles": icache_miss_cycles,
-        "icache_miss_addrs": icache_miss_addrs,
         "icache_miss_pulses": len(icache_miss_cycles),
     }
     return tracker, stats
@@ -3728,9 +3700,7 @@ def write_output_json(output_path, args, stats, tracker):
         ic_miss_cyc = stats.get("icache_miss_cycles") or []
         f.write('  "ic_access_cycles": ' + json.dumps(ic_acc) + ',\n')
         f.write('  "dc_access_cycles": ' + json.dumps(dc_acc) + ',\n')
-        f.write('  "icache_miss_cycles": ' + json.dumps(ic_miss_cyc) + ',\n')
-        ic_miss_adr = stats.get("icache_miss_addrs") or []
-        f.write('  "icache_miss_addrs": ' + json.dumps(ic_miss_adr) + '\n')
+        f.write('  "icache_miss_cycles": ' + json.dumps(ic_miss_cyc) + '\n')
         f.write("}\n")
 
 
