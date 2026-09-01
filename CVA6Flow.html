@@ -1114,19 +1114,19 @@
       <span title="Instructions whose fetch spanned two cache lines in this window.">Wrap: <span class="hi"
           id="s-wrp">-</span></span>
       <span
-        title="ICache miss events in the visible window, matching the RTL perf counter. The number in parentheses, when shown, is the subset from the listed instructions.">IC✗<sup
+        title="ICache miss events in the visible window, matching the RTL perf counter. The number in parentheses, when shown, is the subset from the listed instructions.">ICache✗<sup
           style="font-size:.7em;opacity:.55" title="cycle-window scoped">cyc</sup>: <span class="hi"
           id="s-icm">-</span></span>
       <span
-        title="DCache miss events in the visible window, non-prefetch, matching the RTL perf counter. The number in parentheses is the load, store, and other adapter split, which sums to the total.">DC✗<sup
+        title="DCache miss events in the visible window, non-prefetch, matching the RTL perf counter. The number in parentheses is the load, store, and other adapter split, which sums to the total.">DCache✗<sup
           style="font-size:.7em;opacity:.55" title="cycle-window scoped">cyc</sup>:
         <span class="hi" id="s-dcm">-</span></span>
       <span
-        title="ICache access cycles in the visible window where the front-end raised a fetch request (mhpmevent 16).">I$
+        title="ICache access cycles in the visible window where the front-end raised a fetch request (mhpmevent 16).">ICache
         acc<sup style="font-size:.7em;opacity:.55" title="cycle-window scoped">cyc</sup>: <span class="hi"
           id="s-ica">-</span></span>
       <span
-        title="DCache access cycles in the visible window where a load, page-table-walk, or store port raised a data request (mhpmevent 17). The number in parentheses is the load plus store record total.">D$
+        title="DCache access cycles in the visible window where a load, page-table-walk, or store port raised a data request (mhpmevent 17). The number in parentheses is the load plus store record total.">DCache
         acc<sup style="font-size:.7em;opacity:.55" title="cycle-window scoped">cyc</sup>: <span class="hi"
           id="s-dca">-</span></span>
       <span
@@ -1955,7 +1955,7 @@
       WRAP_BACK_TO_BACK = (json.instructions || []).some(
         r => r.wraps_line && r.if1_hi != null && r.if2_lo != null && r.if1_hi <= r.if2_lo);
       WBS = Array.isArray(json.writebacks) ? json.writebacks : [];
-      /* Per-cycle D$ miss allocations. The total miss metric uses these because
+      /* Per-cycle DCache miss allocations. The total miss metric uses these because
        * they include PTW, accel and cache-maintenance misses that have no
        * instruction record. */
       DC_ALLOCS = Array.isArray(json.dcache_alloc_events) ? json.dcache_alloc_events : [];
@@ -1967,7 +1967,7 @@
       IC_ACC_CYCLES = Array.isArray(json.ic_access_cycles) ? json.ic_access_cycles : [];
       DC_ACC_CYCLES = Array.isArray(json.dc_access_cycles) ? json.dc_access_cycles : [];
       /* Cycles the icache asserted miss_o, one per cacheable line
-       * fill, matching the hardware L1 I$ miss counter (perf_counters.sv
+       * fill, matching the hardware L1 ICache miss counter (perf_counters.sv
        * event 1). */
       IC_MISS_CYCLES = Array.isArray(json.icache_miss_cycles) ? json.icache_miss_cycles : [];
       const base = name.replace(/\.json$/i, '');
@@ -3188,7 +3188,7 @@
       const lo = twoLane ? ' lo' : '';
       if (loMiss) {
         band(if1c, if1c + 1, sc(COL.f1reqMiss), 'if1' + lo, loLane);
-        band(if1c + 1, if2c, sc(COL.f1stall), 'icache stall' + lo, loLane);
+        band(if1c + 1, if2c, sc(COL.f1stall), 'icache' + lo + ' stall', loLane);
       } else {
         band(if1c, if2c, sc(COL.f1), 'if1' + lo, loLane);
       }
@@ -3201,7 +3201,7 @@
 
       if (hiMiss) {
         band(if1hc, if1hc + 1, sc(COL.f1reqMiss_hi), 'if1 hi', true);
-        band(if1hc + 1, if2hc, sc(COL.f1stall_hi), 'icache stall hi', true);
+        band(if1hc + 1, if2hc, sc(COL.f1stall_hi), 'icache hi stall', true);
       } else {
         band(if1hc, if2hc, sc(COL.f1_hi), 'if1 hi', true);
       }
@@ -3781,7 +3781,7 @@
         }
       }
       if (IC_MISS_CYCLES.length) {
-        /* Preferred headline: the RTL L1 I$ miss counter (perf_counters.sv
+        /* Preferred headline: the RTL L1 ICache miss counter (perf_counters.sv
          * event 1), which includes the wrong-path fills squashed before
          * delivery that icache_events omit. */
         let m = 0;
@@ -5372,12 +5372,12 @@
       if (r.wraps_line) {
         const icUnion = icLo + icHi;
         if (icUnion > 0) {
-          icStallRows = `<tr><td>IC stall</td>${fmtWait(icUnion, waitMax.icUnion)}</tr>`;
+          icStallRows = `<tr><td>ICache stall</td>${fmtWait(icUnion, waitMax.icUnion)}</tr>`;
           if (icLo > 0) icStallRows += subRow('\u21aa Low line', icLo);
           if (icHi > 0) icStallRows += subRow('\u21aa High line', icHi);
         }
       } else {
-        icStallRows = stRow('IC stall', w.icStall, waitMax.icUnion);
+        icStallRows = stRow('ICache stall', w.icStall, waitMax.icUnion);
       }
       /* The same bubble as a Stalls row, fed into the total, in MinorFlow's
        * format: gap, kind, causer reference, (max N). */
