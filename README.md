@@ -20,15 +20,29 @@ Build CVA6 with Verilator and run a test with VCD tracing enabled. [`run_CVA6.py
 python3 run_CVA6.py cv64a6_imafdc_sv39_hpdcache daxpy.S
 ```
 
-Then turn the VCD into a trace:
+Then turn the VCD into a trace. Both files land in `run_results/` next to the driver, so that is the shortest path to them:
 
 ```bash
-python3 CVA6Flow_tracer.py sim.vcd -o trace.json --disasm-list trace.list
+python3 CVA6Flow_tracer.py run_results/daxpy.vcd -o trace.json
 ```
 
-Then open `CVA6Flow.html` in any browser and drag `trace.json` onto the window. There is nothing to install and nothing to serve. The viewer is a single self-contained HTML file with no dependencies.
+The **objdump listing is not optional in practice**. It is where the instruction text comes from, and without it every record's `disasm` is null: the instruction column is blank, the Main Code button cannot find its region, and compressed instructions are not recognised. The tracer picks up `<name>.list` beside the VCD on its own, which is exactly how `run_CVA6.py` leaves them, and warns when it finds neither. `--disasm-list` names one anywhere else:
 
-The landing page also offers a sample trace. It is not committed, because of its size. Generate one at `tests/daxpy.config1.json`, or at `tests/daxpy.config1.js` wrapping it as `window.__SAMPLE_TRACE__ = {...}` for `file://` use.
+```bash
+python3 CVA6Flow_tracer.py daxpy.vcd --disasm-list run_results/daxpy.list
+```
+
+Then open `CVA6Flow.html` in any browser and drag `trace.json` onto the window. There is nothing to install and nothing to serve. The viewer is a single self-contained HTML file with no dependencies. A JSON made without a listing is refused at load with that explanation, rather than rendering blank.
+
+### The sample trace
+
+The landing page offers a sample, and the button appears only when the sample is actually there, so it is never a dead end. It is not committed by default, because of its size. `make_sample.py` trims a full tracer JSON down to one:
+
+```bash
+python3 make_sample.py daxpy.json                 # -> tests/daxpy.config1.{json,js}
+python3 make_sample.py daxpy.json -n 1500         # fewer instructions
+python3 make_sample.py daxpy.json --from 4000     # start past the set-up
+```
 
 The VCD is streamed rather than loaded, because these files grow quickly with run length and trace depth, well past what fits comfortably in memory.
 
@@ -38,12 +52,15 @@ The VCD is streamed rather than loaded, because these files grow quickly with ru
 python3 CVA6Flow_tracer.py <vcd_path> [options]
 ```
 
+`tests/CVA6Flow_create_all_jsons.py` converts a whole folder at once, skipping any VCD with no listing beside it and any JSON already newer than its VCD, and lets the tracer's progress line through so a long conversion does not look hung.
+
 | Option | Meaning |
 | --- | --- |
 | `vcd_path` | Path to the Verilator-generated `.vcd` |
 | `-o`, `--output` | Output JSON path. Defaults to `<vcd_basename>.json` |
 | `--scope-prefix` | Hierarchical prefix prepended to each whitelisted signal. Defaults to `TOP.ariane_testharness.i_ariane.i_cva6` |
-| `--disasm-list` | Path to an `objdump -dS` listing of the test ELF. Populates each record's `disasm` field by PC lookup. Records outside the listing, such as bootrom, keep `disasm=None` |
+| `--disasm-list` | Path to an `objdump -dS` listing of the test ELF. Populates each record's `disasm` field by PC lookup. Records outside the listing, such as bootrom, keep `disasm=None`. Defaults to `<vcd basename>.list` beside the VCD |
+| `--no-disasm-list` | Do not look for a listing, and do not warn about its absence |
 | `--stages` | Print per-stage resolution diagnostics on stderr |
 | `--quiet` | Suppress the streaming progress indicator |
 
@@ -123,7 +140,7 @@ python3 run_CVA6Flow_sweep.py [--configs 1,4-6] [--tests-dir DIR] [--no-vcd] [--
 
 For each configuration it installs the package with `CVA6_CONFIG_SEL` set to that variant, then runs that configuration's workloads through [`run_CVA6.py`](#running-a-test-run_cva6py). A configuration whose workload is `all` runs every workload the table names.
 
-Results are moved out of `run_results/` into the out directory as `<test>.config<N>.vcd`, `<test>.config<N>.list` and `<test>_report.config<N>.txt`, so one configuration never overwrites another and the VCD and its listing stay paired for the tracer. Every metrics table is also gathered into one `metrics.txt` in that folder, labelled by configuration and test, so the whole sweep can be read without opening a file per run.
+Results are moved out of `run_results/` into the out directory as `<test>.config<N>.vcd`, `<test>.config<N>.list` and `<test>_report.config<N>.txt`, so one configuration never overwrites another and the VCD and its listing stay paired for the tracer. Every metrics table is also gathered into one file in that folder.
 
 Once a run is collected its leftovers are deleted: `run_results/`, and that run's VCD, log, binary, listing and `_report.txt` in `verif/sim/out_<date>/`. A run that **fails** is the exception: nothing of its is collected or deleted, so its output survives the rest of the sweep and is still under `out_<date>/` at the end. If nothing failed, that tree goes too.
 
@@ -201,10 +218,10 @@ CVA6 itself is developed by the [OpenHW Group](https://github.com/openhwgroup/cv
 
 ## Cleaning up
 
-`clean_repo.py` deletes what a run leaves in this repository: every `.list`, `.vcd` and `.fst`, and every `__pycache__`.
+`clean_CVA6Flow_repo.py` deletes what a run leaves in this repository: every `.list`, `.vcd`, `.fst` and debug trace, and every `__pycache__`.
 
 ```bash
-python3 clean_repo.py [-y] [--dry-run] [-v]
+python3 clean_CVA6Flow_repo.py [-y] [--dry-run] [-v]
 ```
 
 It lists what it found with its size and asks before deleting. The viewer JSONs are left alone, and `docs/` is kept whole.
