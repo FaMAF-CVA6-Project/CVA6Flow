@@ -46,7 +46,6 @@ SEP = "=" * 70
 # What the runner writes above its metrics table, and where the sweep gathers
 # every one of those tables once the runs are done.
 METRICS_MARKER = "RESULTS TABLE"
-METRICS_FILE = "metrics.txt"
 
 
 def find_runner():
@@ -243,8 +242,8 @@ def install_config(source_text, cfg_name, live_path):
     text, count = SELECTOR_RE.subn(
         lambda m: m.group(1) + cfg_name + m.group(3), source_text, count=1)
     if count != 1:
-        print(f"[ERROR] CVA6_CONFIG_SEL not found in the config package, so "
-              f"the configuration cannot be selected.")
+        print("[ERROR] CVA6_CONFIG_SEL not found in the config package, so "
+              "the configuration cannot be selected.")
         sys.exit(2)
     with open(live_path, "w") as f:
         f.write(text)
@@ -363,7 +362,20 @@ def extract_metrics(report_path):
     return None
 
 
-def write_metrics_file(out_dir, entries, info):
+def slug(text, limit=40):
+    """Turn a value into something safe for a file name: word characters and
+    single dashes, trimmed."""
+    out = re.sub(r"[^A-Za-z0-9]+", "-", str(text)).strip("-")
+    return out[:limit].strip("-")
+
+
+def metrics_filename(parts):
+    """The gathered metrics file, named after the run that produced it."""
+    tags = [slug(p) for p in parts if p]
+    return "metrics" + ("_" if tags else "") + "_".join(tags) + ".txt"
+
+
+def write_metrics_file(out_dir, entries, info, filename):
     """Gather every run's metrics table into one metrics.txt. entries is
     [(label, report file)] in plan order, so the file reads like the summary
     above it. A run with no table is named, not skipped."""
@@ -378,10 +390,10 @@ def write_metrics_file(out_dir, entries, info):
     if missing:
         print(f"[WARN] No metrics table for: {', '.join(missing)}")
     if not blocks:
-        print(f"[WARN] No metrics tables found, so no {METRICS_FILE} written")
+        print(f"[WARN] No metrics tables found, so no {filename} written")
         return None
 
-    path = os.path.join(out_dir, METRICS_FILE)
+    path = os.path.join(out_dir, filename)
     try:
         with open(path, "w") as f:
             f.write(f"{SEP}\nALL METRICS\n{SEP}\n")
@@ -477,6 +489,13 @@ def main():
                         help=f"The package the build reads, overwritten per "
                              f"configuration and restored at the end. "
                              f"Defaults to {LIVE_CONFIG_PKG}")
+    parser.add_argument("--suite", choices=["config", "viewer"], default=None,
+                        help="Forwarded to run_CVA6.py: which overhead table "
+                             "to subtract. Defaults to the one run_CVA6.py "
+                             "picks from where it sits, 'viewer' here")
+    parser.add_argument("--cva6-root", default=None, metavar="DIR",
+                        help="Forwarded to run_CVA6.py: the CVA6 checkout to "
+                             "run")
     parser.add_argument("--no-vcd", action="store_true",
                         help="Forwarded to run_CVA6.py: no .vcd trace, "
                              "metrics only")
@@ -566,6 +585,10 @@ def main():
                 clear_stale_outputs(results_dir, test_name)
 
                 cmd = [sys.executable, runner, args.target, path]
+                if args.suite:
+                    cmd.extend(["--suite", args.suite])
+                if args.cva6_root:
+                    cmd.extend(["--cva6-root", args.cva6_root])
                 if args.no_vcd:
                     cmd.append("--no-vcd")
                 # The RTL changed with the configuration, so the first test
@@ -607,9 +630,12 @@ def main():
         [(f"config{cid} / {name}",
           os.path.join(out_dir, f"{name}_report.config{cid}.txt"))
          for cid, name, code, _ in results if code == 0],
-        [f"Target   : {args.target}",
-         f"Tests dir: {os.path.abspath(args.tests_dir)}",
-         f"Runs     : {len(results)}, {len(results) - failed} passed"])
+        [f"Target    : {args.target}",
+         f"CVA6 root : {args.cva6_root or '(run_CVA6.py default)'}",
+         f"Suite     : {args.suite or '(run_CVA6.py default)'}",
+         f"Tests dir : {os.path.abspath(args.tests_dir)}",
+         f"Runs      : {len(results)}, {len(results) - failed} passed"],
+        metrics_filename([args.target, args.suite]))
 
     print(f"[INFO] Results in {out_dir}")
     if failed:
