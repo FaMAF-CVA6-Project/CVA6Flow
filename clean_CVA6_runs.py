@@ -20,6 +20,7 @@ import argparse
 # batch was launched from. Matched only at the top of each search root.
 ROOT_DIRS = {
     "work-ver":               "the Verilator build, remade by the next run",
+    "batch_results":          "run_all_CVA6_benchmarks.py",
     "CVA6Flow_sweep_results": "run_CVA6Flow_sweep.py",
 }
 
@@ -36,14 +37,17 @@ SIBLING_DIRS = {
     "__pycache__": "left behind by python",
 }
 
-RUNNERS = {"run_CVA6.py", "run_CVA6Flow_sweep.py"}
+RUNNERS = {"run_CVA6.py", "run_all_CVA6_benchmarks.py",
+           "run_CVA6Flow_sweep.py"}
 
 # Never descended into: heavy trees that cannot hold a generated folder.
 PRUNE_DIRS = {".git", "build", "vendor", "node_modules", "install"}
 
+
 def repo_root():
     """The repository this script sits in, found by walking up to the nearest
-    .git rather than counting directory levels."""
+    .git rather than counting directory levels.
+    """
     here = os.path.dirname(os.path.abspath(__file__))
     path = here
     while True:
