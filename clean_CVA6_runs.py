@@ -4,11 +4,11 @@ verif/sim/out_<date>/ folders, work-ver/, the batch folder and each runner's
 run_results/. Only the fixed names below are removed, and only where a
 Verilator runner sits beside them.
 
-  python3 clean_CVA6.py               # list, then ask
-  python3 clean_CVA6.py -y            # no confirmation
-  python3 clean_CVA6.py --dry-run     # list only
-  python3 clean_CVA6.py --keep-build  # spare work-ver
-  python3 clean_CVA6.py my_results    # plus a custom --out-dir sweep
+  python3 clean_CVA6_runs.py               # list, then ask
+  python3 clean_CVA6_runs.py -y            # no confirmation
+  python3 clean_CVA6_runs.py --dry-run     # list only
+  python3 clean_CVA6_runs.py --keep-build  # spare work-ver
+  python3 clean_CVA6_runs.py my_results    # plus a custom --out-dir sweep
 """
 import os
 import sys
@@ -41,9 +41,21 @@ RUNNERS = {"run_CVA6.py", "run_CVA6Flow_sweep.py"}
 # Never descended into: heavy trees that cannot hold a generated folder.
 PRUNE_DIRS = {".git", "build", "vendor", "node_modules", "install"}
 
-# This repository, two levels up from benchmarks/CVA6/.
-REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(
-    os.path.abspath(__file__))))
+def repo_root():
+    """The repository this script sits in, found by walking up to the nearest
+    .git rather than counting directory levels."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    path = here
+    while True:
+        if os.path.exists(os.path.join(path, ".git")):
+            return path
+        parent = os.path.dirname(path)
+        if parent == path:
+            return here
+        path = parent
+
+
+REPO_ROOT = repo_root()
 
 # Where run_CVA6.py expects the checkout. Outside the container that path
 # does not exist and the repository this script lives in is used instead.

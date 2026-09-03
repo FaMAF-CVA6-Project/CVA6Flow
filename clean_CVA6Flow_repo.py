@@ -1,22 +1,27 @@
 #!/usr/bin/env python3
 """Remove the heavy run artefacts from this viewer repository.
 
-Deletes every .list, .vcd and .fst file, and every __pycache__ folder,
+Deletes every .list, .vcd, .fst and debug-trace file, and every __pycache__
+folder,
 anywhere under the repository this script sits in.
 
 The viewer JSONs in tests/ are left alone.
 
-  python3 clean_repo.py             # list, then ask
-  python3 clean_repo.py -y          # delete without asking
-  python3 clean_repo.py --dry-run   # list only
+  python3 clean_CVA6Flow_repo.py             # list, then ask
+  python3 clean_CVA6Flow_repo.py -y          # delete without asking
+  python3 clean_CVA6Flow_repo.py --dry-run   # list only
 """
 import os
-import sys
 import shutil
 import argparse
 
 # Files removed, matched on the end of the name.
 FILE_SUFFIXES = (".list", ".vcd", ".fst")
+
+# A debug trace is matched on '_trace' rather than on the ending, so a run
+# tagged with its configuration is caught too.
+TRACE_MARK = "_trace."
+TRACE_END = ".txt"
 
 # Folders removed whole.
 DIR_NAMES = {"__pycache__"}
@@ -35,7 +40,12 @@ def kind_of(path):
     for suffix in FILE_SUFFIXES:
         if name.endswith(suffix):
             return f"*{suffix}"
-    return "?"
+    return "*_trace*.txt" if is_trace(name) else "?"
+
+
+def is_trace(name):
+    """True for a debug trace, however the configuration is tagged into it."""
+    return TRACE_MARK in name and name.endswith(TRACE_END)
 
 
 def is_kept(path):
@@ -62,7 +72,8 @@ def find_targets():
 
         for filename in filenames:
             full = os.path.join(dirpath, filename)
-            if filename.endswith(FILE_SUFFIXES) and not is_kept(full):
+            if ((filename.endswith(FILE_SUFFIXES) or is_trace(filename))
+                    and not is_kept(full)):
                 targets.append(full)
     return sorted(targets)
 
@@ -106,8 +117,8 @@ def group(targets):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Delete the .list, .vcd and .fst files and __pycache__ "
-                    "folders in this viewer repository.")
+        description="Delete the .list, .vcd, .fst and trace files and "
+                    "__pycache__ folders in this viewer repository.")
     parser.add_argument("-y", "--yes", action="store_true",
                         help="Delete without asking for confirmation")
     parser.add_argument("-n", "--dry-run", action="store_true",
