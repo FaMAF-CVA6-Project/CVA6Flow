@@ -16,35 +16,71 @@ import argparse
 import datetime
 import subprocess
 
-# ===================================================================================
-# OVERHEAD PROFILES (cv64a6_imafdc_sv39_hpdcache_wb, measured on CVA6Flow benchmarks)
-# ===================================================================================
-OVERHEAD_PROFILES = {
-    "c": {
-        'x18': 183,  # Cycles
-        'x19': 32,   # Instructions
-        'x20': 8,    # I-Cache misses
-        'x21': 8,    # D-Cache misses
-        'x22': 56,   # I-Cache accesses
-        'x23': 32,   # D-Cache accesses
-        'x24': 0,    # Branches
-        'x25': 0,    # Branch mispredicts + unpredicted
+# ==============================================================================
+# OVERHEAD PROFILES (cv64a6_imafdc_sv39_hpdcache_wb)
+# ==============================================================================
+# Scaffolding around the measured region, subtracted to get NET. Indexed by
+# suite and language. 'config' is the calibration set in benchmarks/CVA6/,
+# 'viewer' the teaching set in CVA6Flow: different templates, so the tables
+# are not interchangeable.
+OVERHEAD_SUITES = {
+    "config": {
+        "c": {
+            'x18': 180,  # Cycles
+            'x19': 33,   # Instructions
+            'x20': 9,    # I-Cache misses
+            'x21': 8,    # D-Cache misses
+            'x22': 62,   # I-Cache accesses
+            'x23': 32,   # D-Cache accesses
+            'x24': 1,    # Branches
+            'x25': 0,    # Branch mispredicts + unpredicted
+        },
+        "asm": {
+            'x18': 40,   # Cycles
+            'x19': 18,   # Instructions
+            'x20': 4,    # I-Cache misses
+            'x21': 0,    # D-Cache misses
+            'x22': 40,   # I-Cache accesses
+            'x23': 9,    # D-Cache accesses
+            'x24': 1,    # Branches
+            'x25': 0,    # Branch mispredicts + unpredicted
+        },
     },
-    "asm": {
-        'x18': 40,   # Cycles
-        'x19': 17,   # Instructions
-        'x20': 3,    # I-Cache misses
-        'x21': 0,    # D-Cache misses
-        'x22': 34,   # I-Cache accesses
-        'x23': 9,    # D-Cache accesses
-        'x24': 0,    # Branches
-        'x25': 0,    # Branch mispredicts + unpredicted
+    "viewer": {
+        "c": {
+            'x18': 183,  # Cycles
+            'x19': 32,   # Instructions
+            'x20': 8,    # I-Cache misses
+            'x21': 8,    # D-Cache misses
+            'x22': 56,   # I-Cache accesses
+            'x23': 32,   # D-Cache accesses
+            'x24': 0,    # Branches
+            'x25': 0,    # Branch mispredicts + unpredicted
+        },
+        "asm": {
+            'x18': 40,   # Cycles
+            'x19': 17,   # Instructions
+            'x20': 3,    # I-Cache misses
+            'x21': 0,    # D-Cache misses
+            'x22': 34,   # I-Cache accesses
+            'x23': 9,    # D-Cache accesses
+            'x24': 0,    # Branches
+            'x25': 0,    # Branch mispredicts + unpredicted
+        },
     },
 }
 
-# ==================================================================================
+
+def default_suite():
+    """Which overhead table this copy of the script subtracts by default."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    page = os.path.join(here, "CVA6Flow.html")
+    return "viewer" if os.path.isfile(page) else "config"
+
+
+# ==============================================================================
 # CONFIGURATION
-# ==================================================================================
+# ==============================================================================
 METRICS_MAP = {
     'x18': 'Cycles',                # s2
     'x19': 'Instructions',          # s3
@@ -299,17 +335,44 @@ def read_cache_geometry(cva6_root, target):
     return geometry
 
 
-def build_table_header(engine, core, program, geometry):
-    """The table title, over two lines. What was measured goes on the first
-    and the core on the second, a target name being long enough to push a
-    single title past the width of the table."""
+def build_table_header(engine, core, program, geometry, build=""):
+    """The table title, over three lines. What was measured goes on the first,
+    the core on the second and the checkout on the third, a target name being
+    long enough to push a single title past the width of the table.
+    """
     parts = [f"RESULTS TABLE {engine} {program}"]
     for name, label in (("icache", "ICache"), ("dcache", "DCache")):
         cache = geometry.get(name) or {}
         size = format_cache_size(cache.get("size") or "")
         assoc = cache.get("assoc") or "?"
         parts.append(f"{label}: {size}/{assoc}")
-    return ["  ".join(parts), f"Core: {core}"]
+    lines = ["  ".join(parts), f"Core: {core}"]
+    if build:
+        lines.append(f"Build: {build}")
+    return lines
+
+
+def resolve_out_dir(sim_dir, predicted, log_rel):
+    """The out_<date>/ folder holding this run's log.
+
+    cva6.py names the folder from the date at its own start, and a Verilator
+    build takes long enough to cross midnight, so the date computed before the
+    run is a prediction rather than a fact.
+    """
+    if os.path.isfile(os.path.join(sim_dir, predicted, log_rel)):
+        return predicted
+
+    candidates = sorted(
+        (d for d in glob.glob(os.path.join(sim_dir, "out_*"))
+         if os.path.isfile(os.path.join(d, log_rel))),
+        key=os.path.getmtime, reverse=True)
+    if not candidates:
+        return predicted
+
+    found = os.path.basename(candidates[0])
+    print(f"[WARN] No log in {predicted}/, using {found}/ instead. A run that "
+          f"crosses midnight lands in the next day's folder.")
+    return found
 
 
 def detect_lang(src_file, override):
@@ -354,11 +417,7 @@ def generate_and_show_codelist(binary_path, codelist):
         print("[ERROR] 'riscv64-unknown-elf-objdump' not found")
         return None
 
-    # Filtered view.
-    print()
-    for line in CODE_BANNER:
-        print(line)
-    print()
+    # Filtered view, written to the report rather than echoed.
 
     def core_phrase(marker):
         return re.sub(r'\s+', ' ', marker.lstrip('#/ \t').strip())
@@ -378,10 +437,8 @@ def generate_and_show_codelist(binary_path, codelist):
 
     printing = False
     found_start = False
-    start_line_no = None
     end_line_no = None
-    start_hit = None
-    end_hit = None
+    kept = 0
 
     try:
         with open(list_path, "r") as f:
@@ -395,7 +452,6 @@ def generate_and_show_codelist(binary_path, codelist):
                     eh = first_hit(line, end_cores)
                     if eh:
                         end_line_no = idx
-                        end_hit = eh
                         printing = False
                         break
 
@@ -404,8 +460,6 @@ def generate_and_show_codelist(binary_path, codelist):
                     if sh and not first_hit(line, end_cores):
                         printing = True
                         found_start = True
-                        start_line_no = idx
-                        start_hit = sh
                         continue
 
                 if printing:
@@ -414,16 +468,16 @@ def generate_and_show_codelist(binary_path, codelist):
 
                     if line.strip().startswith('/'):
                         if codelist["keep_discriminator"] and "(discriminator" in line:
-                            print(line, end='')
                             f_report.write(line)
                             written = line
+                            kept += 1
                             continue
                         else:
                             continue
 
-                    print(line, end='')
                     f_report.write(line)
                     written = line
+                    kept += 1
 
             if not written.endswith("\n"):
                 f_report.write("\n")
@@ -432,19 +486,16 @@ def generate_and_show_codelist(binary_path, codelist):
         if not found_start:
             print(f"[WARN] No start marker found (searched {start_cores!r}), "
                   f"so no program body was extracted. Check that the source "
-                  f"uses one of these as a comment line.\n")
+                  f"uses one of these as a comment line.")
         elif end_line_no is None:
             print(f"[WARN] No end marker found after the start (searched "
-                  f"{end_cores!r}). Printed through end of file.")
+                  f"{end_cores!r}). Written through end of file.")
 
     except Exception as e:
         print(f"[ERROR] {e}")
         return None
 
-    for line in CODE_END_BANNER:
-        print(line)
-    print()
-    print(f"[INFO] Clean file saved in: {report_path}")
+    print(f"[INFO] Disassembly ({kept} lines) saved in: {report_path}")
     return report_path
 
 
@@ -485,6 +536,18 @@ def main():
     parser.add_argument("src_file",
                         help="Path to the test: C (.c) or assembly (.S/.s/.asm), "
                              "relative or absolute")
+    parser.add_argument("--cva6-root", default=None, metavar="DIR",
+                        help="The CVA6 checkout to run: the one holding "
+                             "verif/sim. Defaults to /cva6 inside the "
+                             "container, or the repository this script sits "
+                             "in when that does not exist")
+    parser.add_argument("--suite", choices=sorted(OVERHEAD_SUITES),
+                        default=default_suite(),
+                        help=f"Which overhead table to subtract. 'config' is "
+                             f"the calibration benchmarks, 'viewer' the "
+                             f"CVA6Flow teaching set. Defaults to "
+                             f"{default_suite()} here, from where this script "
+                             f"sits")
     parser.add_argument("--lang", choices=["c", "asm"], default="auto",
                         help="Force the input type and overhead/filter profile. "
                              "Defaults to detection by extension.")
@@ -499,8 +562,15 @@ def main():
                              "build was made.")
     args = parser.parse_args()
 
-    # Directory configuration
-    cva6_root = "/cva6"
+    # Directory configuration.
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    cva6_root = args.cva6_root or ("/cva6" if os.path.isdir("/cva6")
+                                   else repo_root)
+    if not os.path.isdir(os.path.join(cva6_root, "verif", "sim")):
+        print(f"[ERROR] '{cva6_root}' does not look like a CVA6 checkout: no "
+              f"verif/sim inside it. Point --cva6-root at one.")
+        sys.exit(1)
+    print(f"[INFO] CVA6 root: {cva6_root}")
     sim_dir = os.path.join(cva6_root, "verif/sim")
     setup_script = os.path.join(sim_dir, "setup-env.sh")
 
@@ -524,7 +594,8 @@ def main():
         sys.exit(1)
 
     lang = detect_lang(abs_src_path, args.lang)
-    overhead = OVERHEAD_PROFILES[lang]
+    overhead = OVERHEAD_SUITES[args.suite][lang]
+    print(f"[INFO] Overhead table: {args.suite}/{lang}")
     codelist = CODELIST_PROFILES[lang]
 
     rel_src_path = os.path.relpath(abs_src_path, sim_dir)
@@ -620,6 +691,14 @@ def main():
         print(f"[ERROR] Could not run the simulation: {e}")
         sys.exit(1)
 
+    # The run is over, so the folder it actually wrote to is known.
+    out_name = resolve_out_dir(
+        sim_dir, f"out_{today}",
+        os.path.join("veri-testharness_sim", log_main))
+    log_dir_prediction = os.path.join(sim_dir, out_name,
+                                      "veri-testharness_sim")
+    binary_dir_compilation = os.path.join(sim_dir, out_name, "directed_tests")
+
     # --------------------------------------------------------------------------
     # GENERATE AND SHOW CODE
     # --------------------------------------------------------------------------
@@ -695,7 +774,9 @@ def main():
 
     geometry = read_cache_geometry(cva6_root, args.target)
     header = build_table_header("CVA6", args.target,
-                                os.path.basename(abs_src_path), geometry)
+                                os.path.basename(abs_src_path), geometry,
+                                f"{cva6_root}  (overhead: "
+                                f"{args.suite}/{lang})")
     # The rule is widened when the title is longer, so the box never breaks.
     width = max(70, max(len(line) for line in header))
 
@@ -715,9 +796,13 @@ def main():
         # Net value
         val_corrected = max(0, val_official - ovh)
 
-        if key == 'x26' and time_us is not None:
-            val_official = time_us
-            val_corrected = net_time_us
+        if key == 'x26':
+            if time_us is not None:
+                val_official = time_us
+                val_corrected = net_time_us
+            else:
+                val_corrected = (val_official * net_cycles / raw_cycles
+                                 if raw_cycles else 0)
 
         # Format and store. round() leaves a count alone and only bites on the
         # one metric that carries a fraction.
@@ -752,7 +837,8 @@ def main():
                 f_report.write("\n")
                 for line in output_buffer:
                     f_report.write(line + "\n")
-            print(f"[INFO] Metrics successfully consolidated in: {report_path}")
+            print(
+                f"[INFO] Metrics successfully consolidated in: {report_path}")
         except Exception as e:
             print(f"[WARN] Could not save the metrics to the file: {e}")
 
