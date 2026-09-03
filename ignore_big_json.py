@@ -95,6 +95,17 @@ def path_for(pattern):
     return re.sub(r"\\(.)", r"\1", pattern.lstrip("/"))
 
 
+def owns(pattern):
+    """Whether this line is one this script could have written: a rooted path
+    to a single tracer file that is not a directory."""
+    if not pattern.startswith("/") or pattern.endswith("/"):
+        return False
+    path = path_for(pattern)
+    if not path.endswith(SUFFIXES):
+        return False
+    return not os.path.isdir(os.path.join(REPO_ROOT, path))
+
+
 def human(size):
     for unit in ("B", "KiB", "MiB", "GiB"):
         if size < 1024 or unit == "GiB":
@@ -190,9 +201,12 @@ def main():
             added.append(pattern)
         rows.append((size, rel, state))
 
-    dropped = []
+    dropped, hand_written = [], []
     if args.prune:
         for pattern in entries:
+            if not owns(pattern):
+                hand_written.append(pattern)
+                continue
             full = os.path.join(REPO_ROOT, path_for(pattern))
             try:
                 if os.lstat(full).st_size >= limit:
@@ -225,6 +239,13 @@ def main():
               f"in the history until they are removed by hand:")
         for rel in warned:
             print(f"           git rm --cached {rel}")
+        print()
+
+    if hand_written:
+        print(f"[INFO] {len(hand_written)} line(s) were written by hand, "
+              f"not by this script, so --prune leaves them alone:")
+        for pattern in hand_written:
+            print(f"           {pattern}")
         print()
 
     if not added and not dropped:
