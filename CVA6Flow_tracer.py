@@ -3,9 +3,14 @@
 Verilator VCD and emits JSON for the CVA6Flow viewer, following each
 instruction from fetch through decode, issue, execute, writeback and commit.
 
+The viewer also needs the objdump listing of the test, which is where the
+instruction text comes from. It is picked up automatically when it sits beside
+the VCD as <name>.list, and named with --disasm-list otherwise.
+
 Usage:
-    python3 CVA6Flow_tracer.py <path-to.vcd>
+    python3 CVA6Flow_tracer.py daxpy.vcd
     python3 CVA6Flow_tracer.py daxpy.vcd --output daxpy.json
+    python3 CVA6Flow_tracer.py daxpy.vcd --disasm-list run_results/daxpy.list
 """
 
 import argparse
@@ -16,7 +21,7 @@ import sys
 import time
 from statistics import median
 from collections import deque, defaultdict, Counter
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, asdict
 from pathlib import Path
 
 
@@ -119,10 +124,6 @@ FSM_KILL_MISS = "101"
 # ============================================================================
 # load_unit.sv:83 . 4-bit FSM, 9 states
 # store_unit.sv:119. 2-bit FSM, 4 states
-#
-# A SystemVerilog enum with no explicit values counts up from 0, and the VCD
-# encodes each as a binary string of the declared width, 4 chars for
-# load_unit and 2 for store_unit. Names lifted verbatim from the source.
 
 LOAD_FSM_NAMES = {
     0: "IDLE",
@@ -249,18 +250,6 @@ WHITELIST = [
     "issue_stage_i.i_scoreboard.issue_ack_i",
     "issue_stage_i.i_scoreboard.issue_pointer_q",
 
-    # Decoded fields at the decode handshake, per-port entries appended
-    # below. bp comes from here, not mem_q[tid].sbe.bp, whose slot holds the
-    # previous occupant post-edge once issue_pointer_q has advanced.
-
-    # Forwarding capture. Probed at the issue cycle to learn
-    # whether each source operand was taken from the regfile or from
-    # the forwarding network, and from which producer slot.
-    #
-    # forward_rsX is 1 when the source had a RAW hazard and the operand was
-    # available on the forwarding network. idx_hzd_rsX is the scoreboard slot
-    # it forwards from, meaningful only when forward_rsX is 1.
-    #
     # All six are [NrIssuePorts-1:0] in issue_read_operands. forward_rsX is one
     # bit per port, idx_hzd_rsX is TRANS_ID_BITS per port, and the per-port
     # idx_hzd_rs slices are appended programmatically below.
@@ -275,10 +264,6 @@ WHITELIST = [
     # The scoreboard's registered mem_q ring. Reading fu/rs1/rs2/rd from
     # mem_q[trans_id].sbe at writeback is authoritative, written at the decode
     # edge and stable until the slot is reused. Per-slot entries appended below.
-
-    # bp.cf and bp.predict_address come from mem_q[trans_id].sbe.bp at
-    # writeback, the same data commit uses. The pre-edge decoded_instr_i.bp
-    # snapshot is the fallback when mem_q is absent or the record is flushed.
 
     # Branch resolution from the EX branch_unit. bp_resolve_t (cva6.sv:134)
     # carries pc, target, is_taken, is_mispredict and cf_type for one cycle at
@@ -333,10 +318,6 @@ WHITELIST = [
     # HPDcache miss and refill events. cva6.sv has three cache-subsystem
     # variants under different gen_cache_* blocks, and this build uses
     # HPDcache, so everything sits under gen_cache_hpd.
-    #
-    # The mshr_alloc_* group is sampled when mshr_alloc_i pulses, a primary
-    # miss. mshr_alloc_sid_i names the requestor and is the only way to tell a
-    # load-adapter miss from a store or prefetch one.
     "gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache."
     "hpdcache_miss_handler_i.mshr_alloc_i",
     "gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache."
@@ -1384,8 +1365,6 @@ class PipelineTracker:
         pc_int = binary_to_int(pc_str)
         if pc_int is None:
             return
-        pc_hex = f"0x{pc_int:x}"
-
         # Find candidate records: in-flight CTRL_FLOW with matching pc.
         candidates = []
         for tid, rec in self.issued.items():
@@ -2374,8 +2353,6 @@ def stream_and_extract(f, matches, args, n_wb_ports, n_commit_ports):
         stagelog("WARNING: Forwarding signals not resolved. "
               "fwd_rsX_* fields will be left null on all records. "
               "Missing: " + ", ".join(missing), file=sys.stderr)
-    IV = single_id.get("issue_stage_i.i_scoreboard.issue_instr_valid_o")
-    IA = single_id.get("issue_stage_i.i_scoreboard.issue_ack_i")
     IPTR = single_id.get("issue_stage_i.i_scoreboard.issue_pointer_q")
 
     WTV = single_id.get("issue_stage_i.i_scoreboard.wt_valid_i")
@@ -3754,10 +3731,17 @@ def main():
     parser.add_argument(
         "--disasm-list",
         default=None,
-        help="Path to an objdump -dS listing of the test ELF. When provided, "
-             "each record's `disasm` field is populated by PC lookup. "
-             "Records whose PC falls outside the listing (e.g. Bootrom) "
-             "keep disasm=None.",
+        help="Path to an objdump -dS listing of the test ELF, the .list "
+             "run_CVA6.py leaves in run_results/. Each record's `disasm` "
+             "field is filled in by PC lookup, and records whose PC falls "
+             "outside the listing (the bootrom, say) keep disasm=None. "
+             "Defaults to <vcd basename>.list beside the VCD when that "
+             "exists. The viewer needs it: without a listing the instruction "
+             "column is blank and Main Code cannot find the region.",
+    )
+    parser.add_argument(
+        "--no-disasm-list", action="store_true",
+        help="Do not look for a listing, and do not warn about its absence.",
     )
     parser.add_argument(
         "--stages", action="store_true",
@@ -3960,9 +3944,24 @@ def main():
         print(f"[INFO] RTL-counter I-cache misses (miss_o pulses, whole "
               f"trace): {ic_miss_total:,}", file=sys.stderr)
 
-    # Annotate records with disassembly text, if a listing was
-    # provided. Done after the walk completes so we annotate exactly the
-    # records that will be serialized (committed + flushed).
+    # Annotate records with disassembly text. Done after the walk, so exactly
+    # the records that will be serialized are annotated. Nominally optional,
+    # effectively required: without a listing every disasm is None and the
+    # viewer shows a blank instruction column.
+    if not args.disasm_list and not args.no_disasm_list:
+        guess = vcd_path.with_suffix(".list")
+        if guess.exists():
+            print(f"[INFO] Using {guess.name} for the disassembly. "
+                  f"--disasm-list picks another, --no-disasm-list skips it.",
+                  file=sys.stderr)
+            args.disasm_list = str(guess)
+        else:
+            print(f"[WARN] No --disasm-list given and no {guess.name} beside "
+                  f"the VCD, so every record's 'disasm' will be null: the "
+                  f"viewer shows a blank instruction column and Main Code "
+                  f"cannot find the region. run_CVA6.py leaves the listing in "
+                  f"run_results/.", file=sys.stderr)
+
     if args.disasm_list:
         disasm_path = Path(args.disasm_list)
         if not disasm_path.exists():
@@ -4048,7 +4047,7 @@ def main():
         first_user = next(iter(tracker.completed), None)
         if first_user:
             print()
-            print(f" First record:")
+            print(" First record:")
             print(f"   id={first_user.id}, pc={first_user.pc}, "
                   f"instr={first_user.instr_word}, compressed={first_user.is_compressed}")
             if first_user.disasm:
