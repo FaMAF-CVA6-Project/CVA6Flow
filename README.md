@@ -17,7 +17,7 @@ Zero guesswork. The core philosophy of this tool is uncompromising: every report
 Build CVA6 with Verilator and run a test with VCD tracing enabled. [`run_CVA6.py`](#running-a-test-run_cva6py) does that in one command and hands you the VCD and the disassembly listing:
 
 ```bash
-python3 run_CVA6.py cv64a6_imafdc_sv39_hpdcache daxpy.S
+python3 run_CVA6.py daxpy.S
 ```
 
 Then turn the VCD into a trace. Both files land in `run_results/` next to the driver, so that is the shortest path to them:
@@ -69,12 +69,12 @@ python3 CVA6Flow_tracer.py <vcd_path> [options]
 Getting a VCD out of CVA6 by hand means sourcing the simulation environment, picking the right `cva6.py` flags, and then digging the performance counters out of the log. `run_CVA6.py` does all of it in one command, and is how every trace in [tests/](tests/) was produced.
 
 ```bash
-python3 run_CVA6.py <target> <test> [--lang c|asm] [--no-vcd]
+python3 run_CVA6.py [target] <test> [--lang c|asm] [--no-vcd]
 ```
 
 | Argument | Meaning |
 | --- | --- |
-| `<target>` | CVA6 configuration to build, for example `cv64a6_imafdc_sv39_hpdcache` |
+| `[target]` | CVA6 configuration to build. Optional, and defaults to `cv64a6_imafdc_sv39_hpdcache_wb`, the one this fork targets |
 | `<test>` | The test to run: C (`.c`) or assembly (`.S`, `.s`, `.asm`). The type is detected from the extension |
 | `--lang` | Force the type instead of detecting it. It selects both the overhead profile and the disassembly markers |
 | `--no-vcd` | Skip the trace and report metrics only. Use it when you only want the numbers, since the VCD is the expensive part |

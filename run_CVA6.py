@@ -16,8 +16,12 @@ import argparse
 import datetime
 import subprocess
 
+# The target the overhead tables below were measured on, and the one the
+# calibration runs against.
+DEFAULT_TARGET = "cv64a6_imafdc_sv39_hpdcache_wb"
+
 # ==============================================================================
-# OVERHEAD PROFILES (cv64a6_imafdc_sv39_hpdcache_wb)
+# OVERHEAD PROFILES (DEFAULT_TARGET)
 # ==============================================================================
 # Scaffolding around the measured region, subtracted to get NET. Indexed by
 # suite and language. 'config' is the calibration set in benchmarks/CVA6/,
@@ -207,13 +211,26 @@ def format_metric(value, decimals=4):
     return f"{number:,.{decimals}f}"
 
 
+def repo_checkout():
+    """The CVA6 checkout this script sits in, found by walking up for
+    verif/sim."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    path = here
+    while True:
+        if os.path.isdir(os.path.join(path, "verif", "sim")):
+            return path
+        parent = os.path.dirname(path)
+        if parent == path:
+            return here
+        path = parent
+
+
 def find_config_pkg(cva6_root, target):
     """Locate the target's SystemVerilog config package under core/include/,
     in the CVA6 root or this checkout, falling back to a recursive search for a
     generated one. Returns None when the target names no package."""
     name = f"{target}_config_pkg.sv"
-    repo_root = os.path.dirname(os.path.dirname(
-        os.path.dirname(os.path.abspath(__file__))))
+    repo_root = repo_checkout()
     roots = [cva6_root]
     if os.path.realpath(repo_root) != os.path.realpath(cva6_root):
         roots.append(repo_root)
@@ -531,8 +548,10 @@ def main():
     # Parse arguments
     parser = argparse.ArgumentParser(
         description="Run a CVA6 test (C or assembly) and extract metrics.")
-    parser.add_argument("target",
-                        help="Architecture target (e.g. cv64a6_imafdc_sv39_hpdcache)")
+    parser.add_argument("target", nargs="?", default=DEFAULT_TARGET,
+                        help=f"Architecture target. Defaults to "
+                             f"{DEFAULT_TARGET}, the one the overhead tables "
+                             f"were measured on")
     parser.add_argument("src_file",
                         help="Path to the test: C (.c) or assembly (.S/.s/.asm), "
                              "relative or absolute")
@@ -563,9 +582,8 @@ def main():
     args = parser.parse_args()
 
     # Directory configuration.
-    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     cva6_root = args.cva6_root or ("/cva6" if os.path.isdir("/cva6")
-                                   else repo_root)
+                                   else repo_checkout())
     if not os.path.isdir(os.path.join(cva6_root, "verif", "sim")):
         print(f"[ERROR] '{cva6_root}' does not look like a CVA6 checkout: no "
               f"verif/sim inside it. Point --cva6-root at one.")
@@ -591,6 +609,12 @@ def main():
     abs_src_path = os.path.abspath(args.src_file)
     if not os.path.exists(abs_src_path):
         print(f"[ERROR] The file {abs_src_path} does not exist")
+        pkg = os.path.join(cva6_root, "core", "include",
+                           f"{args.src_file}_config_pkg.sv")
+        if os.path.isfile(pkg):
+            print(f"[ERROR] '{args.src_file}' is a target, not a test. The "
+                  f"test is the last argument, and the target before it can "
+                  f"be left out to get {DEFAULT_TARGET}.")
         sys.exit(1)
 
     lang = detect_lang(abs_src_path, args.lang)
