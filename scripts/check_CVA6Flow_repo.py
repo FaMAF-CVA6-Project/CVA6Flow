@@ -47,8 +47,24 @@ FROZEN = ("docs/CARLA2026", "docs/old_versions", "docs/parser_phases")
 # The style is 79 columns. This is a ratchet: the count may fall
 # but never rise, so new sprawl fails and old sprawl is not a
 # standing red mark.
+# Scripts named in our text that do not live here. The CVA6 fork's tools are
+# listed rather than looked up: they resolve only when this repository sits
+# inside that fork, and a standalone clone must still be checkable. A rename
+# in the fork makes this repository's text stale, and this is what says so.
+EXTERNAL_SCRIPTS = {
+    "cva6.py",                          # the verif/sim driver
+    "my_config.py",                     # an example name
+    "MinorFlow_tracer.py",           # the sibling viewer
+    # In the CVA6 fork:
+    "check_CVA6_repo.py",
+    "create_all_CVA6_repo_jsons.py",
+    "run_CVA6_testing_sweep.py",
+    "gem5_config_CVA6.py",
+    "gem5_config_CVA6_Patch.py",
+}
+
 MAX_COLS = 79
-WIDTH_BUDGET = 82
+WIDTH_BUDGET = 71
 
 
 # -------------------------------------------------------------------------
@@ -65,9 +81,9 @@ def owned(pattern=None):
             continue
         if not os.path.isdir(full):
             continue
-        # A submodule has its own index, so ask the right repository. Its
-        # .git is a file rather than a directory, which is why this is exists
-        # and not isdir: with isdir the submodules were skipped entirely.
+        # A submodule has its own index, so ask the right repository.
+        # Its .git is a file rather than a directory, which is why this
+        # is exists and not isdir: isdir skipped the submodules whole.
         inner = full if os.path.exists(os.path.join(full, ".git")) else REPO
         rel = "." if inner == full else root
         # --others --exclude-standard adds files not yet staged, respecting
@@ -76,8 +92,8 @@ def owned(pattern=None):
         r = subprocess.run(["git", "-C", inner, "ls-files", "--cached",
                             "--others", "--exclude-standard", rel],
                            capture_output=True, text=True)
-        # Submodule paths come back relative to the submodule, so they need
-        # the prefix to be usable here. A root of "." already is the repository.
+        # Submodule paths come back relative to the submodule, so they
+        # need the prefix here. A root of "." already is the repository.
         prefix = root + "/" if inner == full and root != "." else ""
         out += [prefix + p for p in r.stdout.split()]
     # git ls-files reports the index, which still carries files deleted in the
@@ -209,6 +225,24 @@ def check_formatting():
     return bad
 
 
+def check_script_names():
+    """Every script named in our docs, Dockerfiles and scripts exists."""
+    import re
+    known = {os.path.basename(p) for p in owned(".py")}
+    bad = []
+    for rel in owned():
+        if not rel.endswith((".md", ".py", "Dockerfile")):
+            continue
+        for match in re.finditer(r"(?<![\w>])([A-Za-z][A-Za-z0-9_]*\.py)\b",
+                                 read(rel)):
+            name = match.group(1)
+            if name in known or name in EXTERNAL_SCRIPTS:
+                continue
+            line = read(rel)[:match.start()].count("\n") + 1
+            bad.append(f"{rel}:{line}: {name} does not exist here")
+    return sorted(set(bad))
+
+
 def check_cycle_fields():
     """The cycle-typed field lists agree.
 
@@ -268,6 +302,7 @@ CHECKS = (
     ("help", check_help),
     ("viewer-js", check_viewer_js),
     ("cycle-fields", check_cycle_fields),
+    ("script-names", check_script_names),
     ("links", check_links),
     ("formatting", check_formatting),
 )
