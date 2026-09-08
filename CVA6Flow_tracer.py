@@ -287,8 +287,9 @@ WHITELIST = [
     "issue_stage_i.i_scoreboard.wt_valid_i",
 
     # The scoreboard's registered mem_q ring. Reading fu/rs1/rs2/rd from
-    # mem_q[trans_id].sbe at writeback is authoritative, written at the decode
-    # edge and stable until the slot is reused. Per-slot entries appended below.
+    # mem_q[trans_id].sbe at writeback is authoritative, written at the
+    # decode edge and stable until the slot is reused. Per-slot entries
+    # are appended below.
 
     # Branch resolution from the EX branch_unit. bp_resolve_t (cva6.sv:134)
     # carries pc, target, is_taken, is_mispredict and cf_type for one cycle at
@@ -424,7 +425,8 @@ for _p in range(NR_ISSUE_PORTS):
         f"fetch_entry_if_id[{_p}].instruction",
     ]
 
-# decoded_instr_i (per NrIssuePorts × {fu, rs1, rs2, rd, bp.cf, bp.predict_address})
+# decoded_instr_i, per NrIssuePorts:
+# {fu, rs1, rs2, rd, bp.cf, bp.predict_address}
 for _p in range(NR_ISSUE_PORTS):
     WHITELIST += [
         f"issue_stage_i.i_scoreboard.decoded_instr_i[{_p}].fu",
@@ -1507,8 +1509,9 @@ class PipelineTracker:
         rec.bp_mispredict = (is_mispredict_str == "1")
 
         # Derive bp_predicted_cf from the resolution signals. The pre-edge
-        # decoded_instr_i.bp.cf misattributes back-to-back issues and mem_q is
-        # not always dumped, but branch_unit.sv:99 gives an invertible relation:
+        # decoded_instr_i.bp.cf misattributes back-to-back issues and
+        # mem_q is not always dumped, but branch_unit.sv:99 gives an
+        # invertible relation:
         #
         #   is_mispredict = comp_res XOR (predict.cf == Branch)
         #
@@ -1815,9 +1818,9 @@ class PipelineTracker:
         """Bind D$ events to LOAD and STORE records once the scan is done, copying
         events inside each record's [admit, complete] window and setting
         dc_primary_miss, dc_coalesced and dc_refill_overlap from them."""
-        # Index events by cycle so each record binary-searches into its window
-        # instead of rescanning from cycle zero, with rfsm_sorted doing the same
-        # for refill overlap. The old per-record scan looked like a hang.
+        # Index events by cycle so each record binary-searches into its
+        # window instead of rescanning from zero, rfsm_sorted the same for
+        # refill overlap. The old per-record scan looked like a hang.
         evlog = self._dc_events
         n_events = len(evlog)
         ev_cycles = [ev["cycle"] for ev in evlog]
@@ -2645,7 +2648,6 @@ def stream_and_extract(f, matches, args, n_wb_ports, n_commit_ports):
     # gets the cf correction, and the target simply stays uncorrected.
     MEMQ_BP_CF_AVAILABLE = (memq_bp_cf_resolved == NR_SB)
     MEMQ_BP_TGT_AVAILABLE = (memq_bp_tgt_resolved == NR_SB)
-    MEMQ_BP_AVAILABLE = MEMQ_BP_CF_AVAILABLE and MEMQ_BP_TGT_AVAILABLE
     if MEMQ_BP_CF_AVAILABLE:
         stagelog("mem_q[*].sbe.bp.cf resolved. Using authoritative "
               "reads at writeback to correct the pre-edge decoded_instr_i "

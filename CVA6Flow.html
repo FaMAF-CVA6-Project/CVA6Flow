@@ -1667,7 +1667,14 @@
       const kept = [];
       let ord = 0;
       let spanLo = Infinity, spanHi = -Infinity;
-      const CYCLE_FIELDS = ['if1_lo', 'if2_lo', 'if1_hi', 'if2_hi', 'fe_cycle',
+      /* The fetch-to-commit envelope, not every cycle field. This only sizes
+         the window auxiliary events are kept in, so the boundary stages are
+         all it needs: lsu_admit, lsu_complete and bp_resolution all fall
+         inside them, and the few cycles a store's cache alloc runs past
+         completion are well within the 64 of slack below. Named apart from
+         the scripts' CYCLE_FIELDS, which is every field because clipping and
+         shifting have to touch every one. */
+      const SPAN_FIELDS = ['if1_lo', 'if2_lo', 'if1_hi', 'if2_hi', 'fe_cycle',
         'id_cycle', 'is_cycle', 'ex_cycle', 'wb_cycle', 'co_cycle'];
       const inSpan = c => c != null && c >= spanLo - 64 && c <= spanHi + 64;
       const out = {};
@@ -1685,7 +1692,7 @@
           if (ord < fromN || ord > toN) return false;
           const r = JSON.parse(el);
           kept.push(r);
-          for (const k of CYCLE_FIELDS) {
+          for (const k of SPAN_FIELDS) {
             const v = r[k];
             if (v != null) { if (v < spanLo) spanLo = v; if (v > spanHi) spanHi = v; }
           }
