@@ -8,7 +8,7 @@ rather than converted into a JSON whose instruction column would be blank.
     python3 scripts/create_all_CVA6Flow_jsons.py        # the whole repository
     python3 scripts/create_all_CVA6Flow_jsons.py run_results
     python3 scripts/create_all_CVA6Flow_jsons.py -j 8
-    python3 scripts/create_all_CVA6Flow_jsons.py --force    # redo existing JSONs
+    python3 scripts/create_all_CVA6Flow_jsons.py --force   # redo the JSONs
 """
 import argparse
 import os
@@ -18,8 +18,8 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # This script belongs to the CVA6Flow repository and works inside it only.
-# The fork's own traces are handled by scripts/create_all_repo_jsons.py, which
-# walks the whole checkout and calls this one for the submodule.
+# The fork's own traces are handled by scripts/create_all_repo_jsons.py, 
+# which walks the whole checkout and calls this one for the submodule.
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(HERE)
 TRACER = os.path.join(REPO_ROOT, "CVA6Flow_tracer.py")
