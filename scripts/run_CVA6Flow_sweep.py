@@ -77,8 +77,9 @@ def find_source_pkg(explicit):
                       LIVE_CONFIG_PKG):
         if os.path.isfile(candidate):
             return os.path.abspath(candidate)
-    print(f"[ERROR] {SOURCE_CONFIG_PKG} not found next to this script, in the "
-          f"current directory, or at {LIVE_CONFIG_PKG}. Pass --config-pkg.")
+    print(f"[ERROR] {SOURCE_CONFIG_PKG} not found next to this script, in "
+          f"the current directory, in ../configs/, or at "
+          f"{LIVE_CONFIG_PKG}. Pass --config-pkg.")
     sys.exit(2)
 
 
