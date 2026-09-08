@@ -279,20 +279,21 @@ def check_cycle_fields():
             if extra:
                 bad.append(f"    not in {first}: {', '.join(extra)}")
 
-    # The page keeps its own list for the streamed-range span. It may hold
-    # more, viewer-internal keys, but a field the scripts know and the page
-    # does not is a field the range prompt cannot see.
+    # Only a page list that rebases every field is comparable. MinorFlow's
+    # CYCLE_KEYS is one: it subtracts an offset from each, so a field missing
+    # from it silently keeps un-rebased values. CVA6Flow's SPAN_FIELDS is not,
+    # being the fetch-to-commit envelope that sizes a window, which is why it
+    # is named apart rather than held to this.
     for rel in owned(".html"):
-        text = read(rel)
-        m = re.search(r"(?:const\s+)?CYCLE_(?:KEYS|FIELDS)\s*=\s*\[(.*?)\]",
-                      text, re.S)
+        m = re.search(r"const\s+CYCLE_KEYS\s*=\s*\[(.*?)\]", read(rel), re.S)
         if not m:
             continue
         page = re.findall(r"'([^']+)'", m.group(1))
         unknown = [f for f in fields if f not in page]
         if unknown:
-            bad.append(f"{rel} does not list {', '.join(unknown)}, which "
-                       f"{first} treats as cycle fields")
+            bad.append(f"{rel} rebases on CYCLE_KEYS and does not list "
+                       f"{', '.join(unknown)}, which {first} treats as cycle "
+                       f"fields")
     return bad
 
 
