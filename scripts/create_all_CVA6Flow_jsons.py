@@ -18,7 +18,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # This script belongs to the CVA6Flow repository and works inside it only.
-# The fork's own traces are handled by scripts/create_all_repo_jsons.py, 
+# The fork's own traces are handled by scripts/create_all_CVA6_repo_jsons.py,
 # which walks the whole checkout and calls this one for the submodule.
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(HERE)
