@@ -71,10 +71,9 @@ def find_source_pkg(explicit):
     here = os.path.dirname(os.path.abspath(__file__))
     for candidate in (os.path.join(here, SOURCE_CONFIG_PKG),
                       os.path.abspath(SOURCE_CONFIG_PKG),
-                      # In the repository the swept package lives with the
-                      # viewer it belongs to, two levels up from here.
-                      os.path.join(here, "..", "..", "viewers", "CVA6Flow",
-                                   SOURCE_CONFIG_PKG),
+                      # In the repository the swept package lives in the
+                      # viewer's configs/, beside this scripts/ folder.
+                      os.path.join(here, "..", "configs", SOURCE_CONFIG_PKG),
                       LIVE_CONFIG_PKG):
         if os.path.isfile(candidate):
             return os.path.abspath(candidate)
