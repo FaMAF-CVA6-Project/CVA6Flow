@@ -75,11 +75,24 @@ OVERHEAD_SUITES = {
 }
 
 
-def default_suite():
-    """Which overhead table this copy of the script subtracts by default."""
+def default_suite(src_file=None):
+    """Which overhead table to subtract, decided by where the test came from.
+
+    The driver has one home now, in the viewer repository, and runs both the
+    viewer's teaching set and the fork's calibration set, so its own location
+    no longer says which table applies. The test's path does. The fallback is
+    for the image, where the driver sits beside the set it runs."""
+    if src_file:
+        parts = os.path.abspath(src_file).split(os.sep)
+        if "gem5_config_CVA6" in parts:
+            return "config"
+        if "CVA6Flow" in parts:
+            return "viewer"
     here = os.path.dirname(os.path.abspath(__file__))
-    page = os.path.join(here, "CVA6Flow.html")
-    return "viewer" if os.path.isfile(page) else "config"
+    for base in (here, os.path.dirname(here)):
+        if os.path.isfile(os.path.join(base, "CVA6Flow.html")):
+            return "viewer"
+    return "config"
 
 
 # ==============================================================================
@@ -561,12 +574,11 @@ def main():
                              "container, or the repository this script sits "
                              "in when that does not exist")
     parser.add_argument("--suite", choices=sorted(OVERHEAD_SUITES),
-                        default=default_suite(),
-                        help=f"Which overhead table to subtract. 'config' is "
-                             f"the calibration benchmarks, 'viewer' the "
-                             f"CVA6Flow teaching set. Defaults to "
-                             f"{default_suite()} here, from where this script "
-                             f"sits")
+                        default=None,
+                        help="Which overhead table to subtract. 'config' is "
+                             "the calibration benchmarks, 'viewer' the "
+                             "CVA6Flow teaching set. Defaults to "
+                             "the folder the test came from")
     parser.add_argument("--lang", choices=["c", "asm"], default="auto",
                         help="Force the input type and overhead/filter profile. "
                              "Defaults to detection by extension.")
@@ -580,6 +592,10 @@ def main():
                              "and the trace setting are unchanged since the "
                              "build was made.")
     args = parser.parse_args()
+    # Resolved here rather than as an argparse default: it
+    # reads the test's path, which is not known until now.
+    if args.suite is None:
+        args.suite = default_suite(args.src_file)
 
     # Directory configuration.
     cva6_root = args.cva6_root or ("/cva6" if os.path.isdir("/cva6")

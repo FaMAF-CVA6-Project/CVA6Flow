@@ -4,10 +4,10 @@ Writes both forms: the .json a served page fetches, and the .js a file:// page
 loads with a script tag. Trimmed so the sample is small enough to commit, with
 the cycle-keyed arrays clipped to the span the kept instructions cover.
 
-    python3 make_sample.py daxpy.json
-    python3 make_sample.py daxpy.json -n 1500
-    python3 make_sample.py daxpy.json --from 4000 -n 2000
-    python3 make_sample.py daxpy.json -o tests/daxpy.config1
+    python3 make_CVA6Flow_sample.py daxpy.json
+    python3 make_CVA6Flow_sample.py daxpy.json -n 1500
+    python3 make_CVA6Flow_sample.py daxpy.json --from 4000 -n 2000
+    python3 make_CVA6Flow_sample.py daxpy.json -o tests/daxpy.config1
 """
 import argparse
 import json
@@ -75,8 +75,8 @@ def clip(data, span):
 
 
 def human(size):
-    for unit in ("B", "KiB", "MiB"):
-        if size < 1024 or unit == "MiB":
+    for unit in ("B", "KiB", "MiB", "GiB"):
+        if size < 1024 or unit == "GiB":
             return f"{size:.0f}{unit}" if unit == "B" else f"{size:.1f}{unit}"
         size /= 1024
 
