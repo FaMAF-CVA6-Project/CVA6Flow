@@ -207,19 +207,24 @@ HWPF_ADAPTER_SID = HPDCACHE_NUM_PORTS + 1                      # 5
 #
 # Store: 4. Three cache stages, st0-st1-st2, plus one because
 # lsu_complete_cycle is the last cycle the access was live in the FSM rather
-# than the cycle it left.
+# than the cycle it left. Measured on daxpy: 2,065 of 2,070 store-adapter
+# allocs sit at exactly lsu_complete_cycle + 4. At 3 the store attribution
+# collapses to 6 of 2,070, at 5 it is identical to 4 with a cycle of slack.
 #
 # Load: 1. Every otherwise-orphaned load alloc on daxpy sits at exactly
-# lsu_complete_cycle + 1.
+# lsu_complete_cycle + 1, 2,047 of 2,047.
 HPDCACHE_STORE_LOOKAHEAD = 4
 HPDCACHE_LOAD_LOOKAHEAD = 1
 
 # Per-record fields the viewer does not read and which cost real bytes: two
 # lists of dicts per memory instruction plus a scalar. Emitted only under
-# --emit-diagnostics.
+# --emit-diagnostics. Everything else stays, cheap scalars included, so a
+# future viewer feature does not need a re-run to get them.
 DIAGNOSTIC_ONLY_FIELDS = ("lsu_state_history", "dc_events", "fetch_port")
 
-# Compact separators for the bulk arrays, matching MinorFlow_tracer.py.
+# Compact separators for the bulk arrays, matching MinorFlow_tracer.py. The
+# default ", " and ": " cost 4.8 MB on a daxpy trace. One record per line is
+# kept: it makes a 50 MB file greppable and costs a single newline each.
 JSON_SEP = (",", ":")
 
 # REFILL_FSM from hpdcache_miss_handler.sv, widened to 32 bits by Verilator
@@ -575,6 +580,8 @@ class InstructionRecord:
     # Cycle the LSU FSM left IDLE for this record, the admission cycle.
     # Usually is_cycle + 1, later under stalls or a TLB miss insert.
     lsu_admit_cycle: int = None
+    # Cycle the FSM returned to IDLE. For a load the data arrives later via
+    # ldbuf, so this marks the FSM's release rather than completion.
     # Last cycle the access was live in the FSM, so the closing transition
     # at cycle C records C-1. Without that the outgoing and incoming windows
     # would share cycle C and one D-cache event would land in both.
@@ -1059,6 +1066,9 @@ def tag_branch_bubbles(records):
         # unpred is NoCF, the predictor said nothing. mispred is a guess
         # that was wrong. pred_taken belongs to the second pass, since a
         # correct prediction leaves no flushed run behind it.
+        # bp_predicted_cf decides this. It is only authoritative when the
+        # mem_q correction resolved, so stats.bubbles.taxonomy_reliable
+        # records whether it did. Without it these become unpred wholesale.
         pcf = causer.bp_predicted_cf
         if causer.fu == "CTRL_FLOW" and (pcf is None or pcf == "NoCF"):
             kind = "unpred"
@@ -1228,6 +1238,10 @@ class PipelineTracker:
 
         self.next_id = 0
         self.n_committed = 0
+        # Squashed by the core. The end-of-trace drain is counted apart, in
+        # n_drained_*: those records were in flight when the VCD ended and
+        # the core never squashed them, so folding them in overstates the
+        # flush rate by 100% on a benchmark with one real EX flush.
         self.n_flushed_if = 0
         self.n_flushed_ex = 0
         self.n_drained_if = 0
@@ -1339,7 +1353,11 @@ class PipelineTracker:
     def _compute_wraps_line(pc, is_compressed):
         """True when the instruction straddles a fetch-block boundary: a 32-bit
         instruction at offset FETCH_BYTES-2 has its upper half in the next
-        block, so the realigner combines two fetches."""
+        block, so the realigner combines two fetches. The mechanism is
+        instr_realign.sv, where serving_unaligned_o = unaligned_q at line 63.
+        The earlier citation pointed at cva6_icache.sv lines 158 and 428,
+        which are the noncacheable cl_offset and the way-select mux, neither
+        of which has anything to do with a straddling instruction."""
         if is_compressed or pc is None:
             return False
         try:
@@ -1808,6 +1826,9 @@ class PipelineTracker:
         # Positions in evlog already claimed by an earlier store. The store
         # window is extended by HPDCACHE_STORE_LOOKAHEAD, so without this two
         # nearby stores would both count the same alloc.
+        # First claim wins, so attribution depends on self.completed being in
+        # program order. finalize() sorts it by id and this runs after, but
+        # nothing enforces that ordering, so move the two together.
         consumed_store_alloc_idx = set()
         consumed_load_alloc_idx = set()
         consumed_check_hit_idx = set()
