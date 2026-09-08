@@ -14,10 +14,10 @@ Zero guesswork. The core philosophy of this tool is uncompromising: every report
 
 ## Quick start
 
-Build CVA6 with Verilator and run a test with VCD tracing enabled. [`run_CVA6.py`](#running-a-test-run_cva6py) does that in one command and hands you the VCD and the disassembly listing:
+Build CVA6 with Verilator and run a test with VCD tracing enabled. [`scripts/run_CVA6.py`](#running-a-test-run_cva6py) does that in one command and hands you the VCD and the disassembly listing:
 
 ```bash
-python3 run_CVA6.py daxpy.S
+python3 scripts/run_CVA6.py daxpy.S
 ```
 
 Then turn the VCD into a trace. Both files land in `run_results/` next to the driver, so that is the shortest path to them:
@@ -26,7 +26,7 @@ Then turn the VCD into a trace. Both files land in `run_results/` next to the dr
 python3 CVA6Flow_tracer.py run_results/daxpy.vcd -o trace.json
 ```
 
-The **objdump listing is not optional in practice**. It is where the instruction text comes from, and without it every record's `disasm` is null: the instruction column is blank, the Main Code button cannot find its region, and compressed instructions are not recognised. The tracer picks up `<name>.list` beside the VCD on its own, which is exactly how `run_CVA6.py` leaves them, and warns when it finds neither. `--disasm-list` names one anywhere else:
+The **objdump listing is not optional in practice**. It is where the instruction text comes from, and without it every record's `disasm` is null: the instruction column is blank, the Main Code button cannot find its region, and compressed instructions are not recognised. The tracer picks up `<name>.list` beside the VCD on its own, which is exactly how `scripts/run_CVA6.py` leaves them, and warns when it finds neither. `--disasm-list` names one anywhere else:
 
 ```bash
 python3 CVA6Flow_tracer.py daxpy.vcd --disasm-list run_results/daxpy.list
@@ -36,12 +36,12 @@ Then open `CVA6Flow.html` in any browser and drag `trace.json` onto the window. 
 
 ### The sample trace
 
-The landing page offers a sample, and the button appears only when the sample is actually there, so it is never a dead end. It is not committed by default, because of its size. `make_sample.py` trims a full tracer JSON down to one:
+The landing page offers a sample, and the button appears only when the sample is actually there, so it is never a dead end. It is not committed by default, because of its size. `scripts/make_CVA6Flow_sample.py` trims a full tracer JSON down to one:
 
 ```bash
-python3 make_sample.py daxpy.json                 # -> tests/daxpy.config1.{json,js}
-python3 make_sample.py daxpy.json -n 1500         # fewer instructions
-python3 make_sample.py daxpy.json --from 4000     # start past the set-up
+python3 scripts/make_CVA6Flow_sample.py daxpy.json                 # -> tests/daxpy.config1.{json,js}
+python3 scripts/make_CVA6Flow_sample.py daxpy.json -n 1500         # fewer instructions
+python3 scripts/make_CVA6Flow_sample.py daxpy.json --from 4000     # start past the set-up
 ```
 
 The VCD is streamed rather than loaded, because these files grow quickly with run length and trace depth, well past what fits comfortably in memory.
@@ -52,7 +52,7 @@ The VCD is streamed rather than loaded, because these files grow quickly with ru
 python3 CVA6Flow_tracer.py <vcd_path> [options]
 ```
 
-`tests/CVA6Flow_create_all_jsons.py` converts a whole folder at once, skipping any VCD with no listing beside it and any JSON already newer than its VCD, and lets the tracer's progress line through so a long conversion does not look hung.
+`scripts/create_all_CVA6Flow_jsons.py` converts a whole folder at once, skipping any VCD with no listing beside it and any JSON already newer than its VCD, and lets the tracer's progress line through so a long conversion does not look hung.
 
 | Option | Meaning |
 | --- | --- |
@@ -64,12 +64,12 @@ python3 CVA6Flow_tracer.py <vcd_path> [options]
 | `--stages` | Print per-stage resolution diagnostics on stderr |
 | `--quiet` | Suppress the streaming progress indicator |
 
-## Running a test: `run_CVA6.py`
+## Running a test: `scripts/run_CVA6.py`
 
-Getting a VCD out of CVA6 by hand means sourcing the simulation environment, picking the right `cva6.py` flags, and then digging the performance counters out of the log. `run_CVA6.py` does all of it in one command, and is how every trace in [tests/](tests/) was produced.
+Getting a VCD out of CVA6 by hand means sourcing the simulation environment, picking the right `cva6.py` flags, and then digging the performance counters out of the log. `scripts/run_CVA6.py` does all of it in one command, and is how every trace in [tests/](tests/) was produced.
 
 ```bash
-python3 run_CVA6.py [target] <test> [--lang c|asm] [--no-vcd]
+python3 scripts/run_CVA6.py [target] <test> [--lang c|asm] [--no-vcd]
 ```
 
 | Argument | Meaning |
@@ -109,9 +109,9 @@ The script assumes the CVA6 checkout is at `/cva6`, which is where the Docker im
 
 CVA6Flow targets the canonical `cv64a6_imafdc_sv39_hpdcache_wb` configuration, and it is built to survive changes to it. Structural parameters such as scoreboard depth are probed from the VCD itself rather than hard-coded, so a configuration sweep (different cache sizes and associativity, branch-predictor or return-address-stack depth, commit width, and so on) is handled without editing the tracer. Rebuild CVA6 with the new parameters, regenerate the VCD, and the same command produces a correct trace.
 
-### Running the sweep: `run_CVA6Flow_sweep.py`
+### Running the sweep: `scripts/run_CVA6Flow_sweep.py`
 
-[cv64a6_imafdc_sv39_hpdcache_wb_config_pkg.sv](cv64a6_imafdc_sv39_hpdcache_wb_config_pkg.sv) is the config package the sweep was built with. It carries the seventeen configurations as a table, the baseline plus one cut per swept knob, each with the workload that exercises it, and a single `CVA6_CONFIG_SEL` that picks the active one:
+[configs/cv64a6_imafdc_sv39_hpdcache_wb_config_pkg.sv](configs/cv64a6_imafdc_sv39_hpdcache_wb_config_pkg.sv) is the config package the sweep was built with. It carries the seventeen configurations as a table, the baseline plus one cut per swept knob, each with the workload that exercises it, and a single `CVA6_CONFIG_SEL` that picks the active one:
 
 ```systemverilog
 localparam int CFG_BASELINE = 1;  // reference (sb8, D$32K/8w, BHT128, ...) : all (reference)
@@ -121,10 +121,10 @@ localparam int CFG_SB_2     = 9;  // NrScoreboardEntries 8 -> 2             : da
 localparam int CVA6_CONFIG_SEL = CFG_BASELINE;
 ```
 
-`run_CVA6Flow_sweep.py` replays all of it, which is how the traces in [tests/](tests/) were produced:
+`scripts/run_CVA6Flow_sweep.py` replays all of it, which is how the traces in [tests/](tests/) were produced:
 
 ```bash
-python3 run_CVA6Flow_sweep.py [--configs 1,4-6] [--tests-dir DIR] [--no-vcd] [--list]
+python3 scripts/run_CVA6Flow_sweep.py [--configs 1,4-6] [--tests-dir DIR] [--no-vcd] [--list]
 ```
 
 | Option | Meaning |
@@ -138,7 +138,7 @@ python3 run_CVA6Flow_sweep.py [--configs 1,4-6] [--tests-dir DIR] [--no-vcd] [--
 | `--no-vcd` | Metrics only, no traces |
 | `--list` | Print the plan and exit, touching nothing |
 
-For each configuration it installs the package with `CVA6_CONFIG_SEL` set to that variant, then runs that configuration's workloads through [`run_CVA6.py`](#running-a-test-run_cva6py). A configuration whose workload is `all` runs every workload the table names.
+For each configuration it installs the package with `CVA6_CONFIG_SEL` set to that variant, then runs that configuration's workloads through [`scripts/run_CVA6.py`](#running-a-test-run_cva6py). A configuration whose workload is `all` runs every workload the table names.
 
 Results are moved out of `run_results/` into the out directory as `<test>.config<N>.vcd`, `<test>.config<N>.list` and `<test>_report.config<N>.txt`, so one configuration never overwrites another and the VCD and its listing stay paired for the tracer. Every metrics table is also gathered into one file in that folder.
 
@@ -218,23 +218,44 @@ CVA6 itself is developed by the [OpenHW Group](https://github.com/openhwgroup/cv
 
 ## Cleaning up
 
-`clean_CVA6Flow_repo.py` deletes what a run leaves in this repository: every `.list`, `.vcd`, `.fst` and debug trace, and every `__pycache__`.
+`scripts/clean_CVA6Flow_repo.py` deletes what a run leaves in this repository: every `.list`, `.vcd`, `.fst` and debug trace, and every `__pycache__`.
 
 ```bash
-python3 clean_CVA6Flow_repo.py [-y] [--dry-run] [-v]
+python3 scripts/clean_CVA6Flow_repo.py [-y] [--dry-run] [-v]
 ```
 
 It lists what it found with its size and asks before deleting. The viewer JSONs are left alone, and `docs/` is kept whole.
 
 ### Oversized JSONs
 
-A tracer JSON is never deleted, since it is what the viewer reads, but a long run makes one too big to commit: GitHub warns above 50 MiB and refuses above 100 MiB, and git matches a path and never a size. `ignore_big_json.py` measures the JSONs and the `.js` wrappers in this repository and writes the oversized ones into a block of `.gitignore` that it owns.
+A tracer JSON is never deleted, since it is what the viewer reads, but a long run makes one too big to commit: GitHub warns above 50 MiB and refuses above 100 MiB, and git matches a path and never a size. `scripts/ignore_big_CVA6Flow_jsons.py` measures the JSONs and the `.js` wrappers in this repository and writes the oversized ones into a block of `.gitignore` that it owns.
 
 ```bash
-python3 ignore_big_json.py [-y] [--dry-run] [-v] [-l MIB] [--prune]
+python3 scripts/ignore_big_CVA6Flow_jsons.py [-y] [--dry-run] [-v] [-l MIB] [--prune]
 ```
 
 It only ever adds, so a second run changes nothing. `--prune` drops the entries whose file has gone or shrunk, and `-l` sets a different threshold in MiB. A file git already tracks is reported rather than ignored.
+
+## Oversized traces: `scripts/make_CVA6Flow_oversized.py`
+
+The viewer refuses a trace past `MAX_JSON_BYTES` (500 MiB) or `MAX_STREAM_INSTRUCTIONS` (500,000 records) and offers the range prompt instead. `scripts/make_CVA6Flow_oversized.py` builds a file past both, so that path can be exercised without waiting for a run large enough to produce one:
+
+```bash
+python3 scripts/make_CVA6Flow_oversized.py tests/daxpy.json          # ~600k records
+python3 scripts/make_CVA6Flow_oversized.py tests/daxpy.json --mib 700
+```
+
+It repeats a real trace with every cycle field shifted forward rather than fabricating records, so what the viewer refuses is the size and never the shape. The output is gitignored.
+
+## Checking the repository: `scripts/check_CVA6Flow_repo.py`
+
+Every script compiles and answers `--help`, the page's JavaScript parses, the cycle-field lists agree across the tracer's consumers, every relative link resolves, and nothing gained trailing whitespace or a missing final newline:
+
+```bash
+python3 scripts/check_CVA6Flow_repo.py
+python3 scripts/check_CVA6Flow_repo.py --list        # name the checks and stop
+python3 scripts/check_CVA6Flow_repo.py -k formatting # just one
+```
 
 ## Licence
 
