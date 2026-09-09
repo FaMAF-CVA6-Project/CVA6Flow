@@ -44,11 +44,13 @@ def list_for(path):
     return base + ".list"
 
 
-def run_one(trace, out_json, quiet):
+def run_one(trace, out_json, quiet, strict):
     cmd = [sys.executable, TRACER, trace,
            "--disasm-list", list_for(trace), "-o", out_json]
     if quiet:
         cmd.append("--quiet")
+    if strict:
+        cmd.append("--strict")
     start = time.time()
     # Output is not captured: the tracer's progress line is the only sign of
     # life on a trace that takes minutes, and swallowing it left the batch
@@ -56,6 +58,11 @@ def run_one(trace, out_json, quiet):
     code = subprocess.run(cmd).returncode
     took = time.time() - start
     name = os.path.basename(out_json)
+    if code == 3:
+        # The tracer's strict exit. The JSON was still written, so say what
+        # happened rather than implying the conversion produced nothing.
+        return (f"[DEGRADED] {name} written but the trace is degraded "
+                f"(exit 3, see metadata.degraded)")
     if code != 0:
         return f"[ERROR]   {name} failed with exit code {code}"
     size = os.path.getsize(out_json) / (1024 * 1024)
@@ -80,6 +87,13 @@ def main():
     parser.add_argument("--quiet", action="store_true",
                         help="Pass --quiet to the tracer, dropping its "
                              "progress line")
+    parser.add_argument("--strict", action="store_true",
+                        help="Pass --strict to the tracer, so a degraded "
+                             "trace exits non-zero instead of passing for a "
+                             "complete one. The JSONs are still written. "
+                             "This is the flag --strict was written for: "
+                             "without it a batch run cannot tell a truncated "
+                             "VCD from a whole one.")
     args = parser.parse_args()
 
     if not os.path.isfile(TRACER):
@@ -122,15 +136,24 @@ def main():
     print(f"[INFO] {args.jobs} at a time\n")
 
     failed = 0
+    degraded = 0
     with ThreadPoolExecutor(max_workers=max(1, args.jobs)) as pool:
-        futures = [pool.submit(run_one, t, j, args.quiet) for t, j in todo]
+        futures = [pool.submit(run_one, t, j, args.quiet, args.strict)
+                   for t, j in todo]
         for future in as_completed(futures):
             line = future.result()
             failed += line.startswith("[ERROR]")
+            degraded += line.startswith("[DEGRADED]")
             print(line)
 
-    print(f"\n[INFO] {len(todo) - failed} of {len(todo)} converted")
-    return 1 if failed else 0
+    print(f"\n[INFO] {len(todo) - failed - degraded} of {len(todo)} "
+          f"converted cleanly")
+    if degraded:
+        print(f"[WARN] {degraded} trace(s) converted but degraded. Their "
+              f"JSONs are written and metadata.degraded says what is missing.")
+    if failed or degraded:
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
