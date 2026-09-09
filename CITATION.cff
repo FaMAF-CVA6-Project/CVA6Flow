@@ -8,8 +8,9 @@ authors:
     given-names: "Manuel"
     affiliation: "FaMAF, Universidad Nacional de Córdoba"
     orcid: "https://orcid.org/0009-0007-3893-5628"
-version: "1.0.0"
-date-released: "2026-07-19"
+version: "1.1.0"
+commit: "6591906b49d51cc896cc898057d9abf5cfe4950f"
+date-released: "2026-09-08"
 license: MIT
 repository-code: "https://github.com/FaMAF-CVA6-Project/CVA6Flow"
 url: "https://github.com/FaMAF-CVA6-Project/CVA6Flow"
