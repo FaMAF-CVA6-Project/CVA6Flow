@@ -13,12 +13,14 @@ and a message starting with "SKIP " means it could not run.
 """
 import argparse
 import ast
+import io
 import os
 import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import tokenize
 
 
 def repo_root():
@@ -44,13 +46,9 @@ OWN_PATHS = (".",)
 # Frozen artefacts, kept as published and held to no convention.
 FROZEN = ("docs/CARLA2026", "docs/old_versions", "docs/parser_phases")
 
-# The style is 79 columns. This is a ratchet: the count may fall
-# but never rise, so new sprawl fails and old sprawl is not a
-# standing red mark.
 # Scripts named in our text that do not live here. The CVA6 fork's tools are
-# listed rather than looked up: they resolve only when this repository sits
-# inside that fork, and a standalone clone must still be checkable. A rename
-# in the fork makes this repository's text stale, and this is what says so.
+# listed rather than looked up: a standalone clone must still be checkable,
+# and a rename in the fork makes this text stale, which is what says so.
 EXTERNAL_SCRIPTS = {
     "cva6.py",                          # the verif/sim driver
     "my_config.py",                     # an example name
@@ -58,13 +56,50 @@ EXTERNAL_SCRIPTS = {
     # In the CVA6 fork:
     "check_CVA6_repo.py",
     "create_all_CVA6_repo_jsons.py",
-    "run_CVA6_testing_sweep.py",
+    "run_config_search_sweep.py",
     "gem5_config_CVA6.py",
     "gem5_config_CVA6_Patch.py",
 }
 
+# The style is 79 columns. The budget is a ratchet: it may fall but never
+# rise, so new sprawl fails while old sprawl is not a standing red mark.
 MAX_COLS = 79
 WIDTH_BUDGET = 71
+
+# Comment prose. A semicolon becomes a comma or a period, the tree is ASCII,
+# and a comment on a line of code runs to three lines at most.
+MAX_COMMENT_LINES = 3
+FILE_HEADER_LINES = 8
+
+# The tracers and the viewer pages are design notes throughout, citing RTL
+# lines and measured counts, so cutting those to three lines would drop the
+# evidence. A ratchet instead: the count may fall but never rise.
+DESIGN_NOTES = ("_tracer.py", ".html")
+DESIGN_NOTE_BUDGET = 44
+
+# Files this check knows how to read. Anything else is data or a licence.
+COMMENTED = (".patch", ".py", ".md", ".html", ".c", ".h", ".cc", ".hh",
+             ".sv", ".js", ".S", ".yml")
+
+# Non-ASCII that stays: accented letters spell people's names, and each glyph
+# named here is one the page renders or the tracer prints, so the comment
+# naming it is right to use it.
+NON_ASCII = re.compile("[^\x00-\x7f\u00c0-\u024f\u00b5\u25aa\u2550]")
+
+# A row of a table, and a line of code quoted inside a comment. Both keep
+# their own punctuation, so neither is held to the prose rules.
+TABULAR = re.compile(r"\S {2,}\S")
+CODEISH = re.compile(r"//|\bfor\b.*;|^\s*[\"\'].*[\"\']\s*,?$"
+                     r"|=\s*\w+\s*;|\w+\(.*\)\s*;|^\s*[-|+]{3,}")
+
+# Licence text is boilerplate the file is required to carry, semicolons and
+# all, so the prose rules stop at its edges.
+LICENCE_START = re.compile(r"Copyright \(c\)|Licensed under|SPDX-License")
+LICENCE_END = re.compile(r"SUCH DAMAGE|limitations under the License")
+
+# A docstring is the string token that opens a file, a class or a function.
+DOCSTRING_AFTER = (tokenize.NEWLINE, tokenize.INDENT, tokenize.DEDENT,
+                   tokenize.NL, tokenize.ENCODING)
 
 
 # -------------------------------------------------------------------------
@@ -104,9 +139,174 @@ def owned(pattern=None):
         out = [p for p in out if p.endswith(pattern)]
     return sorted(set(out))
 
+
 def read(rel):
     with open(os.path.join(REPO, rel), encoding="utf-8") as handle:
         return handle.read()
+
+
+# -------------------------------------------------------------------------
+# Comment extraction. Each returns (line, text, kind), where kind is own for a
+# comment on its own line, inline for one after code, and doc for a file
+# header, a docstring or a document, which the line limit does not reach.
+# ---------------------------------------------------------------------------
+def comment_scan(text, marks, block=None, quotes="\"'"):
+    """C-family and hash comments in one pass, so a marker inside a string is
+    not a comment and an apostrophe inside prose does not open a string."""
+    rows, i, n, col, end = [], 0, 1, 0, len(text)
+    while i < end:
+        char = text[i]
+        if char == "\n":
+            n, col, i = n + 1, 0, i + 1
+            continue
+        if any(text.startswith(mark, i) for mark in marks):
+            stop = text.find("\n", i)
+            stop = end if stop < 0 else stop
+            rows.append((n, text[i:stop],
+                         "own" if not text[i - col:i].strip() else "inline"))
+            col, i = col + stop - i, stop
+            continue
+        if block and text.startswith(block[0], i):
+            stop = text.find(block[1], i + len(block[0]))
+            stop = end if stop < 0 else stop + len(block[1])
+            body = text[i:stop]
+            head = "own" if not text[i - col:i].strip() else "inline"
+            for offset, line in enumerate(body.split("\n")):
+                rows.append((n + offset, line.strip(),
+                             head if offset == 0 else "own"))
+            n += body.count("\n")
+            col = (len(body) - body.rfind("\n") - 1 if "\n" in body
+                   else col + len(body))
+            i = stop
+            continue
+        if char in quotes:
+            i, col = i + 1, col + 1
+            while i < end and text[i] not in (char, "\n"):
+                i += 2 if text[i] == "\\" else 1
+                col += 1
+            if i < end and text[i] == "\n":
+                n, col, i = n + 1, 0, i + 1
+                continue
+        i, col = i + 1, col + 1
+    return rows
+
+
+def python_comments(text):
+    """From the tokeniser, so a # inside a string stays a string. Docstrings
+    are prose too, but they head a file or a function, so they come back as
+    doc and are held to everything except the line limit."""
+    rows = []
+    try:
+        tokens = list(tokenize.generate_tokens(io.StringIO(text).readline))
+    except (tokenize.TokenError, IndentationError, SyntaxError, ValueError):
+        return rows
+    lines = text.split("\n")
+    previous = tokenize.NEWLINE
+    for token in tokens:
+        if token.type == tokenize.COMMENT:
+            head = lines[token.start[0] - 1][:token.start[1]].strip()
+            rows.append((token.start[0], token.string,
+                         "inline" if head else "own"))
+        elif token.type == tokenize.STRING and previous in DOCSTRING_AFTER:
+            for offset, line in enumerate(token.string.split("\n")):
+                rows.append((token.start[0] + offset, line, "doc"))
+        if token.type != tokenize.NL:
+            previous = token.type
+    return rows
+
+
+def html_comments(text):
+    """The page's own comments, and the JavaScript inside every script tag."""
+    rows = comment_scan(text, (), ("<!--", "-->"), "")
+    for match in re.finditer(r"<script[^>]*>(.*?)</script>", text,
+                             re.S | re.I):
+        base = text[:match.start(1)].count("\n")
+        rows += [(base + n, body, kind) for n, body, kind
+                 in comment_scan(match.group(1), ("//",), ("/*", "*/"))]
+    return sorted(rows)
+
+
+def markdown_prose(text):
+    """A document is prose throughout, minus its code blocks."""
+    rows, fenced = [], False
+    for n, line in enumerate(text.split("\n"), 1):
+        indented = line.startswith((" " * 4, "\t"))
+        if line.lstrip().startswith("```"):
+            fenced = not fenced
+        elif not fenced and line.strip() and not indented:
+            rows.append((n, line, "doc"))
+    return rows
+
+
+def patch_comments(text):
+    """Only the lines the patch adds are ours, the context is gem5's. A file
+    the patch creates opens with a licence and a header, so those are doc."""
+    added, preamble, heading = [], set(), False
+    for n, line in enumerate(text.split("\n"), 1):
+        if line.startswith("--- "):
+            heading = line.startswith("--- /dev/null")
+        elif line.startswith("+") and not line.startswith("+++"):
+            added.append((n, line[1:]))
+            body = line[1:].strip()
+            if heading and body and not body.startswith(("/*", "*", "//")):
+                heading = False
+            elif heading:
+                preamble.add(n)
+    numbers = [n for n, _ in added]
+    joined = "\n".join(body for _, body in added)
+    return [(numbers[n - 1], body,
+             "doc" if numbers[n - 1] in preamble else kind)
+            for n, body, kind in comment_scan(joined, ("//",), ("/*", "*/"))]
+
+
+def comment_rows(rel, text):
+    """Every comment in the file, whatever it is written in."""
+    if rel.endswith(".patch"):
+        return patch_comments(text)
+    if rel.endswith(".py"):
+        return python_comments(text)
+    if rel.endswith(".md"):
+        return markdown_prose(text)
+    if rel.endswith(".html"):
+        return html_comments(text)
+    if rel.endswith((".c", ".h", ".cc", ".hh", ".sv", ".js")):
+        return comment_scan(text, ("//",), ("/*", "*/"))
+    return comment_scan(text, ("#",), None, "\"")
+
+
+def comment_text(body):
+    """The prose alone: the marker gone, and quoted code with it, since code
+    shown inside a comment keeps its own punctuation."""
+    text = re.sub(r"^(#+|/\*+|\*+|//+|<!--|-->)", "", body.strip()).strip()
+    return re.sub(r"https?://\S+", " ", re.sub(r"`[^`]*`", " ", text))
+
+
+def comment_blocks(rows):
+    """Runs of own-line comment lines. A bare marker is a paragraph break and
+    ends the block: three lines is the limit per comment, not per run."""
+    blocks, current = [], []
+    for n, body, kind in rows:
+        keep = kind == "own" and comment_text(body).strip("-=*#_ ")
+        if keep and current and n == current[-1][0] + 1:
+            current.append((n, body))
+            continue
+        if current:
+            blocks.append(current)
+        current = [(n, body)] if keep else []
+    return blocks + ([current] if current else [])
+
+
+def licence_lines(rows):
+    """Lines inside a licence header, which the file is required to carry
+    exactly as written, so the prose rules stop at its edges."""
+    inside, left = set(), 0
+    for n, body, _ in rows:
+        if LICENCE_START.search(body):
+            left = 40
+        if left:
+            inside.add(n)
+            left = 0 if LICENCE_END.search(body) else left - 1
+    return inside
 
 
 # -------------------------------------------------------------------------
@@ -199,6 +399,53 @@ def check_links():
     return bad
 
 
+def check_comments():
+    """Comment prose: no semicolons, ASCII, and three lines to a comment.
+
+    File headers, docstrings, licences and tables are prose of another kind
+    and are not held to the line limit. The tracers and the viewer pages
+    document mechanisms rather than lines of code, so their long comments are
+    ratcheted like the column budget instead of being cut."""
+    bad, notes = [], 0
+    for rel in owned():
+        if not (rel.endswith(COMMENTED)
+                or os.path.basename(rel).startswith("Dockerfile")):
+            continue
+        rows = comment_rows(rel, read(rel))
+        licensed = licence_lines(rows)
+        for n, body, _ in rows:
+            if body != body.rstrip():
+                bad.append(f"{rel}:{n}: trailing whitespace in a comment")
+            odd = sorted(set(NON_ASCII.findall(body)))
+            if odd:
+                bad.append(f"{rel}:{n}: non-ASCII in a comment, "
+                           + " ".join(f"U+{ord(c):04X}" for c in odd))
+            text = comment_text(body)
+            if ";" in text and n not in licensed and not CODEISH.search(text):
+                bad.append(f"{rel}:{n}: semicolon in prose, {text[:44]}")
+        for block in comment_blocks(rows):
+            start, lines = block[0][0], [body for _, body in block]
+            if len(lines) <= MAX_COMMENT_LINES or start <= FILE_HEADER_LINES:
+                continue
+            if sum(bool(TABULAR.search(b)) for b in lines) * 2 >= len(lines):
+                continue
+            if rel.endswith(DESIGN_NOTES):
+                notes += 1
+            else:
+                bad.append(f"{rel}:{start}: comment of {len(lines)} lines, "
+                           f"over {MAX_COMMENT_LINES}")
+    if notes > DESIGN_NOTE_BUDGET:
+        bad.append(f"{notes} design-note comments over {MAX_COMMENT_LINES} "
+                   f"lines, up from {DESIGN_NOTE_BUDGET}. Shorten the new "
+                   f"ones, or raise DESIGN_NOTE_BUDGET deliberately")
+    elif DESIGN_NOTE_BUDGET - notes >= 10:
+        bad.append(f"SKIP {notes} design-note comments over "
+                   f"{MAX_COMMENT_LINES} lines, down from "
+                   f"{DESIGN_NOTE_BUDGET}. Lower DESIGN_NOTE_BUDGET to "
+                   f"hold the gain")
+    return bad
+
+
 def check_formatting():
     """No trailing whitespace, a final newline, and no new over-long lines."""
     bad, wide = [], 0
@@ -280,10 +527,8 @@ def check_cycle_fields():
                 bad.append(f"    not in {first}: {', '.join(extra)}")
 
     # Only a page list that rebases every field is comparable. MinorFlow's
-    # CYCLE_KEYS is one: it subtracts an offset from each, so a field missing
-    # from it silently keeps un-rebased values. CVA6Flow's SPAN_FIELDS is not,
-    # being the fetch-to-commit envelope that sizes a window, which is why it
-    # is named apart rather than held to this.
+    # CYCLE_KEYS is one, so a field missing from it keeps un-rebased values.
+    # CVA6Flow's SPAN_FIELDS only sizes a window, hence the name apart.
     for rel in owned(".html"):
         m = re.search(r"const\s+CYCLE_KEYS\s*=\s*\[(.*?)\]", read(rel), re.S)
         if not m:
@@ -297,6 +542,26 @@ def check_cycle_fields():
     return bad
 
 
+def check_formatter():
+    """Our Python is what autopep8 at MAX_COLS produces.
+
+    Markdown is Prettier's and is checked only where Prettier can run, since
+    it is usually the editor's copy rather than a tool on PATH."""
+    script = os.path.join(REPO, "scripts", "format_CVA6Flow_repo.py")
+    if not os.path.isfile(script):
+        return ["SKIP scripts/format_CVA6Flow_repo.py is missing"]
+    done = subprocess.run([sys.executable, script, "--check"],
+                          capture_output=True, text=True, cwd=REPO)
+    out = done.stdout
+    if "autopep8 is not installed" in out:
+        return ["SKIP autopep8 is not installed (pip install autopep8)"]
+    if done.returncode == 0:
+        return []
+    files = [ln.strip() for ln in out.splitlines() if ln.startswith("  ")]
+    return [f"{f}: not what the formatter produces" for f in files] or [
+        "some files are not what the formatter produces"]
+
+
 CHECKS = (
     ("compiles", check_compiles),
     ("pyflakes", check_pyflakes),
@@ -305,7 +570,9 @@ CHECKS = (
     ("cycle-fields", check_cycle_fields),
     ("script-names", check_script_names),
     ("links", check_links),
+    ("comments", check_comments),
     ("formatting", check_formatting),
+    ("formatter", check_formatter),
 )
 OPTIONAL = ()
 
