@@ -29,6 +29,7 @@ DIR_NAMES = {"__pycache__"}
 # Kept, whatever is in them, relative to this script.
 KEEP_DIRS = ["docs"]
 
+
 def repo_root():
     """The repository this script sits in, found by walking up to the nearest
     .git. The script lives in scripts/, so counting parents would be one more

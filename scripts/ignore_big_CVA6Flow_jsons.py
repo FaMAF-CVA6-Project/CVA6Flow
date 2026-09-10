@@ -32,6 +32,7 @@ DEFAULT_LIMIT_MIB = 50
 BEGIN = "## BEGIN oversized JSONs"
 END = "## END oversized JSONs"
 
+
 def repo_root():
     """The repository this script sits in, found by walking up to the nearest
     .git. The script lives in scripts/, so counting parents would be one more

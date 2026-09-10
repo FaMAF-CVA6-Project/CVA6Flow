@@ -85,7 +85,8 @@ def main():
     parser = argparse.ArgumentParser(
         description="Trim a CVA6Flow tracer JSON into the viewer's sample "
                     "trace, writing both the .json and the .js form.")
-    parser.add_argument("source", help="A full tracer JSON, such as daxpy.json")
+    parser.add_argument(
+        "source", help="A full tracer JSON, such as daxpy.json")
     parser.add_argument("-o", "--out", default=DEFAULT_OUT, metavar="PATH",
                         help=f"Output path without its extension. Defaults to "
                              f"{DEFAULT_OUT}, which is what the viewer's "
