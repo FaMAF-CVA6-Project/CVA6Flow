@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Format this repository's Python and Markdown, and nothing else.
+"""Format this repository's Python, Markdown and benchmarks, and nothing else.
 
 Two formatters, because two languages. autopep8 at 79 columns for Python,
 Prettier for Markdown. Both are what the tree was last formatted with, so
@@ -10,6 +10,10 @@ running this leaves a clean tree clean.
     python3 scripts/format_CVA6Flow_repo.py --python   # one language
     python3 scripts/format_CVA6Flow_repo.py -v         # name every file
 
+The benchmarks get a third pass: .editorconfig's trailing whitespace and final
+newline on both languages, and operand alignment on the assembly. No C style is
+imposed, because no C formatter is configured for this tree.
+
 Scope is check_CVA6Flow_repo.py's OWN_PATHS, so the frozen artefacts under docs/
 are never touched. The CVA6 fork carries the same tool for itself, and its
 copy covers this repository too when it is checked out as a submodule.
@@ -17,6 +21,7 @@ copy covers this repository too when it is checked out as a submodule.
 import argparse
 import importlib.util
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -41,6 +46,67 @@ def python_files():
 
 def markdown_files():
     return [r for r in _check.owned() if r.endswith(".md")]
+
+
+def benchmark_files():
+    """The benchmark sources, which no third-party formatter here covers."""
+    return [r for r in _check.owned()
+            if r.endswith((".S", ".c"))
+            and (r.startswith("benchmarks/") or "/benchmarks/" in r)]
+
+
+# An instruction or directive line: indent, mnemonic, operands.
+ASM_INSTR = re.compile(r"^(\s+)(\S+)(\s+)(\S.*)$")
+
+
+def format_asm(text):
+    """Operands two spaces past the file's longest mnemonic.
+
+    Per file rather than per block, which is what the tree already follows:
+    23 of its 31 assembly sources reproduce under this rule untouched."""
+    lines = [ln.rstrip() for ln in text.split("\n")]
+
+    def instruction(ln):
+        return (ASM_INSTR.match(ln) and not ln[:1].strip()
+                and not ln.lstrip().startswith("#"))
+
+    widest = max((len(ASM_INSTR.match(ln).group(2))
+                  for ln in lines if instruction(ln)), default=0)
+    out = []
+    for ln in lines:
+        if instruction(ln):
+            m = ASM_INSTR.match(ln)
+            out.append("  " + m.group(2).ljust(widest + 1) + m.group(4))
+        else:
+            out.append(ln)
+    return "\n".join(out)
+
+
+def format_c(text):
+    """Trailing whitespace only. No C formatter is configured for this tree,
+    so imposing a style would be inventing one."""
+    return "\n".join(ln.rstrip() for ln in text.split("\n"))
+
+
+def run_benchmarks(files, check, verbose):
+    """Whitespace and a final newline on every benchmark, plus operand
+    alignment on the assembly. .editorconfig asks for both."""
+    changed = []
+    for rel in files:
+        path = os.path.join(REPO, rel)
+        with open(path, encoding="utf-8") as handle:
+            src = handle.read()
+        out = format_asm(src) if rel.endswith(".S") else format_c(src)
+        if out and not out.endswith("\n"):
+            out += "\n"
+        if out != src:
+            changed.append(rel)
+            if not check:
+                with open(path, "w", encoding="utf-8") as handle:
+                    handle.write(out)
+        if verbose:
+            print(f"  bench {rel}")
+    return changed, None
 
 
 def autopep8_cmd(check):
@@ -132,11 +198,13 @@ def main():
                         help="Python only")
     parser.add_argument("--markdown", action="store_true",
                         help="Markdown only")
+    parser.add_argument("--benchmarks", action="store_true",
+                        help="Benchmark sources only")
     parser.add_argument("-v", "--verbose", action="store_true",
                         help="Name every file as it is handled")
     args = parser.parse_args()
 
-    both = not (args.python or args.markdown)
+    both = not (args.python or args.markdown or args.benchmarks)
     changed, skipped = [], []
 
     if args.python or both:
@@ -159,14 +227,24 @@ def main():
             print(f"[INFO] Markdown: {len(files)} file(s), "
                   f"{len(got)} {'unformatted' if args.check else 'changed'}")
 
+    if args.benchmarks or both:
+        files = benchmark_files()
+        got, why = run_benchmarks(files, args.check, args.verbose)
+        if why:
+            skipped.append(why)
+        else:
+            changed += got
+            print(f"[INFO] Benchmarks: {len(files)} file(s), "
+                  f"{len(got)} {'unformatted' if args.check else 'changed'}")
+
     for why in skipped:
         print(f"[SKIP] {why}")
     for rel in changed:
         print(f"  {rel}")
 
     if args.check and changed:
-        print("[ERROR] Run 'python3 scripts/format_CVA6Flow_repo.py' to fix "
-              "these.")
+        print("[ERROR] Run 'python3 scripts/format_CVA6Flow_repo.py' to "
+              "fix these.")
         return 1
     if skipped and not changed:
         return 0
