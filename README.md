@@ -10,7 +10,7 @@ Simulating CVA6 in RTL provides absolute truth, but in an unreadable format. A s
 
 CVA6Flow bridges this gap. It reconstructs the instruction-level view directly from the RTL signals, tracking every in-flight instruction through the core to visualise exactly what happened and when.
 
-Zero guesswork. The core philosophy of this tool is uncompromising: every reported number must trace directly back to an actual RTL signal or architectural state. Early iterations relied on cycle-offset estimates and plausible proxies, but because those introduced silent errors, they were scrapped. If CVA6Flow reports a delay, the hardware proves it.
+Zero guesswork. The core philosophy of this tool is uncompromising: every reported number traces back to an actual RTL signal or architectural state, and where one cannot, the tool says so at the point of use. Early iterations relied on cycle-offset estimates and plausible proxies, and because those introduced silent errors they were scrapped or labelled. Two labelled derivations remain, both documented where they are emitted: `ex_cycle`, which is the issue cycle plus one because no dumped signal marks entry to execute, and the synthesised fetch cycles carrying `if_synthesised`. Everything else is measured, and if CVA6Flow reports a delay the hardware proves it.
 
 ## Quick start
 
@@ -54,15 +54,18 @@ python3 CVA6Flow_tracer.py <vcd_path> [options]
 
 `scripts/create_all_CVA6Flow_jsons.py` converts a whole folder at once, skipping any VCD with no listing beside it and any JSON already newer than its VCD, and lets the tracer's progress line through so a long conversion does not look hung.
 
-| Option | Meaning |
-| --- | --- |
-| `vcd_path` | Path to the Verilator-generated `.vcd` |
-| `-o`, `--output` | Output JSON path. Defaults to `<vcd_basename>.json` |
-| `--scope-prefix` | Hierarchical prefix prepended to each whitelisted signal. Defaults to `TOP.ariane_testharness.i_ariane.i_cva6` |
-| `--disasm-list` | Path to an `objdump -dS` listing of the test ELF. Populates each record's `disasm` field by PC lookup. Records outside the listing, such as bootrom, keep `disasm=None`. Defaults to `<vcd basename>.list` beside the VCD |
-| `--no-disasm-list` | Do not look for a listing, and do not warn about its absence |
-| `--stages` | Print per-stage resolution diagnostics on stderr |
-| `--quiet` | Suppress the streaming progress indicator |
+| Option               | Meaning                                                                                                                                                                                                                                                                                                                                                                                                     |
+| -------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `vcd_path`           | Path to the Verilator-generated `.vcd`                                                                                                                                                                                                                                                                                                                                                                      |
+| `-o`, `--output`     | Output JSON path. Defaults to `<vcd_basename>.json`                                                                                                                                                                                                                                                                                                                                                         |
+| `--scope-prefix`     | Hierarchical prefix prepended to each whitelisted signal. Defaults to `TOP.ariane_testharness.i_ariane.i_cva6`                                                                                                                                                                                                                                                                                              |
+| `--disasm-list`      | Path to an `objdump -dS` listing of the test ELF. Populates each record's `disasm` field by PC lookup. Records outside the listing, such as bootrom, keep `disasm=None`. Defaults to `<vcd basename>.list` beside the VCD                                                                                                                                                                                   |
+| `--no-disasm-list`   | Do not look for a listing, and do not warn about its absence                                                                                                                                                                                                                                                                                                                                                |
+| `--stages`           | Print per-stage resolution diagnostics on stderr                                                                                                                                                                                                                                                                                                                                                            |
+| `--config-name`      | The CVA6 configuration the VCD was captured on, recorded in `metadata.config_name` and shown in the viewer's Simulation panel. A VCD does not name its own build, so this is a label, not a measurement. Defaults to `cv64a6_imafdc_sv39_hpdcache_wb`, the configuration this tracer's constants are written for. A sweep should pass the build it is running, or every JSON it writes claims the same name |
+| `--quiet`            | Suppress the streaming progress indicator                                                                                                                                                                                                                                                                                                                                                                   |
+| `--strict`           | Exit non-zero (3) if any mechanism failed to resolve, or if the dump itself is unusable: cut mid-record, no value changes, no rising clock edge, or no commit. The JSON is still written, and `metadata.degraded` names what is missing. Use it in batch runs so a truncated VCD is not mistaken for a complete one                                                                                         |
+| `--emit-diagnostics` | Include the per-record diagnostic fields the viewer does not read: `lsu_state_history`, `dc_events` and `fetch_port`. Off by default, which is about 15 percent smaller on a large trace                                                                                                                                                                                                                    |
 
 ## Running a test: `scripts/run_CVA6.py`
 
@@ -72,13 +75,15 @@ Getting a VCD out of CVA6 by hand means sourcing the simulation environment, pic
 python3 scripts/run_CVA6.py [target] <test> [--lang c|asm] [--no-vcd]
 ```
 
-| Argument | Meaning |
-| --- | --- |
-| `[target]` | CVA6 configuration to build. Optional, and defaults to `cv64a6_imafdc_sv39_hpdcache_wb`, the one this fork targets |
-| `<test>` | The test to run: C (`.c`) or assembly (`.S`, `.s`, `.asm`). The type is detected from the extension |
-| `--lang` | Force the type instead of detecting it. It selects both the overhead profile and the disassembly markers |
-| `--no-vcd` | Skip the trace and report metrics only. Use it when you only want the numbers, since the VCD is the expensive part |
+| Argument       | Meaning                                                                                                                                                                                                                                                                                                  |
+| -------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `[target]`     | CVA6 configuration to build. Optional, and defaults to `cv64a6_imafdc_sv39_hpdcache_wb`, the one this fork targets                                                                                                                                                                                       |
+| `<test>`       | The test to run: C (`.c`) or assembly (`.S`, `.s`, `.asm`). The type is detected from the extension                                                                                                                                                                                                      |
+| `--lang`       | Force the type instead of detecting it. It selects both the overhead profile and the disassembly markers                                                                                                                                                                                                 |
+| `--no-vcd`     | Skip the trace and report metrics only. Use it when you only want the numbers, since the VCD is the expensive part                                                                                                                                                                                       |
 | `--keep-build` | Reuse the Verilated model in `work-ver` instead of rebuilding it. The model does not depend on the test, so this is the difference between a rebuild and a run when sweeping a set of tests. Only reuse across runs with the same target and the same trace setting, since both are baked into the build |
+| `--cva6-root`  | The CVA6 checkout to run, the one holding `verif/sim`. Defaults to `/cva6` when it exists, otherwise the repository this script sits in                                                                                                                                                                  |
+| `--suite`      | Which overhead table to subtract, `config` or `viewer`. Defaults to the set the test came from                                                                                                                                                                                                           |
 
 What it does, in order:
 
@@ -99,7 +104,7 @@ The `_report.txt` is the readable record of what was measured, disassembly and t
 
 The build and the simulation are quiet: everything they write goes to `verif/sim/out_<date>/<test>_run.log`. If the run fails nothing is deleted and the end of that log is printed.
 
-The script assumes the CVA6 checkout is at `/cva6`, which is where the Docker image below puts it.
+Which CVA6 checkout it runs is `--cva6-root`: the directory holding `verif/sim`. With no value it uses `/cva6` when that exists, which is where the Docker image below puts it, and otherwise the repository this script sits in. It prints the root it chose on every run, and refuses with a message naming the flag when the directory it picked has no `verif/sim` in it.
 
 ### Writing a test
 
@@ -127,16 +132,16 @@ localparam int CVA6_CONFIG_SEL = CFG_BASELINE;
 python3 scripts/run_CVA6Flow_sweep.py [--configs 1,4-6] [--tests-dir DIR] [--no-vcd] [--list]
 ```
 
-| Option | Meaning |
-| --- | --- |
-| `--configs` | Which configurations to run, for example `1,4-6`. Defaults to every one in the table |
-| `--tests-dir` | Where the workloads live. Defaults to `/cva6/benchmarks` |
-| `--tests` | Comma-separated workloads to run for every configuration, instead of the ones the table names |
-| `--target` | Architecture target. Defaults to `cv64a6_imafdc_sv39_hpdcache_wb` |
-| `--out-dir` | Where results are collected. Defaults to `CVA6Flow_sweep_results/` |
+| Option                              | Meaning                                                                                                         |
+| ----------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| `--configs`                         | Which configurations to run, for example `1,4-6`. Defaults to every one in the table                            |
+| `--tests-dir`                       | Where the workloads live. Defaults to `/cva6/benchmarks`, the folder the Docker image creates                   |
+| `--tests`                           | Comma-separated workloads to run for every configuration, instead of the ones the table names                   |
+| `--target`                          | Architecture target. Defaults to `cv64a6_imafdc_sv39_hpdcache_wb`                                               |
+| `--out-dir`                         | Where results are collected. Defaults to `CVA6Flow_sweep_results/`                                              |
 | `--config-pkg`, `--live-config-pkg` | The swept package, and the one the build reads. The defaults are this file and `/cva6/core/include/<same name>` |
-| `--no-vcd` | Metrics only, no traces |
-| `--list` | Print the plan and exit, touching nothing |
+| `--no-vcd`                          | Metrics only, no traces                                                                                         |
+| `--list`                            | Print the plan and exit, touching nothing                                                                       |
 
 For each configuration it installs the package with `CVA6_CONFIG_SEL` set to that variant, then runs that configuration's workloads through [`scripts/run_CVA6.py`](#running-a-test-run_cva6py). A configuration whose workload is `all` runs every workload the table names.
 
@@ -159,18 +164,19 @@ Each in-flight instruction is followed through the core's six stages:
 fetch → decode → issue (allocates trans_id) → execute → writeback → commit
 ```
 
+Four of those six cycles are read from the dump. **Decode, issue and execute are one measurement and two derivations**, and the tool says so rather than implying three. `issue_instr_o` is a combinational passthrough of `decoded_instr_i` (`scoreboard.sv:151`), so decode and issue are a single handshake on this core and share one observed cycle. `ex_cycle` is that cycle plus one, the cycle the issued operands reach the functional unit: no signal in the dump marks an instruction entering execute, so it is derived rather than measured. Any comparison resting on the gap between issue and execute is reading the tool's constant, not the core.
+
 The `trans_id` allocated at issue is the handle that makes the rest possible. Writeback arrives on a packed `wt_valid_i` bus with one bit per port and a separate `trans_id_i` signal per port, so a writeback is matched to its instruction by looking up the trans_id of each asserting port. Commit works the same way through `commit_ack_o` and the scoreboard commit pointers.
 
 Within each rising clock edge the order of processing is deliberate:
 
-1. Flush detection, cascading so that a flush at execute also flushes decode and fetch
-2. Commit, releasing scoreboard slots
+1. Commit, releasing scoreboard slots
+2. Flush detection, cascading so that a flush at execute also flushes decode and fetch
 3. Writeback
-4. Issue, claiming slots
-5. Decode
-6. Fetch
+4. Decode and issue, as one combined handshake claiming slots
+5. Fetch
 
-Commit runs before issue on purpose: a slot freed this cycle can be reused the same cycle, and getting the order wrong yields a trace that looks plausible but is wrong.
+Commit runs first on purpose: a slot freed this cycle can be reused the same cycle, and getting the order wrong yields a trace that looks plausible but is wrong. Decode and issue are one step rather than two because the core performs them in one handshake, as above.
 
 The canonical configuration is `cv64a6_imafdc_sv39_hpdcache_wb`. Scoreboard depth is probed from the VCD rather than assumed, so parameter sweeps are handled without editing the tracer.
 
@@ -188,7 +194,7 @@ A few things worth calling out:
 
 Plus the usual quality-of-life: fit-to-viewport zoom, PC search across the whole window, a hover panel with per-instruction detail, and collapsible panels. Every control has an in-app tooltip, so they are not repeated here.
 
-Keys: `+` and `−` to zoom, arrows to navigate, `Home` and `End` to jump, `Esc` to close panels.
+Keys: `+` and `-` to zoom, arrows to navigate, `Home` and `End` to jump, `Esc` to close panels.
 
 ## Tested with
 
@@ -249,12 +255,22 @@ It repeats a real trace with every cycle field shifted forward rather than fabri
 
 ## Checking the repository: `scripts/check_CVA6Flow_repo.py`
 
-Every script compiles and answers `--help`, the page's JavaScript parses, the cycle-field lists agree across the tracer's consumers, every relative link resolves, and nothing gained trailing whitespace or a missing final newline:
+Every script compiles and answers `--help`, the page's JavaScript parses, the cycle-field lists agree across the tracer's consumers, every relative link resolves, no comment picked up a semicolon or a non-ASCII character, and nothing gained trailing whitespace or a missing final newline:
 
 ```bash
 python3 scripts/check_CVA6Flow_repo.py
 python3 scripts/check_CVA6Flow_repo.py --list        # name the checks and stop
 python3 scripts/check_CVA6Flow_repo.py -k formatting # just one
+```
+
+## Formatting: `scripts/format_CVA6Flow_repo.py`
+
+autopep8 at 79 columns for the Python, Prettier for the Markdown, over this repository's own files only. `--check` reports without changing anything, and is what the `formatter` check above runs, so a formatted tree stays formatted.
+
+```bash
+python3 scripts/format_CVA6Flow_repo.py           # format in place
+python3 scripts/format_CVA6Flow_repo.py --check   # report, change nothing
+python3 scripts/format_CVA6Flow_repo.py --python  # one language
 ```
 
 ## Licence
