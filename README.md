@@ -106,6 +106,14 @@ The build and the simulation are quiet: everything they write goes to `verif/sim
 
 Which CVA6 checkout it runs is `--cva6-root`: the directory holding `verif/sim`. With no value it uses `/cva6` when that exists, which is where the Docker image below puts it, and otherwise the repository this script sits in. It prints the root it chose on every run, and refuses with a message naming the flag when the directory it picked has no `verif/sim` in it.
 
+### A whole folder at once
+
+`scripts/run_all_CVA6_benchmarks.py` runs every benchmark in a folder through `run_CVA6.py`, skips the templates, and prints a pass and fail summary. Only the first test pays for the Verilator build and the rest reuse it, so a suite costs one build. `--rebuild-each` rebuilds every time, which is what a change to the RTL between tests needs.
+
+```bash
+python3 scripts/run_all_CVA6_benchmarks.py benchmarks/
+```
+
 ### Writing a test
 
 [benchmarks/](benchmarks/) holds the tests used to develop CVA6Flow, and `test_template.c` and `test_template.S` are the starting points. The template configures the PMU (`mhpmevent3` through `mhpmevent8` for cache misses, cache accesses, branches and mispredictions), snapshots `mcycle`, `minstret` and the counters, leaves a `MAIN PROGRAM` / `END OF MAIN PROGRAM` region for your code, and then snapshots again and moves the deltas into `s2` to `s10`. Write inside the markers and the driver measures and disassembles exactly that region.
@@ -230,6 +238,8 @@ CVA6 itself is developed by the [OpenHW Group](https://github.com/openhwgroup/cv
 python3 scripts/clean_CVA6Flow_repo.py [-y] [--dry-run] [-v]
 ```
 
+`scripts/clean_CVA6_runs.py` is the other one, and clears a CVA6 checkout rather than this repository: the dated `verif/sim/out_<date>/` folders, `work-ver/`, the batch folder and the `run_results/` beside each runner. The names say which tree each one touches.
+
 It lists what it found with its size and asks before deleting. The viewer JSONs are left alone, and `docs/` is kept whole.
 
 ### Oversized JSONs
@@ -265,7 +275,7 @@ python3 scripts/check_CVA6Flow_repo.py -k formatting # just one
 
 ## Formatting: `scripts/format_CVA6Flow_repo.py`
 
-autopep8 at 79 columns for the Python, Prettier for the Markdown, over this repository's own files only. `--check` reports without changing anything, and is what the `formatter` check above runs, so a formatted tree stays formatted.
+autopep8 at 79 columns for the Python, Prettier for the Markdown, over this repository's own files only. The benchmarks get `.editorconfig`'s trailing whitespace and final newline, and the assembly gets its operands aligned two spaces past the file's longest mnemonic. No C style is imposed, because none is configured for this tree. `--check` reports without changing anything, and is what the `formatter` check above runs, so a formatted tree stays formatted.
 
 ```bash
 python3 scripts/format_CVA6Flow_repo.py           # format in place
