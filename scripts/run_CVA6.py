@@ -24,9 +24,8 @@ DEFAULT_TARGET = "cv64a6_imafdc_sv39_hpdcache_wb"
 # OVERHEAD PROFILES (DEFAULT_TARGET)
 # ==============================================================================
 # Scaffolding around the measured region, subtracted to get NET. Indexed by
-# suite and language. 'config' is the calibration set in benchmarks/CVA6/,
-# 'viewer' the teaching set in CVA6Flow: different templates, so the tables
-# are not interchangeable.
+# suite and language. 'config' is the set in benchmarks/CVA6/, 'viewer' the
+# teaching set: different templates, so the two are not interchangeable.
 OVERHEAD_SUITES = {
     "config": {
         "c": {
@@ -75,24 +74,70 @@ OVERHEAD_SUITES = {
 }
 
 
+# A one-line file in a benchmark directory naming the overhead suite its
+# programs belong to, so the suite travels with them into the Docker images
+# rather than being guessed. The gem5 driver uses the same marker and rules.
+SUITE_MARKER = ".overhead_suite"
+
+
+def read_suite_marker(src_file):
+    """The suite declared beside the test, or None.
+
+    Looks in the test's own directory and the two above it, so a benchmark in
+    a subdirectory still finds its set's marker."""
+    if not src_file:
+        return None
+    d = os.path.dirname(os.path.abspath(src_file))
+    for _ in range(3):
+        marker = os.path.join(d, SUITE_MARKER)
+        if os.path.isfile(marker):
+            try:
+                with open(marker) as f:
+                    name = f.read().strip()
+            except OSError:
+                return None
+            if name in OVERHEAD_SUITES:
+                return name
+            print(f"[WARN] {marker} names '{name}', which is not one of "
+                  f"{sorted(OVERHEAD_SUITES)}. Ignoring it.")
+            return None
+        parent = os.path.dirname(d)
+        if parent == d:
+            break
+        d = parent
+    return None
+
+
 def default_suite(src_file=None):
     """Which overhead table to subtract, decided by where the test came from.
 
-    The driver has one home now, in the viewer repository, and runs both the
-    viewer's teaching set and the fork's calibration set, so its own location
-    no longer says which table applies. The test's path does. The fallback is
-    for the image, where the driver sits beside the set it runs."""
+    The suite decides which fixed instrumentation overhead is subtracted from
+    every reported cycle count, so getting it wrong moves every number in the
+    table. The path heuristics below are the fallback for a tree with no
+    marker."""
+    named = read_suite_marker(src_file)
+    if named:
+        return named
+    guess = None
     if src_file:
         parts = os.path.abspath(src_file).split(os.sep)
         if "gem5_config_CVA6" in parts:
-            return "config"
-        if "CVA6Flow" in parts:
-            return "viewer"
-    here = os.path.dirname(os.path.abspath(__file__))
-    for base in (here, os.path.dirname(here)):
-        if os.path.isfile(os.path.join(base, "CVA6Flow.html")):
-            return "viewer"
-    return "config"
+            guess = "config"
+        elif "CVA6Flow" in parts:
+            guess = "viewer"
+    if guess is None:
+        here = os.path.dirname(os.path.abspath(__file__))
+        for base in (here, os.path.dirname(here)):
+            if os.path.isfile(os.path.join(base, "CVA6Flow.html")):
+                guess = "viewer"
+                break
+    if guess is None:
+        guess = "config"
+    print(f"[WARN] No {SUITE_MARKER} beside the test, so the overhead table "
+          f"was inferred as '{guess}' from the path. This decides what is "
+          f"subtracted from every cycle count: pass --suite to say which one, "
+          f"or drop a {SUITE_MARKER} file naming it beside the benchmarks.")
+    return guess
 
 
 # ==============================================================================
