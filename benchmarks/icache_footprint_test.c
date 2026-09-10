@@ -31,20 +31,53 @@ void configure_pmu()
     x = x * 1103515245u + 12345u; \
     x ^= x >> 13;                 \
     x += x << 7;
-#define FN(n)                                                                                                                          \
-    __attribute__((noinline)) static unsigned f##n(unsigned x)                                                                         \
-    {                                                                                                                                  \
-        STEP(x)                                                                                                                        \
-        STEP(x)                                                                                                                        \
-        STEP(x)                                                                                                                        \
-            STEP(x) STEP(x) STEP(x) STEP(x) STEP(x) STEP(x) STEP(x) STEP(x) STEP(x) STEP(x) STEP(x) STEP(x) STEP(x) return x ^ (n##u); \
+#define FN(n)                                                  \
+    __attribute__((noinline)) static unsigned f##n(unsigned x) \
+    {                                                          \
+        STEP(x)                                                \
+        STEP(x)                                                \
+        STEP(x)                                                \
+        STEP(x)                                                \
+        STEP(x)                                                \
+        STEP(x)                                                \
+        STEP(x)                                                \
+        STEP(x)                                                \
+        STEP(x)                                                \
+        STEP(x)                                                \
+        STEP(x)                                                \
+        STEP(x)                                                \
+        STEP(x)                                                \
+        STEP(x)                                                \
+        STEP(x)                                                \
+        STEP(x)                                                \
+        return x ^ (n##u);                                     \
     }
 FN(0)
 FN(1)
 FN(2)
-FN(3) FN(4) FN(5) FN(6) FN(7) FN(8) FN(9) FN(10) FN(11) FN(12) FN(13) FN(14) FN(15) FN(16) FN(17) FN(18) FN(19) FN(20) FN(21) FN(22) FN(23)
+FN(3)
+FN(4)
+FN(5)
+FN(6)
+FN(7)
+FN(8)
+FN(9)
+FN(10)
+FN(11)
+FN(12)
+FN(13)
+FN(14)
+FN(15)
+FN(16)
+FN(17)
+FN(18)
+FN(19)
+FN(20)
+FN(21)
+FN(22)
+FN(23)
 
-    int main()
+int main()
 {
     configure_pmu();
 
