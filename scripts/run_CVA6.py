@@ -615,7 +615,7 @@ def main():
                              "relative or absolute")
     parser.add_argument("--cva6-root", default=None, metavar="DIR",
                         help="The CVA6 checkout to run: the one holding "
-                             "verif/sim. Defaults to /cva6 inside the "
+                             "verif/sim. Defaults to /CVA6 inside the "
                              "container, or the repository this script sits "
                              "in when that does not exist")
     parser.add_argument("--suite", choices=sorted(OVERHEAD_SUITES),
@@ -643,7 +643,7 @@ def main():
         args.suite = default_suite(args.src_file)
 
     # Directory configuration.
-    cva6_root = args.cva6_root or ("/cva6" if os.path.isdir("/cva6")
+    cva6_root = args.cva6_root or ("/CVA6" if os.path.isdir("/CVA6")
                                    else repo_checkout())
     if not os.path.isdir(os.path.join(cva6_root, "verif", "sim")):
         print(f"[ERROR] '{cva6_root}' does not look like a CVA6 checkout: no "

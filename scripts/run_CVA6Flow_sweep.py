@@ -15,7 +15,7 @@ import time
 # ==============================================================================
 # CONFIGURATION
 # ==============================================================================
-CVA6_ROOT = "/cva6"
+CVA6_ROOT = "/CVA6"
 
 # The package the build actually reads.
 LIVE_CONFIG_PKG = os.path.join(

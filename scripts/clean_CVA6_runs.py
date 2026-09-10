@@ -63,7 +63,7 @@ REPO_ROOT = repo_root()
 
 # Where run_CVA6.py expects the checkout. Outside the container that path
 # does not exist and the repository this script lives in is used instead.
-CVA6_ROOT = "/cva6" if os.path.isdir("/cva6") else REPO_ROOT
+CVA6_ROOT = "/CVA6" if os.path.isdir("/CVA6") else REPO_ROOT
 
 
 def search_roots():

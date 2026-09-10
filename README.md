@@ -82,12 +82,12 @@ python3 scripts/run_CVA6.py [target] <test> [--lang c|asm] [--no-vcd]
 | `--lang`       | Force the type instead of detecting it. It selects both the overhead profile and the disassembly markers                                                                                                                                                                                                 |
 | `--no-vcd`     | Skip the trace and report metrics only. Use it when you only want the numbers, since the VCD is the expensive part                                                                                                                                                                                       |
 | `--keep-build` | Reuse the Verilated model in `work-ver` instead of rebuilding it. The model does not depend on the test, so this is the difference between a rebuild and a run when sweeping a set of tests. Only reuse across runs with the same target and the same trace setting, since both are baked into the build |
-| `--cva6-root`  | The CVA6 checkout to run, the one holding `verif/sim`. Defaults to `/cva6` when it exists, otherwise the repository this script sits in                                                                                                                                                                  |
+| `--cva6-root`  | The CVA6 checkout to run, the one holding `verif/sim`. Defaults to `/CVA6` when it exists, otherwise the repository this script sits in                                                                                                                                                                  |
 | `--suite`      | Which overhead table to subtract, `config` or `viewer`. Defaults to the set the test came from                                                                                                                                                                                                           |
 
 What it does, in order:
 
-1. **Rebuilds.** Removes `/cva6/work-ver` so Verilator recompiles the core, unless `--keep-build` says to reuse it. Then sources `verif/sim/setup-env.sh` and runs `cva6.py` against `veri-testharness` with the project's linker script and the `syscalls.c` / `crt.S` runtime. Tracing is enabled through `TRACE_FAST` unless `--no-vcd` is given, and because that is a build-time define, changing it changes the model.
+1. **Rebuilds.** Removes `/CVA6/work-ver` so Verilator recompiles the core, unless `--keep-build` says to reuse it. Then sources `verif/sim/setup-env.sh` and runs `cva6.py` against `veri-testharness` with the project's linker script and the `syscalls.c` / `crt.S` runtime. Tracing is enabled through `TRACE_FAST` unless `--no-vcd` is given, and because that is a build-time define, changing it changes the model.
 2. **Disassembles.** Runs `objdump -d -S -l` over the compiled `.o` into `<test>.list`, the full listing the tracer wants for `--disasm-list`, and prints only the measured region, the part between the `MAIN PROGRAM` and `END OF MAIN PROGRAM` markers, saving it as `<test>_report.txt` under a `DISASSEMBLED CODE` banner and closed by an `END OF DISASSEMBLED CODE` one.
 3. **Extracts the metrics.** The test leaves its counter deltas in `s2` to `s10` (`x18` to `x26`) before exiting, and the script recovers them from the simulation log by register.
 4. **Prints the table.** Cycles, instructions, I-cache and D-cache misses and accesses, branches, mispredictions plus unpredicted, elapsed microseconds and IPC. Two columns: `OFFICIAL` as measured, and `NET` with the fixed cost of the measurement code itself subtracted, so a short kernel is not swamped by its own instrumentation. The table is appended to `<test>_report.txt` below the disassembly, in its own banner, so the two sections can be told apart at a glance. Its title line names the simulator, the program and the L1 geometry the run used, read from the target's `core/include/<target>_config_pkg.sv`, and the line under it names the CVA6 target.
@@ -104,7 +104,7 @@ The `_report.txt` is the readable record of what was measured, disassembly and t
 
 The build and the simulation are quiet: everything they write goes to `verif/sim/out_<date>/<test>_run.log`. If the run fails nothing is deleted and the end of that log is printed.
 
-Which CVA6 checkout it runs is `--cva6-root`: the directory holding `verif/sim`. With no value it uses `/cva6` when that exists, which is where the Docker image below puts it, and otherwise the repository this script sits in. It prints the root it chose on every run, and refuses with a message naming the flag when the directory it picked has no `verif/sim` in it.
+Which CVA6 checkout it runs is `--cva6-root`: the directory holding `verif/sim`. With no value it uses `/CVA6` when that exists, which is where the Docker image below puts it, and otherwise the repository this script sits in. It prints the root it chose on every run, and refuses with a message naming the flag when the directory it picked has no `verif/sim` in it.
 
 ### A whole folder at once
 
@@ -143,11 +143,11 @@ python3 scripts/run_CVA6Flow_sweep.py [--configs 1,4-6] [--tests-dir DIR] [--no-
 | Option                              | Meaning                                                                                                         |
 | ----------------------------------- | --------------------------------------------------------------------------------------------------------------- |
 | `--configs`                         | Which configurations to run, for example `1,4-6`. Defaults to every one in the table                            |
-| `--tests-dir`                       | Where the workloads live. Defaults to `/cva6/benchmarks`, the folder the Docker image creates                   |
+| `--tests-dir`                       | Where the workloads live. Defaults to `/CVA6/benchmarks`, the folder the Docker image creates                   |
 | `--tests`                           | Comma-separated workloads to run for every configuration, instead of the ones the table names                   |
 | `--target`                          | Architecture target. Defaults to `cv64a6_imafdc_sv39_hpdcache_wb`                                               |
 | `--out-dir`                         | Where results are collected. Defaults to `CVA6Flow_sweep_results/`                                              |
-| `--config-pkg`, `--live-config-pkg` | The swept package, and the one the build reads. The defaults are this file and `/cva6/core/include/<same name>` |
+| `--config-pkg`, `--live-config-pkg` | The swept package, and the one the build reads. The defaults are this file and `/CVA6/core/include/<same name>` |
 | `--no-vcd`                          | Metrics only, no traces                                                                                         |
 | `--list`                            | Print the plan and exit, touching nothing                                                                       |
 
@@ -159,7 +159,7 @@ Once a run is collected its leftovers are deleted: `run_results/`, and that run'
 
 Two things worth knowing:
 
-- **The live config package is overwritten and restored.** Selecting a configuration means writing `/cva6/core/include/cv64a6_imafdc_sv39_hpdcache_wb_config_pkg.sv`, so the script backs it up first and puts it back when the sweep ends, fails or is interrupted.
+- **The live config package is overwritten and restored.** Selecting a configuration means writing `/CVA6/core/include/cv64a6_imafdc_sv39_hpdcache_wb_config_pkg.sv`, so the script backs it up first and puts it back when the sweep ends, fails or is interrupted.
 - **Only the first test of each configuration rebuilds the core.** The RTL changes between configurations, not between the tests of one, so the rest run with `--keep-build`.
 
 Use `--list` first: it prints what each configuration would run, names the closest files for any workload that matches nothing, and calls out configurations left with nothing to run.
@@ -211,10 +211,10 @@ CVA6Flow has been tested against the CVA6 build in this organisation, [FaMAF-CVA
 If you would rather not build the core and its toolchain yourself, a ready-to-use Docker image is available with CVA6 and the simulation toolchain already set up, so you can generate VCDs straight away:
 
 ```bash
-docker pull manuel313/cva6
+docker pull famafcva6/cva6
 ```
 
-Image: https://hub.docker.com/repository/docker/manuel313/cva6/general
+Image: https://hub.docker.com/r/famafcva6/cva6
 
 ## Requirements
 

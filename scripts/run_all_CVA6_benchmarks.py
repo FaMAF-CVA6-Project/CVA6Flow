@@ -15,8 +15,8 @@ import time
 # ==============================================================================
 # CONFIGURATION
 # ==============================================================================
-# Default folder, as laid out inside the manuel313/cva6 image.
-DEFAULT_TESTS_DIR = "/cva6/benchmarks"
+# Default folder, as laid out inside the famafcva6/cva6 image.
+DEFAULT_TESTS_DIR = "/CVA6/benchmarks"
 
 # The driver this script delegates to, looked up next to it and then in cwd.
 RUNNER_NAME = "run_CVA6.py"
@@ -25,7 +25,7 @@ RUNNER_NAME = "run_CVA6.py"
 # measured on.
 DEFAULT_TARGET = "cv64a6_imafdc_sv39_hpdcache_wb"
 
-CVA6_ROOT = "/cva6"
+CVA6_ROOT = "/CVA6"
 
 # Where the batch gathers what it keeps, one folder for the whole run.
 DEFAULT_OUT_DIR = "batch_results"
