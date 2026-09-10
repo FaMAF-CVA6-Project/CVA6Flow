@@ -172,6 +172,7 @@
       background: transparent;
       transition: background 0.12s;
     }
+
     #wbresize:hover,
     #wbresize.dragging {
       background: var(--border2);
@@ -651,6 +652,7 @@
       pointer-events: auto;
       border-color: #d8a03a;
     }
+
     #tt.pinned::after {
       content: 'pinned \00b7 Esc or P to release';
       display: block;
@@ -659,14 +661,17 @@
       font-size: 10px;
       font-family: var(--font-mono);
     }
+
     #tt .maxref,
     .pinbody .maxref {
       color: #6f7f9a;
     }
+
     .pinbody .maxref,
     .pinbody .gotoref {
       cursor: pointer;
     }
+
     .pinbody .maxref:hover,
     .pinbody .gotoref:hover {
       text-decoration: underline;
@@ -675,13 +680,16 @@
     #tt .gotoref {
       color: #7fb8e8;
     }
+
     #tt.pinned .gotoref {
       cursor: pointer;
       text-decoration: underline;
     }
+
     #tt.pinned .gotoref:hover {
       color: #b8d8f5;
     }
+
     /* Stall composition strip. Segments are a share of the sum of the four
      * categories, not of the Stall total, because a cycle stalled for more
      * than one reason is counted in each category it belongs to. */
@@ -690,11 +698,13 @@
     #stalldiag-wrap {
       margin: 2px 0 14px;
     }
+
     #stalldiag {
       display: block;
       width: 100%;
       height: 96px;
     }
+
     #stalldiag-key {
       display: flex;
       flex-wrap: wrap;
@@ -704,6 +714,7 @@
       font-size: 10px;
       color: var(--text3);
     }
+
     #stalldiag-key i {
       display: inline-block;
       width: 9px;
@@ -712,6 +723,7 @@
       margin-right: 5px;
       vertical-align: -1px;
     }
+
     #stalldiag-read {
       margin-top: 5px;
       font-family: var(--font-mono);
@@ -719,6 +731,7 @@
       color: var(--text2);
       min-height: 13px;
     }
+
     /* Pin dock. Pinned tooltips leave the timeline and stack side by side at
        a fixed width, so equivalent rows line up across cards and comparing
        two instructions is reading across rather than arranging windows. */
@@ -730,15 +743,18 @@
       background: var(--bg2);
       border-top: 0.5px solid var(--border2);
     }
+
     #pindock.on {
       display: block;
     }
+
     #pinrow {
       display: flex;
       align-items: flex-start;
       gap: 8px;
       padding: 8px;
     }
+
     .pincard {
       flex: 0 0 236px;
       background: var(--bg);
@@ -746,6 +762,7 @@
       border-radius: 5px;
       overflow: hidden;
     }
+
     .pinhead {
       display: flex;
       align-items: center;
@@ -756,6 +773,7 @@
       font-family: var(--font-mono);
       font-size: 10px;
     }
+
     .pinhead .go {
       flex: 1;
       color: #7fb8e8;
@@ -764,29 +782,35 @@
       text-overflow: ellipsis;
       white-space: nowrap;
     }
+
     .pinhead .go:hover {
       color: #b8d8f5;
       text-decoration: underline;
     }
+
     .pinhead .x {
       color: var(--text3);
       cursor: pointer;
       padding: 0 2px;
     }
+
     .pinhead .x:hover {
       color: var(--bad);
     }
+
     .pinbody {
       padding: 7px 9px;
       font-family: var(--font-mono);
       font-size: 11px;
       line-height: 1.5;
     }
+
     .pinbody table {
       border-collapse: collapse;
       font-size: 11px;
       width: 100%;
     }
+
     #tt {
       position: fixed;
       z-index: 200;
@@ -1186,7 +1210,8 @@
       Labels</button>
 
     <button class="tbtn" id="wbToggleBtn" onclick="toggleWbPanel()"
-      title="Hide the memory writeback track at the bottom. Each bar there is a dirty cache line being written back, plus the eviction that caused it.">▼ Hide
+      title="Hide the memory writeback track at the bottom. Each bar there is a dirty cache line being written back, plus the eviction that caused it.">▼
+      Hide
       Writebacks</button>
 
     <span class="vsep">│</span>
@@ -1274,7 +1299,9 @@
       </div>
       <div id="wbwrap"><canvas id="wbcanvas"></canvas></div>
     </div>
-    <div id="pindock"><div id="pinrow"></div></div>
+    <div id="pindock">
+      <div id="pinrow"></div>
+    </div>
     <div id="status">
       <span title="Cycle the mouse cursor is over.">Cycle: <span class="hi" id="s-c">-</span></span>
       <span title="Instruction at the row under the cursor.">Instr: <span class="hi" id="s-i">-</span></span>
@@ -2230,6 +2257,8 @@
       for (const k of need) {
         if (!(k in r)) return `Instruction records are missing the <code>${k}</code> field that the CVA6 tracer always emits.`;
       }
+      const sv = schemaComplaint(j);
+      if (sv) return sv.charAt(0).toUpperCase() + sv.slice(1) + '.';
       return null;
     }
     function showModalMessage(title, htmlBody) {
@@ -2242,6 +2271,23 @@
     }
     function escapeHtml(s) { return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
 
+    /* Without this check a mismatched JSON renders as silent nulls rather
+     * than failing to load. The tracer emits the same number. */
+    const CVA6FLOW_SCHEMA_VERSION = 1;
+    function schemaComplaint(d) {
+      const v = d && d.metadata && d.metadata.schema_version;
+      if (v == null) {
+        return 'this JSON carries no "schema_version", so it was written by a '
+          + 'tracer older than this viewer. Regenerate it with the current '
+          + 'CVA6Flow_tracer.py';
+      }
+      if (v !== CVA6FLOW_SCHEMA_VERSION) {
+        return `this JSON is schema ${v} and this viewer reads schema `
+          + `${CVA6FLOW_SCHEMA_VERSION}. Regenerate it with the matching `
+          + 'CVA6Flow_tracer.py';
+      }
+      return null;
+    }
     function validateCva6Json(d) {
       if (typeof d !== 'object' || d === null) return 'the top level is not an object';
       if (!Array.isArray(d.instructions)) return 'the "instructions" array is missing';
@@ -2259,6 +2305,8 @@
             + 'CVA6Flow tracer always emits';
         }
       }
+      const sv = schemaComplaint(d);
+      if (sv) return sv;
       if (d.instructions.every(x => !x.disasm)) {
         return 'no record carries a "disasm" field, so this JSON was produced '
           + 'without the objdump listing. Rerun the tracer with the .list '
@@ -3320,6 +3368,29 @@
           ctx.restore();
         }
       }
+      /* Marks a fetch band the tracer synthesised. Drawn over the band so
+       * colour still carries hit and miss, and dashes carry provenance. */
+      function dashOutline(c0, c1, isTop) {
+        if (c0 == null || c1 == null || c1 <= c0) return;
+        const x = (c0 - firstCyc) * cellW;
+        const w = Math.max(1, (c1 - c0) * cellW - 1);
+        if (x + w < 0 || x > vpW) return;
+        let yy, hh;
+        if (isTop === null) {
+          hh = Math.max(1, Math.round(h * 0.60));
+          yy = y0 + h - hh;
+        } else {
+          const gap = 2;
+          hh = Math.max(1, Math.round((h - gap) / 2));
+          yy = isTop ? y0 : (y0 + h - hh);
+        }
+        ctx.save();
+        ctx.strokeStyle = 'rgba(255,255,255,0.85)';
+        ctx.lineWidth = 1;
+        ctx.setLineDash([3, 2]);
+        ctx.strokeRect(x + 0.5, yy + 0.5, Math.max(1, w - 1), Math.max(1, hh - 1));
+        ctx.restore();
+      }
       function strip(c0, c1, color, yOff, stripH, label) {
         if (c0 == null || c1 == null || c1 <= c0) return;
         const x = (c0 - firstCyc) * cellW;
@@ -3392,7 +3463,8 @@
         seg(lastIf2 + 1, ins.fe_cycle, sc(COL.f2buf), 0.60, 'fe buf');
       if (ins.if1_lo != null && ins.if2_lo != null)
         renderIF12(ins.if1_lo, ins.if2_lo, ins.ic_miss, sc, seg, strip, segHalf, h,
-          ins.if1_hi, ins.if2_hi, ins.wraps_line, ins.ic_miss_hi);
+          ins.if1_hi, ins.if2_hi, ins.wraps_line, ins.ic_miss_hi,
+          ins.if_synthesised, dashOutline);
       /* Cycles where the FE could not issue this record's IF1, drawn at the
        * bubble's height so the two read as one stripe. The bubble covers the
        * right edge, so its cycles are subtracted. */
@@ -3521,8 +3593,12 @@
      * bottom half and high on the top, so a cycle with both filled IS a shared
      * cycle. One that fits a single line keeps the full-height band. */
     function renderIF12(if1c, if2c, missed, sc, seg, strip, segHalf, h,
-      if1hc, if2hc, wrapsLine, missedHi) {
+      if1hc, if2hc, wrapsLine, missedHi, synth, dashOutline) {
       if (if1c == null || if2c == null) return;
+      /* Synthesised fetch cycles were invented by the tracer, not bound to an
+       * I-cache event, and on such a record ic_miss is None. Marked with a
+       * '~' in the label and a dashed outline below. */
+      const sy = synth ? ' ~' : '';
       const twoLane = !!(wrapsLine && if1hc != null && if2hc != null);
       /* isTop null means the single-line case, where the lane is the whole band. */
       const band = (c0, c1, color, label, isTop) => {
@@ -3540,12 +3616,13 @@
        * window is one continuous if1 bar whatever the latency. */
       const lo = twoLane ? ' lo' : '';
       if (loMiss) {
-        band(if1c, if1c + 1, sc(COL.f1reqMiss), 'fe1' + lo, loLane);
+        band(if1c, if1c + 1, sc(COL.f1reqMiss), 'fe1' + lo + sy, loLane);
         band(if1c + 1, if2c, sc(COL.f1stall), 'icache' + lo + ' stall', loLane);
       } else {
-        band(if1c, if2c, sc(COL.f1), 'fe1' + lo, loLane);
+        band(if1c, if2c, sc(COL.f1), 'fe1' + lo + sy, loLane);
       }
-      band(if2c, if2c + 1, sc(COL.f2), 'fe2' + lo, loLane);
+      band(if2c, if2c + 1, sc(COL.f2), 'fe2' + lo + sy, loLane);
+      if (synth && dashOutline) dashOutline(if1c, if2c + 1, loLane);
       if (!twoLane) return;
       /* High line, top lane. */
       const hiMiss = (missedHi != null) ? missedHi : (if2hc - if1hc > 1);
@@ -3558,7 +3635,8 @@
       } else {
         band(if1hc, if2hc, sc(COL.f1_hi), 'fe1 hi', true);
       }
-      band(if2hc, if2hc + 1, sc(COL.f2_hi), 'fe2 hi', true);
+      band(if2hc, if2hc + 1, sc(COL.f2_hi), 'fe2 hi' + sy, true);
+      if (synth && dashOutline) dashOutline(if1hc, if2hc + 1, true);
     }
 
     function clip(ctx, s, maxW) {
@@ -3740,6 +3818,10 @@
         desc: 'Cycle the front-end asked the instruction cache for this line.'
       },
       {
+        key: 'if1synth', label: 'Fetch cycles derived (~)', color: COL.f1,
+        desc: 'Dashed outline and a ~ in the label: the tracer synthesised these fetch cycles instead of binding them to an instruction-cache event, because the line was still resident from an earlier iteration and the cache never re-pulsed. On such a record the hit/miss status is unknown, not a hit.'
+      },
+      {
         key: 'if1miss', label: 'Fetch1 req miss', color: COL.f1reqMiss,
         desc: 'The fe1 request cell drawn red when the request missed in the instruction cache. It runs straight into the ICache stall while the line is fetched from memory.'
       },
@@ -3892,6 +3974,7 @@
       for (const r of ROWS) {
         if (r.if1_lo != null) present.add('if1');
         if (r.if2_lo != null) present.add('if2');
+        if (r.if_synthesised && r.if1_lo != null) present.add('if1synth');
         /* Tracks renderIF12: the stall entry only lights when the miss also
          * took more than one cycle, since a multi-cycle hit is one if1 bar. */
         const loMissL = (r.ic_miss != null) ? (r.ic_miss === true)
@@ -4156,15 +4239,9 @@
             addRange(set, ins.fe_cycle + 1, ins.id_cycle);
           }
         }
-        /* 'is buf' cells (decode and issue split, or the FU busy after issue)
-         * are DataStall, matching MinorFlow's [dtoe, ex) exec-buffer wait.
-         * Disjoint from the id buf range above, so no double count. */
-        if (ins.id_cycle != null && ins.is_cycle != null && ins.is_cycle > ins.id_cycle) {
-          addRange(dataStall, ins.id_cycle + 1, ins.is_cycle);
-        }
-        if (ins.is_cycle != null && ins.ex_cycle != null && ins.ex_cycle > ins.is_cycle + 1) {
-          addRange(dataStall, ins.is_cycle + 1, ins.ex_cycle);
-        }
+        /* No window spans decode to execute: those three cycles come from
+         * one measurement, so any gap between them is arithmetic. The window
+         * below is real, because lsu_admit_cycle is observed. */
         /* LSU structural pressure: the access reached execute but the load or
          * store FSM had not taken it, so it waited on queue depth or memory
          * ordering rather than on data. MinorFlow counts the same thing over
@@ -4691,7 +4768,7 @@
           IC_MISS_CYCLES.length
             ? 'Hardware L1 ICache miss count, taken from the icache miss pulses the RTL performance counter sees. It includes wrong-path fetches squashed before delivery, so it can exceed the row above.'
             : (hasIcEvents
-            ? 'Missing fetch events, the same figure the status bar shows. Counted once per cache access however many instructions came from the line. Wrong-path fetches squashed before delivery are not counted.'
+              ? 'Missing fetch events, the same figure the status bar shows. Counted once per cache access however many instructions came from the line. Wrong-path fetches squashed before delivery are not counted.'
               : 'ICache misses in the loaded trace, recomputed from the per-record miss flags (this trace has no event array), the same figure the status bar shows.')]);
         icRows.push(['wraps_line records',
           `${wl.toLocaleString()} (${wlMiss.toLocaleString()} with hi miss)`,
@@ -5238,7 +5315,7 @@
       const dz = document.getElementById('dropzone');
       if (dz) dz.classList.remove('ov');
       /* A dropped file left no handle behind, so the next picker had no
-       * directory to start in. Chromium exposes one on the drop item; other
+       * directory to start in. Chromium exposes one on the drop item, other
        * browsers return nothing and the picker falls back as before. */
       const it = e.dataTransfer && e.dataTransfer.items && e.dataTransfer.items[0];
       if (it && typeof it.getAsFileSystemHandle === 'function') {
@@ -5622,7 +5699,7 @@
         + `<span class="go" data-pin-go="${i}" title="Go to this instruction">${escapeHtml(p.title)}</span>`
         + `<span class="x" data-pin-x="${i}" title="Unpin">\u00d7</span></div>`
         + `<div class="pinbody">${p.html}</div></div>`).join('');
-      
+
     }
 
     function addPin() {
@@ -6133,7 +6210,12 @@
         html += `<tr><td style="color:#5a7575;padding-left:12px;font-size:10px">${bubLbl}</td>` +
           `<td style="color:${legibleOnDark(sufBubMeta.swatch)};font-size:10px">${cyc(bubStart)} (${sufBubCyc}c)</td></tr>`;
       }
-      html += `<tr><td>IF1 req</td><td>${cyc(r.if1_lo)}</td></tr>`;
+      /* On a synthesised record if1 and if2 were invented and ic_miss is
+       * null, so neither cycle below is a measurement. */
+      const synthTag = r.if_synthesised
+        ? ' <span style="color:#c0a060" title="Fetch cycles synthesised by the tracer, not bound to an I-cache event">~ derived</span>'
+        : '';
+      html += `<tr><td>IF1 req</td><td>${cyc(r.if1_lo)}${synthTag}</td></tr>`;
       html += `<tr><td>IF2 resp</td><td>${cyc(r.if2_lo)}${icHit}</td></tr>`;
       if (r.wraps_line) {
         /* From ic_miss_hi when set, otherwise the gap heuristic, since a 4+
@@ -6380,7 +6462,25 @@
       }
       html += `</table>`;
       if (r.flushed) {
-        html += `<div style="margin-top:6px;font-size:10px;color:#ff4040">✗ Flushed (wrong path). Never committed</div>`;
+        /* flush_cycle and flush_reason are measured, and MinorFlow shows
+         * the same two. */
+        const FLUSH_REASON_TEXT = {
+          flush_ex_cascade_if: 'execute flush, cascaded to fetch',
+          flush_ex_cascade_id: 'execute flush, cascaded to decode',
+          flush_ex_commit_drain: 'execute flush while commit drained',
+          flush_if: 'fetch flush',
+          flush_id: 'decode flush',
+          fetch_dropped_fui: 'popped by the front end on a flush cycle, so decode discarded it',
+          eof: 'still in flight when the trace ended, not squashed by the core',
+        };
+        const why = r.flush_reason
+          ? (FLUSH_REASON_TEXT[r.flush_reason] || r.flush_reason) : null;
+        const at = (r.flush_cycle != null) ? ` at ${cyc(r.flush_cycle)}` : '';
+        html += `<div style="margin-top:6px;font-size:10px;color:#ff4040">`
+          + `✗ Flushed (wrong path). Never committed${at}</div>`;
+        if (why) {
+          html += `<div style="font-size:10px;color:#c07070">${escapeHtml(why)}</div>`;
+        }
       }
       /* The drawn cells at the cursor's cycle, coloured to match them and
        * joined with a plus when a cycle carries more than one. */
