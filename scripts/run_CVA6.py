@@ -157,10 +157,11 @@ METRICS_MAP = {
 
 ORDERED_KEYS = ['x18', 'x19', 'x20', 'x21', 'x22', 'x23', 'x24', 'x25', 'x26']
 
-# Folder next to this script where each run leaves a copy of the files worth
-# keeping. The originals stay where the simulation puts them.
-RESULTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                           "run_results")
+# Where each run leaves what is worth keeping, and where a surviving
+# out_<date>/ is moved, both under the CVA6 root rather than beside this
+# script, so everything a run writes is in one place.
+RESULTS_DIR = os.path.join("results", "run")
+VERIF_RESULTS_DIR = os.path.join("results", "verif")
 
 CODELIST_PROFILES = {
     "c": {
@@ -574,14 +575,44 @@ def generate_and_show_codelist(binary_path, codelist):
     return report_path
 
 
-def collect_results(test_name, vcd_path, list_path, report_path):
-    """Copy the three files worth keeping into run_results/. The VCD is what
+def keep_sim_output(sim_dir, out_name, base):
+    """Move a surviving out_<date>/ under results/.
+
+    Only if it is still there. The verif flow and the cleaners both delete
+    it, and a run that stopped early leaves nothing worth keeping."""
+    source = os.path.join(sim_dir, out_name)
+    if not os.path.isdir(source):
+        return
+    target = os.path.join(base, VERIF_RESULTS_DIR, out_name)
+    moved = 0
+    try:
+        # Merged into whatever is already there, overwriting a file of the
+        # same name, which is what out_<date>/ did when the flow wrote into
+        # it directly. A batch's runs then gather in one folder per day.
+        for root, _, files in os.walk(source):
+            rel = os.path.relpath(root, source)
+            into = target if rel == os.curdir else os.path.join(target, rel)
+            os.makedirs(into, exist_ok=True)
+            for name in files:
+                os.replace(os.path.join(root, name),
+                           os.path.join(into, name))
+                moved += 1
+        shutil.rmtree(source, ignore_errors=True)
+    except OSError as e:
+        print(f"[WARN] Could not move {source}: {e}")
+        return
+    print(f"[INFO] Moved {moved} file(s) from {source} to {target}")
+
+
+def collect_results(test_name, vcd_path, list_path, report_path, base):
+    """Copy the three files worth keeping into results/run/. The VCD is what
     the viewer renders, the .list the listing its tracer needs, and the
     _report.txt the measured region plus the metrics table."""
+    results_dir = os.path.join(base, RESULTS_DIR)
     try:
-        os.makedirs(RESULTS_DIR, exist_ok=True)
+        os.makedirs(results_dir, exist_ok=True)
     except OSError as e:
-        print(f"[WARN] Could not create {RESULTS_DIR}: {e}")
+        print(f"[WARN] Could not create {results_dir}: {e}")
         return
 
     copied = []
@@ -593,13 +624,13 @@ def collect_results(test_name, vcd_path, list_path, report_path):
         if not source or not os.path.isfile(source):
             continue
         try:
-            shutil.copy2(source, os.path.join(RESULTS_DIR, name))
+            shutil.copy2(source, os.path.join(results_dir, name))
             copied.append(name)
         except OSError as e:
             print(f"[WARN] Could not copy {source}: {e}")
 
     if copied:
-        print(f"[INFO] Copied to {RESULTS_DIR}: {', '.join(copied)}")
+        print(f"[INFO] Copied to {results_dir}: {', '.join(copied)}")
 
 
 def main():
@@ -627,6 +658,11 @@ def main():
     parser.add_argument("--lang", choices=["c", "asm"], default="auto",
                         help="Force the input type and overhead/filter profile. "
                              "Defaults to detection by extension.")
+    parser.add_argument("--no-keep-sim-output", action="store_true",
+                        help="Leave out_<date>/ in verif/sim instead of "
+                             "moving it under results/verif/ at the end. The "
+                             "batch and the sweep pass this, since they "
+                             "discard the tree themselves")
     parser.add_argument("--no-vcd", action="store_true",
                         help="Prevent the .vcd trace file from being generated")
     parser.add_argument("--keep-build", action="store_true",
@@ -932,7 +968,11 @@ def main():
         test_name,
         os.path.join(log_dir_prediction, f"{test_name}.{args.target}.vcd"),
         os.path.join(binary_dir_compilation, f"{test_name}.list"),
-        report_path)
+        report_path, cva6_root)
+
+    # Last of all, since the copies above are taken from inside it.
+    if not args.no_keep_sim_output:
+        keep_sim_output(sim_dir, out_name, cva6_root)
 
 
 if __name__ == "__main__":

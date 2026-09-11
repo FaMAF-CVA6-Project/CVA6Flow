@@ -15,8 +15,8 @@ import time
 # ==============================================================================
 # CONFIGURATION
 # ==============================================================================
-# Default folder, as laid out inside the famafcva6/cva6 image.
-DEFAULT_TESTS_DIR = "/CVA6/benchmarks"
+# Default folder, as laid out inside the famaf_cva6_project/cva6 image.
+DEFAULT_TESTS_DIR = "/CVA6/benchmarks/config"
 
 # The driver this script delegates to, looked up next to it and then in cwd.
 RUNNER_NAME = "run_CVA6.py"
@@ -28,7 +28,7 @@ DEFAULT_TARGET = "cv64a6_imafdc_sv39_hpdcache_wb"
 CVA6_ROOT = "/CVA6"
 
 # Where the batch gathers what it keeps, one folder for the whole run.
-DEFAULT_OUT_DIR = "batch_results"
+DEFAULT_OUT_DIR = os.path.join("results", "batch")
 
 # Recognised test extensions, matching run_CVA6.py. Case-sensitive: .S
 # is assembly and .s is too, but .c is the only C spelling accepted.
@@ -118,10 +118,10 @@ def warn_duplicates(tests, folder):
           "rename them.\n")
 
 
-def driver_results_dir(runner):
-    """The run_results/ folder run_CVA6.py copies its keepers into."""
-    return os.path.join(os.path.dirname(os.path.abspath(runner)),
-                        "run_results")
+def driver_results_dir():
+    """The results/run/ folder run_CVA6.py copies its keepers into, under the
+    CVA6 root rather than beside the driver."""
+    return os.path.join(CVA6_ROOT, "results", "run")
 
 
 def sim_output_dir():
@@ -131,7 +131,7 @@ def sim_output_dir():
 
 
 def output_paths(results_dir, test_name):
-    """The three files run_CVA6.py leaves in run_results/ for this test."""
+    """The three files run_CVA6.py leaves in results/run/ for this test."""
     return {
         "vcd": os.path.join(results_dir, f"{test_name}.vcd"),
         "list": os.path.join(results_dir, f"{test_name}.list"),
@@ -383,7 +383,7 @@ def main():
         print("[INFO] Dry run, nothing executed.")
         return 0
 
-    results_dir = driver_results_dir(runner)
+    results_dir = driver_results_dir()
     out_dir = os.path.abspath(args.out_dir)
     os.makedirs(out_dir, exist_ok=True)
 
@@ -399,7 +399,10 @@ def main():
 
         clear_stale_outputs(results_dir, test_name)
 
-        cmd = [sys.executable, runner, args.target, path]
+        # This batch discards the simulation tree itself, per test and then
+        # whole, so the driver must not carry it off to results/ first.
+        cmd = [sys.executable, runner, args.target, path,
+               "--no-keep-sim-output"]
         if args.suite:
             cmd.extend(["--suite", args.suite])
         if args.cva6_root:

@@ -25,8 +25,8 @@ LIVE_CONFIG_PKG = os.path.join(
 SOURCE_CONFIG_PKG = "cv64a6_imafdc_sv39_hpdcache_wb_config_pkg.sv"
 
 DEFAULT_TARGET = "cv64a6_imafdc_sv39_hpdcache_wb"
-DEFAULT_TESTS_DIR = os.path.join(CVA6_ROOT, "CVA6Flow_benchmarks")
-DEFAULT_OUT_DIR = "CVA6Flow_sweep_results"
+DEFAULT_TESTS_DIR = os.path.join(CVA6_ROOT, "benchmarks/viewer")
+DEFAULT_OUT_DIR = os.path.join("results", "sweep_CVA6Flow")
 
 RUNNER_NAME = "run_CVA6.py"
 
@@ -74,12 +74,17 @@ def find_source_pkg(explicit):
                       # In the repository the swept package lives in the
                       # viewer's configs/, beside this scripts/ folder.
                       os.path.join(here, "..", "configs", SOURCE_CONFIG_PKG),
+                      # In the container every configuration is in configs/,
+                      # which is the copy to sweep. LIVE is what it replaces.
+                      os.path.join(CVA6_ROOT, "CVA6_configs",
+                                   SOURCE_CONFIG_PKG),
                       LIVE_CONFIG_PKG):
         if os.path.isfile(candidate):
             return os.path.abspath(candidate)
     print(f"[ERROR] {SOURCE_CONFIG_PKG} not found next to this script, in "
-          f"the current directory, in ../configs/, or at "
-          f"{LIVE_CONFIG_PKG}. Pass --config-pkg.")
+          f"the current directory, in ../configs/, in "
+          f"{CVA6_ROOT}/CVA6_configs/, or at {LIVE_CONFIG_PKG}. "
+          f"Pass --config-pkg.")
     sys.exit(2)
 
 
@@ -249,9 +254,10 @@ def install_config(source_text, cfg_name, live_path):
         f.write(text)
 
 
-def driver_results_dir(runner):
-    """The run_results/ folder run_CVA6.py copies its keepers into."""
-    return os.path.join(os.path.dirname(os.path.abspath(runner)), "run_results")
+def driver_results_dir():
+    """The results/run/ folder run_CVA6.py copies its keepers into, under the
+    CVA6 root rather than beside the driver."""
+    return os.path.join(CVA6_ROOT, "results", "run")
 
 
 def sim_output_dir():
@@ -261,7 +267,7 @@ def sim_output_dir():
 
 
 def output_paths(results_dir, test_name):
-    """The three files run_CVA6.py leaves in run_results/ for this test."""
+    """The three files run_CVA6.py leaves in results/run/ for this test."""
     return {
         "vcd": os.path.join(results_dir, f"{test_name}.vcd"),
         "list": os.path.join(results_dir, f"{test_name}.list"),
@@ -549,7 +555,7 @@ def main():
         sys.exit(2)
 
     runner = find_runner()
-    results_dir = driver_results_dir(runner)
+    results_dir = driver_results_dir()
     live_pkg = args.live_config_pkg
     if not os.path.isfile(live_pkg):
         print(f"[ERROR] The live config package {live_pkg} does not exist")
@@ -584,7 +590,10 @@ def main():
 
                 clear_stale_outputs(results_dir, test_name)
 
-                cmd = [sys.executable, runner, args.target, path]
+                # The sweep discards the simulation tree itself, so the
+                # driver must not carry it off to results/ first.
+                cmd = [sys.executable, runner, args.target, path,
+                       "--no-keep-sim-output"]
                 if args.suite:
                     cmd.extend(["--suite", args.suite])
                 if args.cva6_root:
