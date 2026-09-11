@@ -3118,11 +3118,9 @@ def stream_and_extract(f, matches, args, n_wb_ports, n_commit_ports):
         flush_if_now = state.get(FIF, "0") if FIF else "0"
         flush_id_now = state.get(FID, "0") if FID else "0"
         flush_ex_now = state.get(FEX, "0") if FEX else "0"
-        # EX cascade covers ID + IF, so check it first.
-        # Independent tests, not an elif chain. On cv64a6 flush_id_o and
-        # flush_if_o never rise without flush_ex_o, so the later calls find
-        # empty queues, but an elif silently discards the ID and IF cascades
-        # on a core where they can rise alone.
+        # EX first, as its cascade covers ID and IF. On cv64a6 flush_if_o rises
+        # alone on a mispredict (controller.sv:117), flush_id_o only with EX.
+        # Separate ifs, not elif, so a core raising ID and IF at once keeps IF.
         if flush_ex_now == "1" and prev_flush_ex == "0":
             tracker.on_flush_ex(cycle)
         if flush_id_now == "1" and prev_flush_id == "0":
@@ -4245,9 +4243,11 @@ def main():
     )
     parser.add_argument(
         "--strict", action="store_true",
-        help="Exit non-zero if any mechanism failed to resolve. The JSON is "
-             "still written. Use this in batch runs so a degraded trace is "
-             "not mistaken for a complete one.",
+        help="Exit non-zero if any mechanism failed to resolve or the dump "
+             "is unusable: cut mid-record, no value changes, no rising "
+             "edge, no commit, or a final timestamp that disagrees with the "
+             "cycle count. The JSON is still written. A cut landing exactly "
+             "on a line boundary leaves no mark and can still pass.",
     )
     args = parser.parse_args()
     _SHOW_STAGES = args.stages
