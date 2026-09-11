@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """Remove everything the CVA6 Verilator run scripts generate: the dated
-verif/sim/out_<date>/ folders, work-ver/, the batch folder and each runner's
-results/. Only the fixed names below are removed, and only where a
-Verilator runner sits beside them.
+verif/sim/out_<date>/ folders, work-ver/ and all of results/. Only the fixed
+names below are removed, results/ at each search root and __pycache__ where a
+Verilator runner sits beside it. Launch it from the CVA6 root:
 
-  python3 clean_CVA6_runs.py               # list, then ask
-  python3 clean_CVA6_runs.py -y            # no confirmation
-  python3 clean_CVA6_runs.py --dry-run     # list only
-  python3 clean_CVA6_runs.py --keep-build  # spare work-ver
-  python3 clean_CVA6_runs.py my_results    # plus a custom --out-dir sweep
+  python3 scripts/clean_CVA6_runs.py              # list, then ask
+  python3 scripts/clean_CVA6_runs.py -y           # no confirmation
+  python3 scripts/clean_CVA6_runs.py --dry-run    # list only
+  python3 scripts/clean_CVA6_runs.py --keep-build # spare work-ver
+  python3 scripts/clean_CVA6_runs.py my_results   # plus a custom --out-dir
 """
 import os
 import sys
