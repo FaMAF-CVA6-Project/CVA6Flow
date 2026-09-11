@@ -20,16 +20,16 @@ Build CVA6 with Verilator and run a test with VCD tracing enabled. [`scripts/run
 python3 scripts/run_CVA6.py daxpy.S
 ```
 
-Then turn the VCD into a trace. Both files land in `run_results/` next to the driver, so that is the shortest path to them:
+Then turn the VCD into a trace. Both files land in `results/run/` next to the driver, so that is the shortest path to them:
 
 ```bash
-python3 CVA6Flow_tracer.py run_results/daxpy.vcd -o trace.json
+python3 CVA6Flow_tracer.py results/run/daxpy.vcd -o trace.json
 ```
 
 The **objdump listing is not optional in practice**. It is where the instruction text comes from, and without it every record's `disasm` is null: the instruction column is blank, the Main Code button cannot find its region, and compressed instructions are not recognised. The tracer picks up `<name>.list` beside the VCD on its own, which is exactly how `scripts/run_CVA6.py` leaves them, and warns when it finds neither. `--disasm-list` names one anywhere else:
 
 ```bash
-python3 CVA6Flow_tracer.py daxpy.vcd --disasm-list run_results/daxpy.list
+python3 CVA6Flow_tracer.py daxpy.vcd --disasm-list results/run/daxpy.list
 ```
 
 Then open `CVA6Flow.html` in any browser and drag `trace.json` onto the window. There is nothing to install and nothing to serve. The viewer is a single self-contained HTML file with no dependencies. A JSON made without a listing is refused at load with that explanation, rather than rendering blank.
@@ -94,10 +94,10 @@ What it does, in order:
 
 Outputs land under `verif/sim/out_<date>/`: the VCD and the log in `veri-testharness_sim/`, and the binary, the `.list` and the `_report.txt` in `directed_tests/`.
 
-The three files worth keeping are also copied into a `run_results/` folder next to the script, as `<test>.vcd`, `<test>.list` and `<test>_report.txt`, so a run leaves everything the viewer needs in one place:
+The three files worth keeping are also copied into a `results/run/` folder next to the script, as `<test>.vcd`, `<test>.list` and `<test>_report.txt`, so a run leaves everything the viewer needs in one place:
 
 ```bash
-python3 CVA6Flow_tracer.py run_results/daxpy.vcd -o daxpy.json --disasm-list run_results/daxpy.list
+python3 CVA6Flow_tracer.py results/run/daxpy.vcd -o daxpy.json --disasm-list results/run/daxpy.list
 ```
 
 The `_report.txt` is the readable record of what was measured, disassembly and table together. With `--no-vcd` there is no trace, so only two files are copied.
@@ -146,16 +146,16 @@ python3 scripts/run_CVA6Flow_sweep.py [--configs 1,4-6] [--tests-dir DIR] [--no-
 | `--tests-dir`                       | Where the workloads live. Defaults to `/CVA6/benchmarks`, the folder the Docker image creates                   |
 | `--tests`                           | Comma-separated workloads to run for every configuration, instead of the ones the table names                   |
 | `--target`                          | Architecture target. Defaults to `cv64a6_imafdc_sv39_hpdcache_wb`                                               |
-| `--out-dir`                         | Where results are collected. Defaults to `CVA6Flow_sweep_results/`                                              |
+| `--out-dir`                         | Where results are collected. Defaults to `results/sweep_CVA6Flow/`                                              |
 | `--config-pkg`, `--live-config-pkg` | The swept package, and the one the build reads. The defaults are this file and `/CVA6/core/include/<same name>` |
 | `--no-vcd`                          | Metrics only, no traces                                                                                         |
 | `--list`                            | Print the plan and exit, touching nothing                                                                       |
 
 For each configuration it installs the package with `CVA6_CONFIG_SEL` set to that variant, then runs that configuration's workloads through [`scripts/run_CVA6.py`](#running-a-test-run_cva6py). A configuration whose workload is `all` runs every workload the table names.
 
-Results are moved out of `run_results/` into the out directory as `<test>.config<N>.vcd`, `<test>.config<N>.list` and `<test>_report.config<N>.txt`, so one configuration never overwrites another and the VCD and its listing stay paired for the tracer. Every metrics table is also gathered into one file in that folder.
+Results are moved out of `results/run/` into the out directory as `<test>.config<N>.vcd`, `<test>.config<N>.list` and `<test>_report.config<N>.txt`, so one configuration never overwrites another and the VCD and its listing stay paired for the tracer. Every metrics table is also gathered into one file in that folder.
 
-Once a run is collected its leftovers are deleted: `run_results/`, and that run's VCD, log, binary, listing and `_report.txt` in `verif/sim/out_<date>/`. A run that **fails** is the exception: nothing of its is collected or deleted, so its output survives the rest of the sweep and is still under `out_<date>/` at the end. If nothing failed, that tree goes too.
+Once a run is collected its leftovers are deleted: `results/run/`, and that run's VCD, log, binary, listing and `_report.txt` in `verif/sim/out_<date>/`. A run that **fails** is the exception: nothing of its is collected or deleted, so its output survives the rest of the sweep and is still under `out_<date>/` at the end. If nothing failed, that tree goes too.
 
 Two things worth knowing:
 
@@ -211,10 +211,10 @@ CVA6Flow has been tested against the CVA6 build in this organisation, [FaMAF-CVA
 If you would rather not build the core and its toolchain yourself, a ready-to-use Docker image is available with CVA6 and the simulation toolchain already set up, so you can generate VCDs straight away:
 
 ```bash
-docker pull famafcva6/cva6
+docker pull famaf_cva6_project/cva6
 ```
 
-Image: https://hub.docker.com/r/famafcva6/cva6
+Image: https://hub.docker.com/r/famaf_cva6_project/cva6
 
 ## Requirements
 
@@ -238,7 +238,7 @@ CVA6 itself is developed by the [OpenHW Group](https://github.com/openhwgroup/cv
 python3 scripts/clean_CVA6Flow_repo.py [-y] [--dry-run] [-v]
 ```
 
-`scripts/clean_CVA6_runs.py` is the other one, and clears a CVA6 checkout rather than this repository: the dated `verif/sim/out_<date>/` folders, `work-ver/`, the batch folder and the `run_results/` beside each runner. The names say which tree each one touches.
+`scripts/clean_CVA6_runs.py` is the other one, and clears a CVA6 checkout rather than this repository: the dated `verif/sim/out_<date>/` folders, `work-ver/`, the batch folder and the `results/run/` beside each runner. The names say which tree each one touches.
 
 It lists what it found with its size and asks before deleting. The viewer JSONs are left alone, and `docs/` is kept whole.
 
