@@ -514,7 +514,8 @@ def check_script_names():
             continue
         for match in SCRIPT_PATH.finditer(text):
             named = match.group(1)
-            if os.path.isfile(os.path.join(REPO, named)):
+            if (os.path.isfile(os.path.join(REPO, named))
+                    or os.path.basename(named) in EXTERNAL_SCRIPTS):
                 continue
             line = text[:match.start()].count("\n") + 1
             bad.append(f"{rel}:{line}: {named} is not a path here")
@@ -584,10 +585,13 @@ def check_formatter():
     done = subprocess.run([sys.executable, script, "--check"],
                           capture_output=True, text=True, cwd=REPO)
     out = done.stdout
-    if "autopep8 is not installed" in out:
-        return ["SKIP autopep8 is not installed (pip install autopep8)"]
+    # The Python half could not run meaningfully, because autopep8 is missing
+    # or is not the toolchain the tree was formatted with. Either is a SKIP,
+    # never a pass and never a list of files that are in fact formatted.
+    python_skip = next((line[len("[SKIP] "):] for line in out.splitlines()
+                        if line.startswith("[SKIP] autopep8")), None)
     if done.returncode == 0:
-        return []
+        return [f"SKIP {python_skip}"] if python_skip else []
     files = [ln.strip() for ln in out.splitlines() if ln.startswith("  ")]
     return [f"{f}: not what the formatter produces" for f in files] or [
         "some files are not what the formatter produces"]
