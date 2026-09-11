@@ -109,6 +109,28 @@ def run_benchmarks(files, check, verbose):
     return changed, None
 
 
+# The toolchain this tree was formatted with. autopep8's output moves with its
+# own version, pycodestyle's and Python's, so a check on another toolchain
+# would report drift that is not there, and is skipped there instead.
+FORMATTED_WITH = {"autopep8": "2.3.2", "pycodestyle": "2.14.0",
+                  "python": "3.10"}
+
+
+def toolchain_drift():
+    """How this machine differs from FORMATTED_WITH, as 'name have, not want'
+    pieces, or an empty list when it formats the way the tree was formatted."""
+    have = {"python": "%d.%d" % sys.version_info[:2]}
+    done = subprocess.run([sys.executable, "-m", "autopep8", "--version"],
+                          capture_output=True, text=True)
+    found = re.search(r"autopep8 (\S+) \(pycodestyle: ([^)\s]+)\)",
+                      done.stdout)
+    if found:
+        have["autopep8"], have["pycodestyle"] = found.groups()
+    return [f"{name} {have.get(name, 'missing')}, not {want}"
+            for name, want in FORMATTED_WITH.items()
+            if have.get(name) != want]
+
+
 def autopep8_cmd(check):
     cmd = [sys.executable, "-m", "autopep8", "--max-line-length", str(PY_COLS)]
     return cmd + (["--diff"] if check else ["--in-place"])
@@ -143,6 +165,17 @@ def run_python(files, check, verbose):
         return [], None
     if not have_autopep8():
         return [], "autopep8 is not installed (pip install autopep8)"
+    drift = toolchain_drift()
+    if drift and check:
+        return [], ("autopep8 check skipped, the toolchain differs from the "
+                    "one this tree was formatted with (" + ", ".join(drift)
+                    + "). pip install autopep8=="
+                    + FORMATTED_WITH["autopep8"] + " pycodestyle=="
+                    + FORMATTED_WITH["pycodestyle"] + " on Python "
+                    + FORMATTED_WITH["python"])
+    if drift:
+        print("[WARN] Formatting with " + ", ".join(drift) + ", so files "
+              "may change only because the toolchain does.")
     changed = []
     for rel in files:
         path = os.path.join(REPO, rel)
