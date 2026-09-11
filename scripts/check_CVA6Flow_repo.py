@@ -57,8 +57,9 @@ EXTERNAL_SCRIPTS = {
     "check_CVA6_repo.py",
     "create_all_CVA6_repo_jsons.py",
     "run_config_search_sweep.py",
+    "check_patch_parity.py",
     "gem5_config_CVA6.py",
-    "gem5_config_CVA6_Patch.py",
+    "gem5_config_CVA6_patch.py",
 }
 
 # The style is 79 columns. The budget is a ratchet: it may fall but never
@@ -69,7 +70,6 @@ WIDTH_BUDGET = 71
 # Comment prose. A semicolon becomes a comma or a period, the tree is ASCII,
 # and a comment on a line of code runs to three lines at most.
 MAX_COMMENT_LINES = 3
-FILE_HEADER_LINES = 8
 
 # The tracers and the viewer pages are design notes throughout, citing RTL
 # lines and measured counts, so cutting those to three lines would drop the
@@ -89,6 +89,9 @@ NON_ASCII = re.compile("[^\x00-\x7f\u00c0-\u024f\u00b5\u25aa\u2550]")
 # A row of a table, and a line of code quoted inside a comment. Both keep
 # their own punctuation, so neither is held to the prose rules.
 TABULAR = re.compile(r"\S {2,}\S")
+# A section heading, which introduces what follows rather than explaining a
+# line of code, so it neither joins a block nor counts toward its length.
+BANNER = re.compile(r"^[-=_*]{3,}")
 CODEISH = re.compile(r"//|\bfor\b.*;|^\s*[\"\'].*[\"\']\s*,?$"
                      r"|=\s*\w+\s*;|\w+\(.*\)\s*;|^\s*[-|+]{3,}")
 
@@ -286,7 +289,9 @@ def comment_blocks(rows):
     ends the block: three lines is the limit per comment, not per run."""
     blocks, current = [], []
     for n, body, kind in rows:
-        keep = kind == "own" and comment_text(body).strip("-=*#_ ")
+        text = comment_text(body)
+        keep = (kind == "own" and text.strip("-=*#_ ")
+                and not BANNER.match(text))
         if keep and current and n == current[-1][0] + 1:
             current.append((n, body))
             continue
@@ -411,8 +416,15 @@ def check_comments():
         if not (rel.endswith(COMMENTED)
                 or os.path.basename(rel).startswith("Dockerfile")):
             continue
-        rows = comment_rows(rel, read(rel))
+        text = read(rel)
+        rows = comment_rows(rel, text)
         licensed = licence_lines(rows)
+        # Where the file's own content starts. Everything above it introduces
+        # the file rather than a line of code, however long the banner runs,
+        # which a fixed line count got wrong for the Dockerfiles.
+        commented = {n for n, _, _ in rows}
+        content = next((n for n, line in enumerate(text.split("\n"), 1)
+                        if line.strip() and n not in commented), 1)
         for n, body, _ in rows:
             if body != body.rstrip():
                 bad.append(f"{rel}:{n}: trailing whitespace in a comment")
@@ -425,7 +437,7 @@ def check_comments():
                 bad.append(f"{rel}:{n}: semicolon in prose, {text[:44]}")
         for block in comment_blocks(rows):
             start, lines = block[0][0], [body for _, body in block]
-            if len(lines) <= MAX_COMMENT_LINES or start <= FILE_HEADER_LINES:
+            if len(lines) <= MAX_COMMENT_LINES or start < content:
                 continue
             if sum(bool(TABULAR.search(b)) for b in lines) * 2 >= len(lines):
                 continue
@@ -472,21 +484,40 @@ def check_formatting():
     return bad
 
 
+# A quoted path to a script, relative to the repository. An absolute one is a
+# destination inside a container, not a file here.
+SCRIPT_PATH = re.compile(
+    r'"((?!/)[A-Za-z0-9_.\-]+(?:/[A-Za-z0-9_.\-]+)+\.py)"')
+
+
 def check_script_names():
-    """Every script named in our docs, Dockerfiles and scripts exists."""
-    import re
+    """Every script named in our docs, Dockerfiles and scripts exists, and
+    every path to one resolves.
+
+    A name that moved is caught by the first half. The second catches a path
+    that went stale when a script moved folder, which a name alone cannot:
+    the cleaners moving into scripts/ left one behind for a while."""
     known = {os.path.basename(p) for p in owned(".py")}
     bad = []
     for rel in owned():
         if not rel.endswith((".md", ".py", "Dockerfile")):
             continue
+        text = read(rel)
         for match in re.finditer(r"(?<![\w>])([A-Za-z][A-Za-z0-9_]*\.py)\b",
-                                 read(rel)):
+                                 text):
             name = match.group(1)
             if name in known or name in EXTERNAL_SCRIPTS:
                 continue
-            line = read(rel)[:match.start()].count("\n") + 1
+            line = text[:match.start()].count("\n") + 1
             bad.append(f"{rel}:{line}: {name} does not exist here")
+        if not rel.endswith(".py"):
+            continue
+        for match in SCRIPT_PATH.finditer(text):
+            named = match.group(1)
+            if os.path.isfile(os.path.join(REPO, named)):
+                continue
+            line = text[:match.start()].count("\n") + 1
+            bad.append(f"{rel}:{line}: {named} is not a path here")
     return sorted(set(bad))
 
 
