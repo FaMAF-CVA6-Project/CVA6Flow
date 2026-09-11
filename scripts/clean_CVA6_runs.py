@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Remove everything the CVA6 Verilator run scripts generate: the dated
 verif/sim/out_<date>/ folders, work-ver/, the batch folder and each runner's
-run_results/. Only the fixed names below are removed, and only where a
+results/. Only the fixed names below are removed, and only where a
 Verilator runner sits beside them.
 
   python3 clean_CVA6_runs.py               # list, then ask
@@ -16,12 +16,15 @@ import glob
 import shutil
 import argparse
 
-# Folders the flow creates at the top of the checkout, or of the directory a
-# batch was launched from. Matched only at the top of each search root.
+# Every folder a run writes, under results/ at the top of each search root.
+# One .dockerignore line covers the lot, and the pull menu still offers them
+# one at a time. work-ver is the upstream Verilator tree and stays put.
 ROOT_DIRS = {
-    "work-ver":               "the Verilator build, remade by the next run",
-    "batch_results":          "run_all_CVA6_benchmarks.py",
-    "CVA6Flow_sweep_results": "run_CVA6Flow_sweep.py",
+    "work-ver":                "the Verilator build, remade by the next run",
+    "results/run":             "run_CVA6.py: the files worth keeping",
+    "results/batch":           "run_all_CVA6_benchmarks.py",
+    "results/sweep_CVA6Flow":  "run_CVA6Flow_sweep.py",
+    "results/verif":           "run_CVA6.py: simulation output that survived",
 }
 
 # Date-stamped simulation output: logs, disassembly, binaries and VCDs.
@@ -33,7 +36,6 @@ OUT_REASON = "run_CVA6.py: simulation output, logs and binaries"
 # Folders that appear beside a runner script. Matched at any depth, but only
 # when one of the Verilator runners sits in the same folder.
 SIBLING_DIRS = {
-    "run_results": "run_CVA6.py: the files worth keeping",
     "__pycache__": "left behind by python",
 }
 
@@ -68,7 +70,7 @@ CVA6_ROOT = "/CVA6" if os.path.isdir("/CVA6") else REPO_ROOT
 
 def search_roots():
     """The CVA6 root, this repository and the working directory. The
-    simulation writes under the CVA6 root, run_results/ lands next to the
+    simulation writes under the CVA6 root, results/ lands next to the
     runner, and a batch collects into the directory it was launched from."""
     roots = []
     seen = set()
