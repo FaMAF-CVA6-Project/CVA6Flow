@@ -468,6 +468,26 @@ def detect_lang(src_file, override):
     return "c"
 
 
+# The toolchain prefix depends on the checkout: the CVA6 flow's own builder
+# makes riscv-none-elf, apt's bare-metal package riscv64-unknown-elf. Both
+# read the same ELF, so the first one present wins.
+OBJDUMPS = ("riscv-none-elf-objdump", "riscv64-unknown-elf-objdump")
+
+
+def find_objdump():
+    """The disassembler this checkout has, on PATH or under $RISCV."""
+    riscv = os.environ.get("RISCV")
+    for name in OBJDUMPS:
+        found = shutil.which(name)
+        if found:
+            return found
+        if riscv:
+            candidate = os.path.join(riscv, "bin", name)
+            if os.path.isfile(candidate):
+                return candidate
+    return None
+
+
 def generate_and_show_codelist(binary_path, codelist):
     """
     Generate the .list file with objdump and print the filtered CODE section.
@@ -480,7 +500,12 @@ def generate_and_show_codelist(binary_path, codelist):
     list_path = os.path.splitext(binary_path)[0] + ".list"
     report_path = os.path.splitext(binary_path)[0] + "_report.txt"
 
-    cmd = f"riscv64-unknown-elf-objdump -d -S -l {binary_path}"
+    objdump = find_objdump()
+    if objdump is None:
+        print("[ERROR] No RISC-V objdump found. Tried: "
+              + ", ".join(OBJDUMPS))
+        return None
+    cmd = f"{objdump} -d -S -l {binary_path}"
 
     print(f"\n[INFO] Generating disassembled code in: {list_path}")
     try:
@@ -490,7 +515,7 @@ def generate_and_show_codelist(binary_path, codelist):
         print(f"[ERROR] {e}")
         return None
     except FileNotFoundError:
-        print("[ERROR] 'riscv64-unknown-elf-objdump' not found")
+        print(f"[ERROR] '{objdump}' not found")
         return None
 
     # Filtered view, written to the report rather than echoed.
