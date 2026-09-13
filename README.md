@@ -20,7 +20,7 @@ Build CVA6 with Verilator and run a test with VCD tracing enabled. [`scripts/run
 python3 scripts/run_CVA6.py daxpy.S
 ```
 
-Then turn the VCD into a trace. Both files land in `results/run/` next to the driver, so that is the shortest path to them:
+Then turn the VCD into a viewer JSON. Both files land in `results/run/` next to the driver, so that is the shortest path to them:
 
 ```bash
 python3 CVA6Flow_tracer.py results/run/daxpy.vcd -o trace.json
@@ -34,9 +34,9 @@ python3 CVA6Flow_tracer.py daxpy.vcd --disasm-list results/run/daxpy.list
 
 Then open `CVA6Flow.html` in any browser and drag `trace.json` onto the window. There is nothing to install and nothing to serve. The viewer is a single self-contained HTML file with no dependencies. A JSON made without a listing is refused at load with that explanation, rather than rendering blank.
 
-### The sample trace
+### The samples
 
-The landing page offers a sample, and the button appears only when the sample is actually there, so it is never a dead end. It is not committed by default, because of its size. `scripts/make_CVA6Flow_sample.py` trims a full tracer JSON down to one:
+The landing page offers the samples in `tests/`. Served, it reads the folder listing and offers **every** `.js` sample in there, by name, so a folder of them is a menu rather than one fixed file. Opened from disk or from GitHub Pages, where there is no listing to read, it falls back to the shipped `tests/daxpy.config1.js`. Either way the button appears only when a sample is actually there, so it is never a dead end. It is not committed by default, because of its size. `scripts/make_CVA6Flow_sample.py` trims a full tracer JSON down to one:
 
 ```bash
 python3 scripts/make_CVA6Flow_sample.py daxpy.json                 # -> tests/daxpy.config1.{json,js}
@@ -44,7 +44,7 @@ python3 scripts/make_CVA6Flow_sample.py daxpy.json -n 1500         # fewer instr
 python3 scripts/make_CVA6Flow_sample.py daxpy.json --from 4000     # start past the set-up
 ```
 
-The VCD is streamed rather than loaded, because these files grow quickly with run length and trace depth, well past what fits comfortably in memory.
+The VCD is streamed rather than loaded, because these files grow quickly with run length and dump depth, well past what fits comfortably in memory.
 
 ## Tracer options
 
@@ -65,7 +65,7 @@ python3 CVA6Flow_tracer.py <vcd_path> [options]
 | `--config-name`      | The CVA6 configuration the VCD was captured on, recorded in `metadata.config_name` and shown in the viewer's Simulation panel. A VCD does not name its own build, so this is a label, not a measurement. Defaults to `cv64a6_imafdc_sv39_hpdcache_wb`, the configuration this tracer's constants are written for. A sweep should pass the build it is running, or every JSON it writes claims the same name                                                                                                                               |
 | `--quiet`            | Suppress the streaming progress indicator                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 | `--strict`           | Exit non-zero (3) if any mechanism failed to resolve, or if the dump itself is unusable: cut mid-record, no value changes, no rising clock edge, no commit, or a final timestamp that disagrees with the cycle count. The JSON is still written, and `metadata.degraded` names what is missing. Use it in batch runs so a truncated VCD is not mistaken for a complete one. A cut that lands exactly on a line boundary leaves no mark in the file and can still pass, so compare the record count against a complete run when it matters |
-| `--emit-diagnostics` | Include the per-record diagnostic fields the viewer does not read: `lsu_state_history`, `dc_events` and `fetch_port`. Off by default, which is about 15 percent smaller on a large trace                                                                                                                                                                                                                                                                                                                                                  |
+| `--emit-diagnostics` | Include the per-record diagnostic fields the viewer does not read: `lsu_state_history`, `dc_events` and `fetch_port`. Off by default, which is about 15 percent smaller on a large VCD                                                                                                                                                                                                                                                                                                                                                    |
 
 ## Running a test: `scripts/run_CVA6.py`
 
@@ -80,7 +80,7 @@ python3 scripts/run_CVA6.py [target] <test> [--lang c|asm] [--no-vcd]
 | `[target]`     | CVA6 configuration to build. Optional, and defaults to `cv64a6_imafdc_sv39_hpdcache_wb`, the one this fork targets                                                                                                                                                                                       |
 | `<test>`       | The test to run: C (`.c`) or assembly (`.S`, `.s`, `.asm`). The type is detected from the extension                                                                                                                                                                                                      |
 | `--lang`       | Force the type instead of detecting it. It selects both the overhead profile and the disassembly markers                                                                                                                                                                                                 |
-| `--no-vcd`     | Skip the trace and report metrics only. Use it when you only want the numbers, since the VCD is the expensive part                                                                                                                                                                                       |
+| `--no-vcd`     | Skip the VCD and report metrics only. Use it when you only want the numbers, since the VCD is the expensive part                                                                                                                                                                                         |
 | `--keep-build` | Reuse the Verilated model in `work-ver` instead of rebuilding it. The model does not depend on the test, so this is the difference between a rebuild and a run when sweeping a set of tests. Only reuse across runs with the same target and the same trace setting, since both are baked into the build |
 | `--cva6-root`  | The CVA6 checkout to run, the one holding `verif/sim`. Defaults to `/CVA6` when it exists, otherwise the repository this script sits in                                                                                                                                                                  |
 | `--suite`      | Which overhead table to subtract, `config` or `viewer`. Defaults to the set the test came from                                                                                                                                                                                                           |
@@ -124,7 +124,7 @@ CVA6Flow targets the canonical `cv64a6_imafdc_sv39_hpdcache_wb` configuration, a
 
 ### Running the sweep: `scripts/run_CVA6Flow_sweep.py`
 
-[configs/cv64a6_imafdc_sv39_hpdcache_wb_config_pkg.sv](configs/cv64a6_imafdc_sv39_hpdcache_wb_config_pkg.sv) is the config package the sweep was built with. It carries the seventeen configurations as a table, the baseline plus one cut per swept knob, each with the workload that exercises it, and a single `CVA6_CONFIG_SEL` that picks the active one:
+[configs/cv64a6_imafdc_sv39_hpdcache_wb_config_CVA6Flow_pkg.sv](configs/cv64a6_imafdc_sv39_hpdcache_wb_config_CVA6Flow_pkg.sv) is the config package the sweep was built with, a modified copy of the production one kept beside it as `configs/cv64a6_imafdc_sv39_hpdcache_wb_config_pkg.sv`. It carries the seventeen configurations as a table, the baseline plus one cut per swept knob, each with the workload that exercises it, and a single `CVA6_CONFIG_SEL` that picks the active one:
 
 ```systemverilog
 localparam int CFG_BASELINE = 1;  // reference (sb8, D$32K/8w, BHT128, ...) : all (reference)
@@ -134,7 +134,7 @@ localparam int CFG_SB_2     = 9;  // NrScoreboardEntries 8 -> 2             : da
 localparam int CVA6_CONFIG_SEL = CFG_BASELINE;
 ```
 
-`scripts/run_CVA6Flow_sweep.py` replays all of it, which is how the traces in [tests/](tests/) were produced:
+`scripts/run_CVA6Flow_sweep.py` replays all of it, which is how the JSONs in [tests/](tests/) were produced:
 
 ```bash
 python3 scripts/run_CVA6Flow_sweep.py [--configs 1,4-6] [--tests-dir DIR] [--no-vcd] [--list]
@@ -148,7 +148,7 @@ python3 scripts/run_CVA6Flow_sweep.py [--configs 1,4-6] [--tests-dir DIR] [--no-
 | `--target`                          | Architecture target. Defaults to `cv64a6_imafdc_sv39_hpdcache_wb`                                               |
 | `--out-dir`                         | Where results are collected. Defaults to `results/sweep_CVA6Flow/`                                              |
 | `--config-pkg`, `--live-config-pkg` | The swept package, and the one the build reads. The defaults are this file and `/CVA6/core/include/<same name>` |
-| `--no-vcd`                          | Metrics only, no traces                                                                                         |
+| `--no-vcd`                          | Metrics only, no VCDs                                                                                           |
 | `--list`                            | Print the plan and exit, touching nothing                                                                       |
 
 For each configuration it installs the package with `CVA6_CONFIG_SEL` set to that variant, then runs that configuration's workloads through [`scripts/run_CVA6.py`](#running-a-test-run_cva6py). A configuration whose workload is `all` runs every workload the table names.
@@ -184,7 +184,7 @@ Within each rising clock edge the order of processing is deliberate:
 4. Decode and issue, as one combined handshake claiming slots
 5. Fetch
 
-Commit runs first on purpose: a slot freed this cycle can be reused the same cycle, and getting the order wrong yields a trace that looks plausible but is wrong. Decode and issue are one step rather than two because the core performs them in one handshake, as above.
+Commit runs first on purpose: a slot freed this cycle can be reused the same cycle, and getting the order wrong yields a JSON that looks plausible but is wrong. Decode and issue are one step rather than two because the core performs them in one handshake, as above.
 
 The canonical configuration is `cv64a6_imafdc_sv39_hpdcache_wb`. Scoreboard depth is probed from the VCD rather than assumed, so parameter sweeps are handled without editing the tracer.
 
@@ -211,10 +211,21 @@ CVA6Flow has been tested against the CVA6 build in this organisation, [FaMAF-CVA
 If you would rather not build the core and its toolchain yourself, a ready-to-use Docker image is available with CVA6 and the simulation toolchain already set up, so you can generate VCDs straight away:
 
 ```bash
-docker pull famaf_cva6_project/cva6
+docker pull manuel313/famaf_cva6
 ```
 
-Image: https://hub.docker.com/r/famaf_cva6_project/cva6
+Image: https://hub.docker.com/r/manuel313/famaf_cva6
+
+## Serving it from a container: `scripts/serve_CVA6Flow.py`
+
+A container has no browser. This serves the page and its JSONs over HTTP, so the VCD and the JSON stay inside while the page opens on the host:
+
+```bash
+python3 scripts/serve_CVA6Flow.py              # port 8000, from the container root
+python3 scripts/serve_CVA6Flow.py --port 9000
+```
+
+The port has to be published when the container is created. The project's images take 8001 on the host for this side, so the page is at `http://localhost:8001/CVA6Flow/CVA6Flow.html`. The two viewers take different host ports, so both can be served at once.
 
 ## Requirements
 
