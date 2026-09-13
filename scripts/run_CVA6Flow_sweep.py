@@ -22,7 +22,8 @@ LIVE_CONFIG_PKG = os.path.join(
     CVA6_ROOT, "core/include/cv64a6_imafdc_sv39_hpdcache_wb_config_pkg.sv")
 
 # The swept package, carrying the table and the CVA6_CONFIG_SEL selector.
-SOURCE_CONFIG_PKG = "cv64a6_imafdc_sv39_hpdcache_wb_config_pkg.sv"
+# The unmodified production package sits beside it under the live name.
+SOURCE_CONFIG_PKG = "cv64a6_imafdc_sv39_hpdcache_wb_config_CVA6Flow_pkg.sv"
 
 DEFAULT_TARGET = "cv64a6_imafdc_sv39_hpdcache_wb"
 DEFAULT_TESTS_DIR = os.path.join(CVA6_ROOT, "benchmarks/viewer")
@@ -503,7 +504,7 @@ def main():
                         help="Forwarded to run_CVA6.py: the CVA6 checkout to "
                              "run")
     parser.add_argument("--no-vcd", action="store_true",
-                        help="Forwarded to run_CVA6.py: no .vcd trace, "
+                        help="Forwarded to run_CVA6.py: no VCD, "
                              "metrics only")
     parser.add_argument("--list", action="store_true",
                         help="Print the plan and exit, touching nothing")
