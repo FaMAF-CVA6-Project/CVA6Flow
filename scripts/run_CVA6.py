@@ -25,7 +25,7 @@ DEFAULT_TARGET = "cv64a6_imafdc_sv39_hpdcache_wb"
 # ==============================================================================
 # Scaffolding around the measured region, subtracted to get NET. Indexed by
 # suite and language. 'config' is the set in benchmarks/CVA6/, 'viewer' the
-# teaching set: different templates, so the two are not interchangeable.
+# viewer's own set: different templates, so they are not interchangeable.
 OVERHEAD_SUITES = {
     "config": {
         "c": {
@@ -376,6 +376,35 @@ def read_cache_geometry(cva6_root, target):
                           rf"([^;]+);", text)
         return sv_int(match.group(1)) if match else None
 
+    def selected_config():
+        """What a swept package selected, or None when it sweeps nothing."""
+        match = re.search(r"localparam\s+int\s+CVA6_CONFIG_SEL\s*=\s*(\w+)",
+                          text)
+        return match.group(1) if match else None
+
+    chosen = selected_config()
+
+    def swept(name):
+        """The value a conditional localparam takes under the selection. A
+        swept package writes the parameter as a chain of 'SEL == CFG_X ? value'
+        terms ending in the unswept default, so the first term naming the
+        selection is the one the build used."""
+        match = re.search(rf"localparam\b[^=;\n]*?\b{re.escape(name)}\s*=\s*"
+                          rf"([^;]+);", text)
+        if not match or "?" not in match.group(1):
+            return None
+        body = match.group(1)
+        if chosen:
+            for condition, value in re.findall(r"\(([^?]*)\)\s*\?\s*(\w+)",
+                                               body):
+                if re.search(rf"\b{re.escape(chosen)}\b", condition):
+                    found = sv_int(value)
+                    return found if found is not None else localparam(value)
+        # Nothing selected it, so the chain falls through to its last term.
+        tail = body.rsplit(":", 1)[-1].strip()
+        found = sv_int(tail)
+        return found if found is not None else localparam(tail)
+
     def resolve(field):
         match = re.search(rf"\b{field}\s*:\s*([^,\n]+)", text)
         if match:
@@ -387,13 +416,17 @@ def read_cache_geometry(cva6_root, target):
             token = token.strip("(){}; \t")
             value = sv_int(token)
             if value is None:
+                value = swept(token)
+            if value is None:
                 value = localparam(token)
             if value is not None:
                 return value
         # Packages that declare the parameter but do not spell the struct
         # field out the same way are still readable through the localparam.
         for name in (f"CVA6Config{field}", field):
-            value = localparam(name)
+            value = swept(name)
+            if value is None:
+                value = localparam(name)
             if value is not None:
                 return value
         return None
@@ -644,7 +677,7 @@ def collect_results(test_name, vcd_path, list_path, report_path, base):
     for source, name in ((vcd_path, f"{test_name}.vcd"),
                          (list_path, f"{test_name}.list"),
                          (report_path, f"{test_name}_report.txt")):
-        # With --no-vcd there is no trace to copy, so a missing source here is
+        # With --no-vcd there is no VCD to copy, so a missing source here is
         # expected rather than a problem.
         if not source or not os.path.isfile(source):
             continue
@@ -678,7 +711,7 @@ def main():
                         default=None,
                         help="Which overhead table to subtract. 'config' is "
                              "the calibration benchmarks, 'viewer' the "
-                             "CVA6Flow teaching set. Defaults to "
+                             "CVA6Flow development set. Defaults to "
                              "the folder the test came from")
     parser.add_argument("--lang", choices=["c", "asm"], default="auto",
                         help="Force the input type and overhead/filter profile. "
@@ -689,13 +722,13 @@ def main():
                              "batch and the sweep pass this, since they "
                              "discard the tree themselves")
     parser.add_argument("--no-vcd", action="store_true",
-                        help="Prevent the .vcd trace file from being generated")
+                        help="Do not generate the VCD")
     parser.add_argument("--keep-build", action="store_true",
                         help="Reuse the existing work-ver Verilator build "
                              "instead of deleting it first. The model does "
                              "not depend on the test, so this saves a full "
                              "rebuild per run. Use it only when the target "
-                             "and the trace setting are unchanged since the "
+                             "and the VCD setting are unchanged since the "
                              "build was made.")
     args = parser.parse_args()
     # Resolved here rather than as an argparse default: it
@@ -781,7 +814,7 @@ def main():
         env["TRACE_FAST"] = ""
         env["TRACE_COMPACT"] = ""
         trace_injection = "export TRACE_FAST= && export TRACE_COMPACT= &&"
-        print("[INFO] Trace file (.vcd/.fst) generation disabled.")
+        print("[INFO] VCD (.vcd/.fst) generation disabled.")
     else:
         env["TRACE_FAST"] = "1"
         trace_injection = "export TRACE_FAST=1 &&"
