@@ -15,7 +15,7 @@ import time
 # ==============================================================================
 # CONFIGURATION
 # ==============================================================================
-# Default folder, as laid out inside the famaf_cva6_project/cva6 image.
+# Default folder, as laid out inside the manuel313/famaf_cva6 image.
 DEFAULT_TESTS_DIR = "/CVA6/benchmarks/config"
 
 # The driver this script delegates to, looked up next to it and then in cwd.
@@ -316,13 +316,13 @@ def main():
                         help="Forwarded to run_CVA6.py: the CVA6 checkout to "
                              "run")
     parser.add_argument("--no-vcd", action="store_true",
-                        help="Forwarded to run_CVA6.py: no .vcd trace, "
+                        help="Forwarded to run_CVA6.py: no VCD, "
                              "metrics only")
     parser.add_argument("--rebuild-each", action="store_true",
                         help="Rebuild the Verilated core before every test. "
                              "By default only the first test builds it and "
                              "the rest reuse it with --keep-build, which is "
-                             "safe here because the target and the trace "
+                             "safe here because the target and the VCD "
                              "setting are the same for the whole batch")
     parser.add_argument("-r", "--recursive", action="store_true",
                         help="Also pick up tests in subfolders")
@@ -410,7 +410,7 @@ def main():
         if args.no_vcd:
             cmd.append("--no-vcd")
         # The Verilated model does not depend on the test, and the target and
-        # the trace setting are fixed for the batch, so only the first test
+        # the VCD setting are fixed for the batch, so only the first test
         # pays for the build.
         if index > 1 and not args.rebuild_each:
             cmd.append("--keep-build")
