@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """Remove everything the CVA6 Verilator run scripts generate: the dated
 verif/sim/out_<date>/ folders, work-ver/ and all of results/. Only the fixed
-names below are removed, results/ at each search root and __pycache__ where a
-Verilator runner sits beside it. Launch it from the CVA6 root:
+names below are removed, results/ at each search root and every __pycache__
+under it. work-ver is asked about on its own, since a run that leaves the
+configuration alone can reuse it. Launch it from the CVA6 root:
 
   python3 scripts/clean_CVA6_runs.py              # list, then ask
   python3 scripts/clean_CVA6_runs.py -y           # no confirmation
   python3 scripts/clean_CVA6_runs.py --dry-run    # list only
-  python3 scripts/clean_CVA6_runs.py --keep-build # spare work-ver
+  python3 scripts/clean_CVA6_runs.py --keep-build # spare work-ver, no ask
   python3 scripts/clean_CVA6_runs.py my_results   # plus a custom --out-dir
 """
 import os
@@ -24,6 +25,7 @@ ROOT_DIRS = {
     "results/run":             "run_CVA6.py: the files worth keeping",
     "results/batch":           "run_all_CVA6_benchmarks.py",
     "results/sweep_CVA6Flow":  "run_CVA6Flow_sweep.py",
+    "results/sweep_CVA6_config": "run_CVA6_config_sweep.py",
     "results/verif":           "run_CVA6.py: simulation output that survived",
 }
 
@@ -33,14 +35,11 @@ ROOT_DIRS = {
 OUT_GLOB = "verif/sim/out_*"
 OUT_REASON = "run_CVA6.py: simulation output, logs and binaries"
 
-# Folders that appear beside a runner script. Matched at any depth, but only
-# when one of the Verilator runners sits in the same folder.
-SIBLING_DIRS = {
+# Deleted wherever they appear under a search root. A container collects
+# these under every folder it runs a script from, not only beside the runners.
+ANY_DEPTH_DIRS = {
     "__pycache__": "left behind by python",
 }
-
-RUNNERS = {"run_CVA6.py", "run_all_CVA6_benchmarks.py",
-           "run_CVA6Flow_sweep.py"}
 
 # Never descended into: heavy trees that cannot hold a generated folder.
 PRUNE_DIRS = {".git", "build", "vendor", "node_modules", "install"}
@@ -114,8 +113,7 @@ def find_targets(roots, keep_build, extra=()):
         for path in glob.glob(os.path.join(root, OUT_GLOB)):
             add(path, OUT_REASON)
 
-        for dirpath, dirnames, filenames in os.walk(root):
-            beside_runner = RUNNERS.intersection(filenames)
+        for dirpath, dirnames, _ in os.walk(root):
             keep = []
             for name in dirnames:
                 full = os.path.join(dirpath, name)
@@ -123,8 +121,8 @@ def find_targets(roots, keep_build, extra=()):
                     continue          # already taken, and taken whole
                 if name == "work-ver":
                     continue          # spared, and nothing inside is a target
-                if name in SIBLING_DIRS and beside_runner:
-                    add(full, SIBLING_DIRS[name])
+                if name in ANY_DEPTH_DIRS:
+                    add(full, ANY_DEPTH_DIRS[name])
                 elif name not in PRUNE_DIRS and not name.startswith("."):
                     keep.append(name)
             dirnames[:] = keep
@@ -151,6 +149,26 @@ def human(size):
         size /= 1024
 
 
+def ask_about_build(targets):
+    """work-ver takes about twelve minutes to remake, and a run that leaves
+    the configuration alone reuses it, so it is asked about on its own."""
+    build = [t for t in targets if os.path.basename(t[0]) == "work-ver"]
+    if not build:
+        return targets
+    size = human(sum(folder_size(path) for path, _ in build))
+    try:
+        reply = input(f"Delete work-ver as well ({size}), so the next run "
+                      f"recompiles the model? [y/N] ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print("\n[INFO] Cancelled")
+        sys.exit(0)
+    if reply in ("y", "yes"):
+        return targets
+    print("[INFO] Keeping work-ver, so run with run_CVA6.py --keep-build. "
+          "Pass --keep-build here to skip the question.")
+    return [t for t in targets if t not in build]
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Delete the folders the CVA6 Verilator run scripts "
@@ -165,7 +183,7 @@ def main():
     parser.add_argument("--keep-build", action="store_true",
                         help="Spare work-ver/, so the next run can reuse it "
                              "with run_CVA6.py --keep-build instead of "
-                             "recompiling the model")
+                             "recompiling the model, and do not ask about it")
     args = parser.parse_args()
 
     roots = search_roots()
@@ -180,6 +198,9 @@ def main():
     if not targets:
         print("[INFO] Nothing to clean")
         return
+
+    if not args.keep_build and not args.yes and not args.dry_run:
+        targets = ask_about_build(targets)
 
     print("\n" + "=" * 70)
     print("TO DELETE")
