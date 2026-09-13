@@ -1143,11 +1143,11 @@
   <div id="top">
     <h1>💻 CVA6Flow</h1>
     <span class="scope"
-      title="A pipeline trace viewer for CVA6 RISC-V cores. Designed to look and feel like MinorFlow so the two cores can be compared side by side. Drag a JSON trace in to start.">cv64a6
+      title="A pipeline viewer for CVA6 RISC-V cores. Designed to look and feel like MinorFlow so the two cores can be compared side by side. Drag a CVA6Flow JSON in to start.">cv64a6
       · RISC-V</span>
 
     <span class="vsep">│</span>
-    <button class="tbtn" onclick="openTraceFile()" title="Load a CVA6 trace JSON from disk.">📂
+    <button class="tbtn" onclick="openTraceFile()" title="Load a CVA6Flow JSON from disk.">📂
       Load JSON</button>
     <input type="file" id="fi" accept=".json,application/json">
     <span id="tracename" title=""></span>
@@ -1173,7 +1173,7 @@
     <input type="number" id="rto" class="rng" placeholder="to" min="1" onkeydown="onRangeKeyDown(event)"
       onpaste="onRangePaste(event)" oninput="onRangeInput(event)" onchange="onRangeChange('to')"
       title="Last fetched instruction to show.">
-    <button class="tbtn" onclick="resetRange()" title="Show every instruction in the trace.">Reset</button>
+    <button class="tbtn" onclick="resetRange()" title="Show every instruction in the run.">Reset</button>
     <button class="tbtn" onclick="showMainCode()"
       title="Jump to the main program: the region between the MAIN PROGRAM and END OF MAIN PROGRAM markers in the test template, found from the jump to the 4096-aligned region label and the counter reads that follow it.">Main
       Code</button>
@@ -1216,7 +1216,7 @@
 
     <span class="vsep">│</span>
     <button class="tbtn" onclick="toggleConfigPanel()"
-      title="Configuration from the build and the whole trace, and statistics for the current fetch range.">⚙ Extra
+      title="Configuration from the build and the whole run, and statistics for the current fetch range.">⚙ Extra
       Info</button>
   </div>
 
@@ -1252,16 +1252,21 @@
   <div id="dropzone" ondragover="event.preventDefault(); this.classList.add('ov')"
     ondragleave="this.classList.remove('ov')" ondrop="event.preventDefault(); this.classList.remove('ov')"
     onclick="openTraceFile()">
-    <h2>Drag a CVA6 trace here, or click to browse</h2>
+    <h2>Drag a CVA6Flow JSON here, or click to browse</h2>
     <p style="font-size:11px">Produced by the CVA6Flow tracer from a Verilator generated VCD.</p>
     <p style="font-size:10px;margin-top:4px;color:var(--text3)">Pass the objdump listing alongside the VCD, since
       that is what fills the instruction column. The tracer picks it up on its own when the two sit together.
     </p>
     <p style="font-size:10px;margin-top:4px">Keys: + / − to zoom · arrows to navigate · Home/End to jump · Esc to close
       panels</p>
-    <button id="load-sample-btn" onclick="event.stopPropagation(); loadSample()"
-      style="margin-top:18px;padding:8px 18px;font-size:12px;font-weight:600;cursor:pointer;color:#fff;background:#1f6feb;border:0;border-radius:6px">Load
-      sample trace (DAXPY)</button>
+    <div id="sample-picker"
+      style="margin-top:18px;display:flex;gap:8px;justify-content:center;align-items:center;flex-wrap:wrap">
+      <select id="sample-select" onclick="event.stopPropagation()"
+        style="display:none;padding:7px 10px;font-size:12px;border-radius:6px;border:1px solid var(--border);background:var(--bg2);color:var(--text)"></select>
+      <button id="load-sample-btn" onclick="event.stopPropagation(); loadSample()"
+        style="display:none;padding:8px 18px;font-size:12px;font-weight:600;cursor:pointer;color:#fff;background:#1f6feb;border:0;border-radius:6px">Load
+        sample</button>
+    </div>
   </div>
 
   <div id="view">
@@ -1346,7 +1351,7 @@
       <span
         title="Branches the predictor stayed silent on (predicted_cf == NoCF, default not-taken) but Execute resolved as taken. The front-end fell through and needed a redirect. Common on the first encounter of a control instruction.">Unpred:
         <span class="hi" id="s-unpred">-</span></span>
-      <span title="Wall-clock time for this window at the trace's clock frequency.">Time: <span class="hi"
+      <span title="Wall-clock time for this window at the run's clock frequency.">Time: <span class="hi"
           id="s-time">-</span></span>
       <span title="Instructions per cycle, committed divided by cycles.">IPC: <span class="hi"
           id="s-ipc">-</span></span>
@@ -1378,7 +1383,7 @@
   <div id="loading-overlay">
     <div id="loading-box">
       <div id="loading-spinner"></div>
-      <div id="loading-text">Loading trace…</div>
+      <div id="loading-text">Loading…</div>
       <div id="loading-sub"></div>
     </div>
   </div>
@@ -1873,7 +1878,7 @@
         }
         if (onProgress) onProgress(bytesDone);
       }
-      if (st !== S_DONE) throw new Error('the file ended before the JSON closed (truncated trace?)');
+      if (st !== S_DONE) throw new Error('the file ended before the JSON closed (truncated file?)');
       for (const k of Object.keys(streamed)) out[k] = streamed[k];
       out.instructions = kept;
       return { obj: out, total: ord };
@@ -1957,7 +1962,7 @@
         }
         const why = whyNotCVA6Trace(obj);
         if (why) {
-          showModalMessage('Not a CVA6 trace', `<p>${why}</p>`);
+          showModalMessage('Not a CVA6Flow JSON', `<p>${why}</p>`);
           return;
         }
         const hi = Math.min(toN, total);
@@ -2035,7 +2040,7 @@
       /* The count has always finished by the time this prompt is shown, so the
        * boxes are live immediately and carry the record maximum. */
       const totalNote = _bigTotal != null
-        ? ` The trace has ${_bigTotal.toLocaleString()} instruction records. At most ${MAX_STREAM_INSTRUCTIONS.toLocaleString()} can be loaded at once.`
+        ? ` The JSON has ${_bigTotal.toLocaleString()} instruction records. At most ${MAX_STREAM_INSTRUCTIONS.toLocaleString()} can be loaded at once.`
         : '';
       showModalMessage('Trace too large to load whole',
         opening +
@@ -2130,7 +2135,7 @@
             let json;
             try { json = JSON.parse(text); }
             catch (err) {
-              showModalMessage('Not a CVA6 trace',
+              showModalMessage('Not a CVA6Flow JSON',
                 `<p><b>"${escapeHtml(f.name)}"</b> isn't valid JSON.</p>` +
                 `<p>Parser said: <code>${escapeHtml(err.message)}</code>.</p>` +
                 `<p>The current view has not been changed.</p>`);
@@ -2138,12 +2143,12 @@
             }
             const why = whyNotCVA6Trace(json);
             if (why) {
-              showModalMessage('Not a CVA6 trace',
-                `<p><b>"${escapeHtml(f.name)}"</b> doesn't look like a CVA6 pipeline trace.</p>` +
+              showModalMessage('Not a CVA6Flow JSON',
+                `<p><b>"${escapeHtml(f.name)}"</b> doesn't look like a CVA6Flow JSON.</p>` +
                 `<p>${why}</p>` +
                 `<p>The current view has not been changed.</p>` +
                 `<p style="margin-top:14px;color:var(--text3);font-size:11px;line-height:1.5">` +
-                `A CVA6 trace is the JSON produced by the CVA6Flow tracer ` +
+                `A CVA6Flow JSON is what the CVA6Flow tracer produces from a VCD ` +
                 `running over a Verilator generated VCD. The file should look like:</p>` +
                 `<pre style="background:var(--bg);color:var(--text2);padding:8px 12px;border-radius:4px;` +
                 `font-size:11px;border:0.5px solid var(--border2);overflow-x:auto">` +
@@ -2162,7 +2167,7 @@
               json = null;   // release the parsed whole before streaming a slice
               hideLoading();
               promptRangedLoad(f, MAX_JSON_BYTES,
-                `This trace has ${_bigTotal.toLocaleString()} instructions, more than the ` +
+                `This JSON has ${_bigTotal.toLocaleString()} instructions, more than the ` +
                 `${MAX_STREAM_INSTRUCTIONS.toLocaleString()} the viewer renders at once. ` +
                 `Choose a range to load.`, '1', String(Math.min(MAX_STREAM_INSTRUCTIONS, _bigTotal)));
               return;
@@ -2181,62 +2186,103 @@
       };
       r.readAsText(f);
     }
-    /* Optional sample trace, not shipped in the repo. Generate it into tests/
-     * to enable the sample button. When served the JSON is fetched, under
-     * file:// a script tag sets window.__SAMPLE_TRACE__ instead. */
-    const SAMPLE_URL = 'tests/daxpy.config1.json';
-    const SAMPLE_URL_JS = 'tests/daxpy.config1.js';
+    /* Samples. Every tests/*.js sets window.__SAMPLE_TRACE__, so one load
+     * path works both served and under file://. The list is read from the
+     * folder listing where one is served, which is what the container's server
+     * gives, and falls back to the sample the repository ships where there is
+     * no listing, such as GitHub Pages or a page opened from disk. */
+    const SAMPLE_DIR = 'tests/';
+    const SAMPLE_FALLBACK = 'daxpy.config1.js';
+    let sampleFiles = [];
 
-    function probeSample() {
+    function sampleSelect() {
+      return document.getElementById('sample-select');
+    }
+
+    async function listSamples() {
+      try {
+        const resp = await fetch(SAMPLE_DIR);
+        if (!resp.ok) return [];
+        const doc = new DOMParser().parseFromString(await resp.text(), 'text/html');
+        const names = [...doc.querySelectorAll('a[href]')]
+          .map(a => decodeURIComponent(a.getAttribute('href') || ''))
+          .map(h => h.split('/').pop())
+          .filter(n => n.toLowerCase().endsWith('.js'));
+        return [...new Set(names)].sort();
+      } catch (e) { return []; }
+    }
+
+    async function probeSample() {
       const btn = document.getElementById('load-sample-btn');
       if (!btn) return;
-      btn.style.display = 'none';
-      const show = () => { btn.style.display = ''; };
-      const viaScript = () => {
-        const s = document.createElement('script');
-        s.src = SAMPLE_URL_JS;
-        s.onload = () => { if (window.__SAMPLE_TRACE__) show(); s.remove(); };
-        s.onerror = () => { s.remove(); };
-        document.head.appendChild(s);
+      sampleFiles = await listSamples();
+      if (sampleFiles.length) {
+        const sel = sampleSelect();
+        if (sel) {
+          sel.innerHTML = '';
+          for (const name of sampleFiles) {
+            const opt = document.createElement('option');
+            opt.value = name;
+            opt.textContent = name.replace(/\.js$/, '');
+            sel.appendChild(opt);
+          }
+          sel.style.display = sampleFiles.length > 1 ? '' : 'none';
+        }
+        btn.style.display = '';
+        return;
+      }
+      /* No listing to read, so the shipped sample is probed by loading it. */
+      const s = document.createElement('script');
+      s.src = SAMPLE_DIR + SAMPLE_FALLBACK;
+      s.onload = () => {
+        if (window.__SAMPLE_TRACE__) {
+          sampleFiles = [SAMPLE_FALLBACK];
+          btn.style.display = '';
+        }
+        try { delete window.__SAMPLE_TRACE__; }
+        catch (e) { window.__SAMPLE_TRACE__ = undefined; }
+        s.remove();
       };
-      try {
-        fetch(SAMPLE_URL, { method: 'GET' })
-          .then(r => { if (r.ok) show(); else viaScript(); })
-          .catch(viaScript);
-      } catch (e) { viaScript(); }
+      s.onerror = () => { s.remove(); };
+      document.head.appendChild(s);
     }
     document.addEventListener('DOMContentLoaded', probeSample);
 
-    function loadSample() {
-      showLoading('loading sample\u2026');
-      fetch(SAMPLE_URL)
-        .then(resp => { if (!resp.ok) throw new Error('http ' + resp.status); return resp.json(); })
-        .then(finishSample)
-        .catch(() => loadSampleViaScript());
+    function chosenSample() {
+      const sel = sampleSelect();
+      if (sel && sel.value) return sel.value;
+      return sampleFiles[0] || SAMPLE_FALLBACK;
     }
 
-    function loadSampleViaScript() {
+    function loadSample() {
+      const name = chosenSample();
+      showLoading('loading ' + name.replace(/\.js$/, '') + '\u2026');
       const s = document.createElement('script');
-      s.src = SAMPLE_URL_JS;
+      s.src = SAMPLE_DIR + name;
       s.onload = () => {
         const data = window.__SAMPLE_TRACE__;
-        try { delete window.__SAMPLE_TRACE__; } catch (e) { window.__SAMPLE_TRACE__ = undefined; }
+        try { delete window.__SAMPLE_TRACE__; }
+        catch (e) { window.__SAMPLE_TRACE__ = undefined; }
         s.remove();
-        if (!data) { hideLoading(); alert('The sample file loaded but did not set window.__SAMPLE_TRACE__. Check "' + SAMPLE_URL_JS + '".'); return; }
+        if (!data) {
+          hideLoading();
+          alert('"' + SAMPLE_DIR + name + '" loaded but did not set window.__SAMPLE_TRACE__.');
+          return;
+        }
         finishSample(data);
       };
       s.onerror = () => {
         s.remove();
         hideLoading();
-        alert('Could not load the sample trace.\n\nLooked for "' + SAMPLE_URL + '" (served) and "' + SAMPLE_URL_JS + '" (local), relative to this page.\n\nMake sure the sample is present next to this file, or drag a trace onto the window instead.');
+        alert('Could not load "' + SAMPLE_DIR + name + '", relative to this page.\n\nDrag a JSON onto the window instead.');
       };
       document.head.appendChild(s);
     }
 
     function finishSample(json) {
       const why = whyNotCVA6Trace(json);
-      if (why) { hideLoading(); alert('The sample trace could not be loaded: ' + why.replace(/<[^>]+>/g, '')); return; }
-      ingest(json, 'DAXPY config1 (sample)');
+      if (why) { hideLoading(); alert('The sample could not be loaded: ' + why.replace(/<[^>]+>/g, '')); return; }
+      ingest(json, chosenSample().replace(/\.js$/, '') + ' (sample)');
       hideLoading();
     }
 
@@ -2249,8 +2295,8 @@
        * sweep on the first field and the generic message would send the
        * reader looking for a corrupt file rather than the sibling viewer. */
       if (('instr' in r) && !('disasm' in r)) {
-        return 'This looks like a MinorFlow trace: its records carry '
-          + '<code>instr</code> where a CVA6Flow trace carries '
+        return 'This looks like a MinorFlow JSON: its records carry '
+          + '<code>instr</code> where a CVA6Flow JSON carries '
           + '<code>disasm</code>. Open it in MinorFlow instead.';
       }
       const need = ['id', 'pc', 'if1_lo', 'if2_lo', 'fe_cycle', 'id_cycle', 'is_cycle', 'ex_cycle', 'wb_cycle', 'co_cycle'];
@@ -2294,8 +2340,8 @@
       if (d.instructions.length === 0) return 'the "instructions" array is empty';
       const r = d.instructions[0];
       if (('instr' in r) && !('disasm' in r)) {
-        return 'this looks like a MinorFlow trace: its records carry "instr" '
-          + 'where a CVA6Flow trace carries "disasm". Open it in MinorFlow instead';
+        return 'this looks like a MinorFlow JSON: its records carry "instr" '
+          + 'where a CVA6Flow JSON carries "disasm". Open it in MinorFlow instead';
       }
       const need = ['id', 'pc', 'if1_lo', 'if2_lo', 'fe_cycle', 'id_cycle',
         'is_cycle', 'ex_cycle', 'wb_cycle', 'co_cycle'];
