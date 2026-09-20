@@ -1,3 +1,7 @@
+/* The starting point of a C benchmark: the six counters configured, snapshots
+ * taken on both sides of the measured region, and the deltas left in s2 to
+ * s10, where run_CVA6.py reads them at exit. */
+
 #include <stdint.h>
 #include <string.h>
 #include <limits.h>
@@ -11,13 +15,13 @@ void configure_pmu()
 {
     asm volatile("csrw 0x320, %0" ::"r"(-1));
 
-    // Configure PMU to count specific events
-    write_csr(mhpmevent3, 1);  // ID 1:  L1 I-Cache Misses
-    write_csr(mhpmevent4, 2);  // ID 2:  L1 D-Cache Misses
-    write_csr(mhpmevent5, 16); // ID 16: L1 I-Cache Access
-    write_csr(mhpmevent6, 17); // ID 17: L1 D-Cache Access
-    write_csr(mhpmevent7, 9);  // ID 9:  Branch Instr
-    write_csr(mhpmevent8, 10); // ID 10: Branch Mispredict + Unpredicted
+    // The six events the metrics table reads, one per counter
+    write_csr(mhpmevent3, 1);  // ID 1:  I-cache misses
+    write_csr(mhpmevent4, 2);  // ID 2:  D-cache misses
+    write_csr(mhpmevent5, 16); // ID 16: I-cache accesses
+    write_csr(mhpmevent6, 17); // ID 17: D-cache accesses
+    write_csr(mhpmevent7, 9);  // ID 9:  Branches
+    write_csr(mhpmevent8, 10); // ID 10: Mispredicts + unpredicted
 
     asm volatile("li t0, -1");
     asm volatile("csrw mcounteren, t0");
@@ -28,7 +32,7 @@ int main()
 {
     configure_pmu();
 
-    // Initial read of performance counters
+    // Snapshot before the region, so the deltas cover it alone
     uint64_t start_cyc = read_csr(mcycle);
     uint64_t start_ins = read_csr(minstret);
     uint64_t start_hpm3 = read_csr(mhpmcounter3);
@@ -41,7 +45,7 @@ int main()
     // MAIN PROGRAM
     // END OF MAIN PROGRAM
 
-    // Final read of performance counters
+    // Second snapshot, taken as soon as the region ends
     uint64_t end_cyc = read_csr(mcycle);
     uint64_t end_ins = read_csr(minstret);
     uint64_t end_hpm3 = read_csr(mhpmcounter3);
@@ -51,7 +55,7 @@ int main()
     uint64_t end_hpm7 = read_csr(mhpmcounter7);
     uint64_t end_hpm8 = read_csr(mhpmcounter8);
 
-    // Calculate deltas
+    // Deltas, the OFFICIAL column of run_CVA6.py's table
     uint64_t d_cyc = end_cyc - start_cyc;
     uint64_t d_ins = end_ins - start_ins;
     uint64_t d_ic_miss = end_hpm3 - start_hpm3;
@@ -62,7 +66,7 @@ int main()
     uint64_t d_br_miss_unp = end_hpm8 - start_hpm8;
     uint64_t time_us = (d_cyc * 1000000) / CPU_FREQ_HZ;
 
-    // Show results by moving them to registers and calling exit
+    // run_CVA6.py reads s2 to s10 from the simulation log at exit
     asm volatile(
         "mv s2, %0 \n\t"  // x18
         "mv s3, %1 \n\t"  // x19

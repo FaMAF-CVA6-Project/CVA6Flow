@@ -1,3 +1,7 @@
+# Paired with the scoreboard, load buffer, data TLB and combined cuts: DAXPY,
+# Z = alpha * X + Y over 4096 doubles, whose loads, FP arithmetic and stores
+# in one loop meet every queue those cuts shrink.
+
   .data
 N:
   .dword   4096                     # Size of the vectors
@@ -16,7 +20,7 @@ Z:
   .section .text
   .global  main
 
-# Direction to CSRs
+# CSR addresses
   .equ     CSR_MCOUNTINHIBIT, 0x320
   .equ     CSR_MHPMEVENT3, 0x323
   .equ     CSR_MHPMEVENT4, 0x324
@@ -34,7 +38,7 @@ Z:
   .equ     CSR_MHPMCOUNTER7, 0xB07
   .equ     CSR_MHPMCOUNTER8, 0xB08
 
-# CPU Frequency (for time calculation)
+# CPU frequency (for time calculation)
   .equ     CPU_FREQ, 50000000       # 50 MHz
 
 main:
@@ -48,17 +52,17 @@ main:
 
 # Configure events to count
   li       t0, 1
-  csrw     CSR_MHPMEVENT3, t0       # L1 I-Cache Miss
+  csrw     CSR_MHPMEVENT3, t0       # I-cache misses
   li       t0, 2
-  csrw     CSR_MHPMEVENT4, t0       # L1 D-Cache Miss
+  csrw     CSR_MHPMEVENT4, t0       # D-cache misses
   li       t0, 16
-  csrw     CSR_MHPMEVENT5, t0       # L1 I-Cache Access
+  csrw     CSR_MHPMEVENT5, t0       # I-cache accesses
   li       t0, 17
-  csrw     CSR_MHPMEVENT6, t0       # L1 D-Cache Access
+  csrw     CSR_MHPMEVENT6, t0       # D-cache accesses
   li       t0, 9
-  csrw     CSR_MHPMEVENT7, t0       # Branch Instr
+  csrw     CSR_MHPMEVENT7, t0       # Branches
   li       t0, 10
-  csrw     CSR_MHPMEVENT8, t0       # Branch Mispredict + Unpredicted
+  csrw     CSR_MHPMEVENT8, t0       # Mispredicts + unpredicted
 
 # Reset counters to zero
   csrw     CSR_MHPMCOUNTER3, zero
@@ -77,21 +81,21 @@ main:
 # INITIAL SNAPSHOT OF PERFORMANCE COUNTERS
 # ---------------------------------------------------------
   csrr     t0, CSR_MCYCLE
-  sd       t0, 0(sp)                # Cycle Start
+  sd       t0, 0(sp)                # Cycles at start
   csrr     t0, CSR_MINSTRET
-  sd       t0, 8(sp)                # Instret Start
+  sd       t0, 8(sp)                # Instructions at start
   csrr     t0, CSR_MHPMCOUNTER3
-  sd       t0, 16(sp)               # HPM3 Start
+  sd       t0, 16(sp)               # HPM3 at start
   csrr     t0, CSR_MHPMCOUNTER4
-  sd       t0, 24(sp)               # HPM4 Start
+  sd       t0, 24(sp)               # HPM4 at start
   csrr     t0, CSR_MHPMCOUNTER5
-  sd       t0, 32(sp)               # HPM5 Start
+  sd       t0, 32(sp)               # HPM5 at start
   csrr     t0, CSR_MHPMCOUNTER6
-  sd       t0, 40(sp)               # HPM6 Start
+  sd       t0, 40(sp)               # HPM6 at start
   csrr     t0, CSR_MHPMCOUNTER7
-  sd       t0, 48(sp)               # HPM7 Start
+  sd       t0, 48(sp)               # HPM7 at start
   csrr     t0, CSR_MHPMCOUNTER8
-  sd       t0, 56(sp)               # HPM8 Start
+  sd       t0, 56(sp)               # HPM8 at start
 
 # ---------------------------------------------------------
 # MAIN PROGRAM
@@ -107,9 +111,9 @@ main:
   la       s3, Y                    # Base of Y
   la       s4, Z                    # Base of Z
 
-  mv       s5, s2                   # Offset X -> s5
-  mv       s6, s3                   # Offset Y -> s6
-  mv       s7, s4                   # Offset Z -> s7
+  mv       s5, s2                   # Pointer into X -> s5
+  mv       s6, s3                   # Pointer into Y -> s6
+  mv       s7, s4                   # Pointer into Z -> s7
 
   li       t4, 0                    # Loop index i = 0
 
@@ -144,22 +148,22 @@ loop:
   ld       t0, 8(sp)
   sub      s3, s3, t0
 
-# x20 (s4) = I-Cache Miss
+# x20 (s4) = I-cache misses
   csrr     s4, CSR_MHPMCOUNTER3
   ld       t0, 16(sp)
   sub      s4, s4, t0
 
-# x21 (s5) = D-Cache Miss
+# x21 (s5) = D-cache misses
   csrr     s5, CSR_MHPMCOUNTER4
   ld       t0, 24(sp)
   sub      s5, s5, t0
 
-# x22 (s6) = I-Cache Access
+# x22 (s6) = I-cache accesses
   csrr     s6, CSR_MHPMCOUNTER5
   ld       t0, 32(sp)
   sub      s6, s6, t0
 
-# x23 (s7) = D-Cache Access
+# x23 (s7) = D-cache accesses
   csrr     s7, CSR_MHPMCOUNTER6
   ld       t0, 40(sp)
   sub      s7, s7, t0
@@ -169,7 +173,7 @@ loop:
   ld       t0, 48(sp)
   sub      s8, s8, t0
 
-# x25 (s9) = Branch Miss + Unpred
+# x25 (s9) = Mispredicts + unpredicted
   csrr     s9, CSR_MHPMCOUNTER8
   ld       t0, 56(sp)
   sub      s9, s9, t0
