@@ -1,22 +1,23 @@
 #!/usr/bin/env python3
 """Format this repository's Python, Markdown and benchmarks, and nothing else.
 
-Two formatters, because two languages. autopep8 at 79 columns for Python,
-Prettier for Markdown. Both are what the tree was last formatted with, so
-running this leaves a clean tree clean.
+autopep8 at 79 columns for Python and Prettier for Markdown, plus a third
+pass over the benchmarks. autopep8 is pinned, Prettier is whatever is
+installed.
 
     python3 scripts/format_CVA6Flow_repo.py            # format in place
-    python3 scripts/format_CVA6Flow_repo.py --check    # report, change nothing
+    python3 scripts/format_CVA6Flow_repo.py --check    # report only
     python3 scripts/format_CVA6Flow_repo.py --python   # one language
     python3 scripts/format_CVA6Flow_repo.py -v         # name every file
 
-The benchmarks get a third pass: .editorconfig's trailing whitespace and final
-newline on both languages, and operand alignment on the assembly. No C style is
-imposed, because no C formatter is configured for this tree.
+The benchmarks get the parent repository's .editorconfig rules, no trailing
+whitespace and a final newline, in C and assembly alike, and the assembly also
+gets a two-space indent and aligned operands. No C style is imposed, because
+no C formatter is configured here.
 
-Scope is check_CVA6Flow_repo.py's OWN_PATHS, so the frozen artefacts under docs/
-are never touched. The CVA6 fork carries the same tool for itself, and its
-copy covers this repository too when it is checked out as a submodule.
+Scope is check_CVA6Flow_repo.py's owned(), which skips FROZEN, so the frozen
+artefacts under docs/ are never touched. The CVA6 fork carries the same tool
+for itself, and its copy covers this repository too as a submodule.
 """
 import argparse
 import importlib.util
@@ -58,17 +59,19 @@ def benchmark_files():
 # An instruction or directive line: indent, mnemonic, operands.
 ASM_INSTR = re.compile(r"^(\s+)(\S+)(\s+)(\S.*)$")
 
+# Comment lines, which would otherwise be realigned as if their marker were a
+# mnemonic.
+ASM_COMMENT_MARKS = ("#", "/*", "*", "//")
+
 
 def format_asm(text):
-    """Operands two spaces past the file's longest mnemonic.
-
-    Per file rather than per block, which is what the tree already follows:
-    23 of its 31 assembly sources reproduce under this rule untouched."""
+    """Operands one space past the file's longest mnemonic, indented two
+    spaces. Per file rather than per block, which is what the tree follows."""
     lines = [ln.rstrip() for ln in text.split("\n")]
 
     def instruction(ln):
         return (ASM_INSTR.match(ln) and not ln[:1].strip()
-                and not ln.lstrip().startswith("#"))
+                and not ln.lstrip().startswith(ASM_COMMENT_MARKS))
 
     widest = max((len(ASM_INSTR.match(ln).group(2))
                   for ln in lines if instruction(ln)), default=0)
@@ -90,7 +93,8 @@ def format_c(text):
 
 def run_benchmarks(files, check, verbose):
     """Whitespace and a final newline on every benchmark, plus operand
-    alignment on the assembly. .editorconfig asks for both."""
+    alignment on the assembly. The parent repository's .editorconfig asks
+    for the first two."""
     changed = []
     for rel in files:
         path = os.path.join(REPO, rel)
@@ -116,16 +120,24 @@ FORMATTED_WITH = {"autopep8": "2.3.2", "pycodestyle": "2.14.0",
                   "python": "3.10"}
 
 
-def toolchain_drift():
-    """How this machine differs from FORMATTED_WITH, as 'name have, not want'
-    pieces, or an empty list when it formats the way the tree was formatted."""
-    have = {"python": "%d.%d" % sys.version_info[:2]}
+def toolchain():
+    """This machine's Python, autopep8 and pycodestyle versions, asked of
+    autopep8 once, or None when autopep8 does not run."""
     done = subprocess.run([sys.executable, "-m", "autopep8", "--version"],
                           capture_output=True, text=True)
+    if done.returncode != 0:
+        return None
+    have = {"python": "%d.%d" % sys.version_info[:2]}
     found = re.search(r"autopep8 (\S+) \(pycodestyle: ([^)\s]+)\)",
                       done.stdout)
     if found:
         have["autopep8"], have["pycodestyle"] = found.groups()
+    return have
+
+
+def toolchain_drift(have):
+    """How this machine differs from FORMATTED_WITH, as 'name have, not want'
+    pieces, or an empty list when it formats the way the tree was formatted."""
     return [f"{name} {have.get(name, 'missing')}, not {want}"
             for name, want in FORMATTED_WITH.items()
             if have.get(name) != want]
@@ -134,12 +146,6 @@ def toolchain_drift():
 def autopep8_cmd(check):
     cmd = [sys.executable, "-m", "autopep8", "--max-line-length", str(PY_COLS)]
     return cmd + (["--diff"] if check else ["--in-place"])
-
-
-def have_autopep8():
-    done = subprocess.run([sys.executable, "-m", "autopep8", "--version"],
-                          capture_output=True, text=True)
-    return done.returncode == 0
 
 
 def prettier_base():
@@ -163,9 +169,10 @@ def run_python(files, check, verbose):
     """Returns the files that changed, or that would change under --check."""
     if not files:
         return [], None
-    if not have_autopep8():
+    have = toolchain()
+    if have is None:
         return [], "autopep8 is not installed (pip install autopep8)"
-    drift = toolchain_drift()
+    drift = toolchain_drift(have)
     if drift and check:
         return [], ("autopep8 check skipped, the toolchain differs from the "
                     "one this tree was formatted with (" + ", ".join(drift)
@@ -223,7 +230,8 @@ def run_markdown(files, check, verbose):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Format this repository's Python and Markdown.")
+        description="Format this repository's Python, Markdown and "
+                    "benchmark sources.")
     parser.add_argument("--check", action="store_true",
                         help="Report what is unformatted and change nothing. "
                              "Exits non-zero when anything would change")
@@ -237,10 +245,18 @@ def main():
                         help="Name every file as it is handled")
     args = parser.parse_args()
 
-    both = not (args.python or args.markdown or args.benchmarks)
+    every_language = not (args.python or args.markdown or args.benchmarks)
     changed, skipped = [], []
 
-    if args.python or both:
+    # Outside a git checkout the file list cannot be read, and formatting
+    # nothing would look like a clean tree.
+    try:
+        _check.owned()
+    except RuntimeError as e:
+        print(f"[ERROR] {e}", file=sys.stderr)
+        return 2
+
+    if args.python or every_language:
         files = python_files()
         got, why = run_python(files, args.check, args.verbose)
         if why:
@@ -250,7 +266,7 @@ def main():
             print(f"[INFO] Python: {len(files)} file(s) at {PY_COLS} columns, "
                   f"{len(got)} {'unformatted' if args.check else 'changed'}")
 
-    if args.markdown or both:
+    if args.markdown or every_language:
         files = markdown_files()
         got, why = run_markdown(files, args.check, args.verbose)
         if why:
@@ -260,7 +276,7 @@ def main():
             print(f"[INFO] Markdown: {len(files)} file(s), "
                   f"{len(got)} {'unformatted' if args.check else 'changed'}")
 
-    if args.benchmarks or both:
+    if args.benchmarks or every_language:
         files = benchmark_files()
         got, why = run_benchmarks(files, args.check, args.verbose)
         if why:
@@ -277,10 +293,8 @@ def main():
 
     if args.check and changed:
         print("[ERROR] Run 'python3 scripts/format_CVA6Flow_repo.py' to "
-              "fix these.")
+              "fix these.", file=sys.stderr)
         return 1
-    if skipped and not changed:
-        return 0
     return 0
 
 
