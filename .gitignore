@@ -1,16 +1,14 @@
-# Outdated Stuff
+# Frozen development history
 /docs/old_versions
 /docs/parser_phases
 
 # Python
 __pycache__
 
-# Files too big to be tracked
+# Testing: VCDs, listings, JSONs and samples are generated, never committed
+tests/*
+!tests/README.md
 
-# Testing
-tests/*.vcd*
-tests/*.list*
-tests/*.fst*
-
-# make_oversized.py output
-oversized*.json
+# make_CVA6Flow_oversized.py output, with the side files of a write it
+# did not finish
+oversized*.json*
