@@ -1,138 +1,136 @@
 #!/usr/bin/env python3
-"""CVA6 pipeline tracer. Extracts per-instruction lifecycle data from a
-Verilator VCD and emits JSON for the CVA6Flow viewer, following each
-instruction from fetch through decode, issue, execute, writeback and commit.
+"""CVA6Flow tracer: Verilator VCD of CVA6 -> JSON for the CVA6Flow viewer.
 
-The viewer also needs the objdump listing of the test, which is where the
-instruction text comes from. It is picked up automatically when it sits beside
-the VCD as <name>.list, and named with --disasm-list otherwise.
+Reads a Verilator VCD of a cv64a6 simulation and follows every instruction
+from fetch through decode, issue, execute, writeback and commit, with the
+I-cache, D-cache, load-store unit, branch and forwarding events around it.
+Writes one JSON, schema 3, described under "The JSON" in README.md.
+
+The instruction text comes from the objdump listing of the test, picked up
+beside the VCD as <name>.list or named with --disasm-list.
 
 Usage:
-    python3 CVA6Flow_tracer.py daxpy.vcd
-    python3 CVA6Flow_tracer.py daxpy.vcd --output daxpy.json
-    python3 CVA6Flow_tracer.py daxpy.vcd --disasm-list run_results/daxpy.list
+    python3 CVA6Flow_tracer.py daxpy.vcd -o daxpy.json
+    python3 CVA6Flow_tracer.py daxpy.vcd --disasm-list results/run/daxpy.list
+    python3 CVA6Flow_tracer.py daxpy.vcd -o daxpy.json --strict --quiet
 """
-
 import argparse
 import bisect
 import json
+import os
 import re
+import statistics
 import sys
 import time
-from statistics import median
-from collections import deque, defaultdict, Counter
-from dataclasses import dataclass, asdict
-from pathlib import Path
+from collections import Counter, defaultdict, deque
+from dataclasses import dataclass, field
 
 
 # ============================================================================
-# Loading / progress output (mirrors the MinorFlow tracer)
+# 3. Schema and output constants
 # ============================================================================
-_SHOW_STAGES = False
-_PROG = None
+
+# Carried in metadata.schema_version. Bump it with any key added, removed or
+# redefined.
+SCHEMA_VERSION = 3
+TOOL = "cva6flow_tracer"
+
+# The field lists metadata carries, so the pages and the scripts clip, shift
+# and scan records and events without keeping their own copies.
+CYCLE_FIELDS = (
+    "fe1_lo_cycle", "fe1_hi_cycle", "fe2_lo_cycle", "fe2_hi_cycle",
+    "fe_out_cycle", "dec_cycle", "is_cycle", "ex_cycle", "wb_cycle",
+    "co_cycle", "flush_cycle", "lsu_admit_cycle", "lsu_release_cycle",
+    "bp_resolve_cycle",
+)
+CYCLE_LIST_FIELDS = ()
+ID_FIELDS = (
+    "fwd_rs1_producer_id", "fwd_rs2_producer_id", "fwd_rs3_producer_id",
+    "pre_fetch_wait_shared_id", "bubble_causer_id", "bubble_shared_id",
+    "caused_bubble_recovery_id",
+)
+ID_LIST_FIELDS = ()
+EVENT_FIELDS = {
+    "ic_events.access_cycles": "cycle",
+    "ic_events.miss_cycles": "cycle",
+    "ic_events.deliveries": ["fe1_cycle", "fe2_cycle"],
+    "dc_events.access_cycles": "cycle",
+    "dc_events.allocs": ["cycle"],
+    "mem_writebacks": ["alloc_cycle", "send_cycle", "ack_cycle",
+                       "evict_cycle"],
+}
+EVENT_TWIN_FIELDS = {}
+
+METADATA_KEY_ORDER = (
+    "tool", "schema_version", "vcd_path", "vcd_scope_prefix",
+    "disasm_list_path", "config_name", "clock_period", "time_unit",
+    "clock_period_source", "vcd_clock_period", "vcd_timescale", "dc_sets",
+    "record_fields", "cycle_fields", "cycle_list_fields", "id_fields",
+    "id_list_fields", "event_fields", "event_twin_fields", "degraded",
+    "clipped", "stats",
+)
+TOP_LEVEL_ORDER = ("metadata", "config_params", "instructions", "ic_events",
+                   "dc_events", "mem_writebacks")
+
+# Written only under --emit-diagnostics: two lists per memory instruction
+# that no page reads and that cost real bytes.
+DIAGNOSTIC_ONLY_FIELDS = ("lsu_state_history", "dc_event_log")
+
+# Scoreboard slots the forwarding producers are resolved from after the
+# walk. A slot number is not a record, so they never reach the JSON.
+INTERNAL_ONLY_FIELDS = ("fwd_rs1_tid", "fwd_rs2_tid", "fwd_rs3_tid")
+
+# RTL names kept although their suffix reads as a record reference, since
+# readers grep the RTL for them.
+CORE_NAMES = ("trans_id",)
+
+# A Verilator VCD advances two timescale units per cycle, whatever the clock,
+# so time comes from an assumed 50 MHz instead of the VCD.
+ASSUMED_CLOCK_PERIOD_PS = 20000
+TIME_UNIT = "1ps"
 
 
-def stagelog(*args, **kwargs):
-    """Per-stage resolution diagnostics. Silent unless --stages is given."""
-    if _SHOW_STAGES:
-        print(*args, **kwargs)
+# ============================================================================
+# 4. Core constants
+# ============================================================================
 
-
-class Progress:
-    """In-place stderr progress reporter for the streaming parse. Prints e.g.
-    "[parse] 14,250,000 lines \u00b7 312,004 insts \u00b7 18.3s" on a single
-    rewritten line, throttled to a few times a second."""
-
-    def __init__(self, label, enabled=True):
-        self.label = label
-        self.enabled = enabled and sys.stderr.isatty()
-        self.force_plain = enabled and not sys.stderr.isatty()
-        self.start = time.time()
-        self.last_emit = 0.0
-        self.lines = 0
-        self.insts = 0
-
-    def update(self, lines, insts=0, final=False):
-        self.lines = lines
-        self.insts = insts
-        now = time.time()
-        if not final and (now - self.last_emit) < 0.25:
-            return
-        self.last_emit = now
-        elapsed = now - self.start
-        msg = (f"[{self.label}] {lines:,} lines \u00b7 {insts:,} insts "
-               f"\u00b7 {elapsed:.1f}s")
-        if self.enabled:
-            sys.stderr.write("\r" + msg + "   ")
-            sys.stderr.flush()
-        elif self.force_plain and (final or int(elapsed) % 5 == 0):
-            sys.stderr.write(msg + "\n")
-            sys.stderr.flush()
-
-    def done(self):
-        self.update(self.lines, self.insts, final=True)
-        if self.enabled:
-            sys.stderr.write("\n")
-            sys.stderr.flush()
-
-
-# Carried in metadata.schema_version. A JSON without the key predates
-# versioning and its field set, so the viewers read absence as stale.
-CVA6FLOW_SCHEMA_VERSION = 1
-
-# Default for metadata.config_name, overridable with --config-name. This is the
-# configuration the constants below are written for. A VCD does not name its
-# own build, so the field is a label rather than a reading.
+# Configuration. Values from cv64a6_imafdc_sv39_hpdcache_wb_config_pkg.sv and
+# build_config_pkg.sv.
 DEFAULT_CONFIG_NAME = "cv64a6_imafdc_sv39_hpdcache_wb"
+DEFAULT_SCOPE_PREFIX = "TOP.ariane_testharness.i_ariane.i_cva6"
 
-# ============================================================================
-# Config (single source of truth)
-# ============================================================================
-# Values come from cv64a6_imafdc_sv39_hpdcache_wb_config_pkg.sv and
-# build_config_pkg.sv. Changing one here regenerates every config-dependent
-# signal path. The FSM enums and sid table are CVA6-wide and do not vary.
-
-# Frontend
-SUPERSCALAR_EN = False
-RVC_EN = True
-FETCH_WIDTH = 32                        # bits (=64 when SuperscalarEn=1)
+# Front end. Superscalar builds are refused, and every configuration here
+# enables RVC, so a fetch is 32 bits holding up to two instructions.
+FETCH_WIDTH = 32
 FETCH_BYTES = FETCH_WIDTH // 8
-FETCH_OFFSET_MASK = FETCH_BYTES - 1           # 0x3 for FW=32, 0x7 for FW=64
-INSTR_PER_FETCH = FETCH_WIDTH // (16 if RVC_EN else 32)
+FETCH_OFFSET_MASK = FETCH_BYTES - 1
+INSTR_PER_FETCH = FETCH_WIDTH // 16
 
-# Backend
+# Back end. NR_SB_ENTRIES and the port counts are the largest build this
+# tracer accepts. The signal table is generated from the sizes the VCD
+# declares.
 NR_ISSUE_PORTS = 1
 NR_COMMIT_PORTS = 2
 NR_WB_PORTS = 5
 NR_SB_ENTRIES = 8
-TRANS_ID_BITS = 3                         # = $clog2(NR_SB_ENTRIES)
 
-# ex_stage has three dcache_req_ports_o slots, a CVA6-wide constant: 0
-# MMU/PTW, 1 load, 2 store, per load_store_unit.sv:316, :587 and :546.
+# ex_stage's three D-cache request ports, CVA6-wide: 0 MMU and PTW, 1 load,
+# 2 store (load_store_unit.sv:316, :587, :546).
 DCACHE_REQ_PORTS = 3
 
-
-# ============================================================================
-# I$ controller FSM enum
-# ============================================================================
-# Mirrors cva6_icache.sv:122. Used by ICacheTimeline.on_cycle to classify
-# each delivery as a hit (state_q == READ at fe2) or miss (state_q == MISS).
-# VCD encodes the 3-bit state as a binary string, e.g. "011" for MISS.
-
+# I-cache controller FSM, cva6_icache.sv:122, as the VCD's binary strings.
+# A delivery in READ is a hit and one in MISS a line miss.
 FSM_FLUSH = "000"
 FSM_IDLE = "001"
 FSM_READ = "010"
 FSM_MISS = "011"
 FSM_KILL_ATRANS = "100"
 FSM_KILL_MISS = "101"
+ICACHE_NON_READ_STATES = frozenset({
+    FSM_FLUSH, FSM_IDLE, FSM_MISS, FSM_KILL_ATRANS, FSM_KILL_MISS, None,
+})
 
-
-# ============================================================================
-# LSU FSM enums
-# ============================================================================
-# load_unit.sv:83 . 4-bit FSM, 9 states
-# store_unit.sv:119. 2-bit FSM, 4 states
-
+# load_unit.sv:83, 9 states in 4 bits, and store_unit.sv:119, 4 in 2 bits.
 LOAD_FSM_NAMES = {
     0: "IDLE",
     1: "WAIT_GNT",
@@ -144,30 +142,19 @@ LOAD_FSM_NAMES = {
     7: "WAIT_FLUSH",
     8: "WAIT_WB_EMPTY",
 }
-
 STORE_FSM_NAMES = {
     0: "IDLE",
     1: "VALID_STORE",
     2: "WAIT_TRANSLATION",
     3: "WAIT_STORE_READY",
 }
+# The one busy state of each FSM that takes a second request without passing
+# through IDLE (load_unit.sv:343, store_unit.sv:191).
+LOAD_ADMIT_WHILE_BUSY = "SEND_TAG"
+STORE_ADMIT_WHILE_BUSY = "VALID_STORE"
 
-
-# ============================================================================
-# Control-flow type enum (branch predictor)
-# ============================================================================
-# Per ariane_pkg.sv:170-176. The cf_t type is used both as the prediction
-# carried with each instruction (branchpredict_sbe_t.cf) and as the
-# resolution emitted by the branch_unit (bp_resolve_t.cf_type).
-#
-#   NoCF   = 0  : nothing predicted. Also the value for a branch
-#                 predicted not-taken. Branch = 1 BHT, Jump = 2 direct,
-#                 JumpR = 3 BTB indirect, Return = 4 RAS.
-#
-# A cf value at issue also names the predictor: Branch is the BHT, JumpR the
-# BTB, Return the RAS. Jump needs none, the decoder resolves it, and NoCF
-# means no prediction or a non-branch.
-
+# cf_t, ariane_pkg.sv:170-176: the prediction each instruction carries and
+# the type branch_unit resolves.
 CF_T_NAMES = {
     0: "NoCF",
     1: "Branch",
@@ -176,2183 +163,364 @@ CF_T_NAMES = {
     4: "Return",
 }
 
-
-def cf_name(s):
-    """Decode a cf_t binary string. Returns 'NoCF' on None/unknown."""
-    if s is None:
-        return None
-    v = binary_to_int(s)
-    if v is None:
-        return None
-    return CF_T_NAMES.get(v, f"UNK_{v}")
-
-
-# ============================================================================
-# HPDcache requestor source-ID assignment
-# ============================================================================
-# Per cva6_hpdcache_wrapper.sv (NumPorts=4, a hardcoded localparam at
-# cva6.sv:380 and not a config-package field) the SID layout is:
-#
-#   sid 0 PTW load adapter, 1 LSU load_unit (the one we care about),
-#   2 accelerator load adapter, 3 STORE adapter, 4 CMO adapter,
-#   5 hwpf_stride prefetcher.
-#
-# Traced through cva6.sv:1321-1327 into load_store_unit.sv:315/586/545. The
-# HPDcache wrapper feeds dcache_req_ports_i[0..2] to load adapter slots
-# r=0..2 with hpdcache_req_sid_i = r.
-
-HPDCACHE_NUM_PORTS = 4
-LOAD_ADAPTER_SIDS = frozenset(range(HPDCACHE_NUM_PORTS - 1))   # {0, 1, 2}
-PTW_LOAD_SID = 0
-LOAD_UNIT_SID = 1   # the only SID that flips dc_primary_miss on a LOAD record
-ACCEL_LOAD_SID = 2
-STORE_ADAPTER_SID = HPDCACHE_NUM_PORTS - 1                     # 3
-CMO_ADAPTER_SID = HPDCACHE_NUM_PORTS                          # 4
-HWPF_ADAPTER_SID = HPDCACHE_NUM_PORTS + 1                      # 5
-
-# Cycles between an access leaving its LSU FSM and its MSHR alloc reaching
-# the cache, added to the attribution window. Both are measured, not fitted.
-#
-# Store: 4. Three cache stages, st0-st1-st2, plus one because
-# lsu_complete_cycle is the last cycle the access was live in the FSM rather
-# than the cycle it left. Measured on daxpy: 2,065 of 2,070 store-adapter
-# allocs sit at exactly lsu_complete_cycle + 4. At 3 the store attribution
-# collapses to 6 of 2,070, at 5 it is identical to 4 with a cycle of slack.
-#
-# Load: 1. Every otherwise-orphaned load alloc on daxpy sits at exactly
-# lsu_complete_cycle + 1, 2,047 of 2,047.
-HPDCACHE_STORE_LOOKAHEAD = 4
-HPDCACHE_LOAD_LOOKAHEAD = 1
-
-# Per-record fields the viewer does not read and which cost real bytes: two
-# lists of dicts per memory instruction plus a scalar. Emitted only under
-# --emit-diagnostics. Everything else stays, cheap scalars included, so a
-# future viewer feature does not need a re-run to get them.
-# Missing whitelist entries listed before the report is capped.
-MAX_MISSING_REPORTED = 10
-
-DIAGNOSTIC_ONLY_FIELDS = ("lsu_state_history", "dc_events", "fetch_port")
-
-# Record how a value was obtained rather than what it is, so no viewer
-# reads them.
-INTERNAL_ONLY_FIELDS = ("bp_cf_from_memq",)
-
-# Compact separators for the bulk arrays, matching MinorFlow_tracer.py. The
-# default ", " and ": " cost 4.8 MB on a daxpy trace. One record per line is
-# kept: it makes a 50 MB file greppable and costs a single newline each.
-JSON_SEP = (",", ":")
-
-# REFILL_FSM from hpdcache_miss_handler.sv, widened to 32 bits by Verilator
-# because the typedef has no explicit width (line 397). State 0 is idle, any
-# non-zero value means a refill is in progress.
-REFILL_FSM_IDLE = 0
-
-
-# ============================================================================
-# Whitelist (base set + commit_pointer_q for trans_id-based commit matching)
-# ============================================================================
-
-WHITELIST = [
-    # Clock
-    "clk_i",
-
-    # CSR-equivalent D$ access counter, sampled at ex_stage's output, which
-    # is what perf_counters.sv:128 reads. Not the cache-side ports, whose
-    # port 2 is the accelerator (cva6.sv:1326).
-
-    # I$ request / response
-    "i_frontend.icache_dreq_o.req",
-    "i_frontend.icache_dreq_o.vaddr",
-    "i_frontend.icache_dreq_o.kill_s1",
-    "i_frontend.icache_dreq_o.kill_s2",
-    "i_frontend.icache_dreq_i.valid",
-    "i_frontend.icache_dreq_i.vaddr",
-
-    # instr_realign output flag, high while the realigner combines an
-    # instruction split across two fetches. Cross-checks wraps_line, and
-    # differs only for records flushed mid-realignment by kill_s2.
-    "i_frontend.i_instr_realign.serving_unaligned_o",
-
-    # Fetch handshake
-    "id_stage_i.fetch_entry_valid_i",
-    "id_stage_i.fetch_entry_ready_o",
-    "id_stage_i.rvfi_is_compressed_o",
-
-    # Per-instruction payload from frontend. `fetch_entry_if_id` is
-    # declared [NrIssuePorts-1:0]. Ports appended programmatically.
-
-    # Decode handshake
-    "issue_stage_i.i_scoreboard.decoded_instr_valid_i",
-    "issue_stage_i.i_scoreboard.decoded_instr_ack_o",
-
-    # Issue handshake
-    "issue_stage_i.i_scoreboard.issue_instr_valid_o",
-    "issue_stage_i.i_scoreboard.issue_ack_i",
-    "issue_stage_i.i_scoreboard.issue_pointer_q",
-
-    # All six are [NrIssuePorts-1:0] in issue_read_operands. forward_rsX is one
-    # bit per port, idx_hzd_rsX is TRANS_ID_BITS per port, and the per-port
-    # idx_hzd_rs slices are appended programmatically below.
-    "issue_stage_i.i_issue_read_operands.forward_rs1",
-    "issue_stage_i.i_issue_read_operands.forward_rs2",
-    "issue_stage_i.i_issue_read_operands.forward_rs3",
-
-    # Writeback. Wt_valid_i is a packed NR_WB_PORTS-bit bus. Per-port
-    # trans_id_i slices are appended programmatically below.
-    "issue_stage_i.i_scoreboard.wt_valid_i",
-
-    # The scoreboard's registered mem_q ring. Reading fu/rs1/rs2/rd from
-    # mem_q[trans_id].sbe at writeback is authoritative, written at the
-    # decode edge and stable until the slot is reused. Per-slot entries
-    # are appended below.
-
-    # Branch resolution from the EX branch_unit. bp_resolve_t (cva6.sv:134)
-    # carries pc, target, is_taken, is_mispredict and cf_type for one cycle at
-    # ex_cycle. Bound by PC, oldest is_cycle first when a loop repeats a PC.
-    "issue_stage_i.i_scoreboard.resolved_branch_i.valid",
-    "issue_stage_i.i_scoreboard.resolved_branch_i.pc",
-    "issue_stage_i.i_scoreboard.resolved_branch_i.target_address",
-    "issue_stage_i.i_scoreboard.resolved_branch_i.is_taken",
-    "issue_stage_i.i_scoreboard.resolved_branch_i.is_mispredict",
-    "issue_stage_i.i_scoreboard.resolved_branch_i.cf_type",
-
-    # Commit. commit_ack_o is a packed NR_COMMIT_PORTS-bit bus. The
-    # per-port commit_pointer_q slices (tagging the trans_id released
-    # on each port) are appended programmatically below.
-    "commit_stage_i.commit_ack_o",
-
-    # Flush
-    "flush_ctrl_if",
-    "flush_ctrl_id",
-    "flush_ctrl_ex",
-    "flush_ctrl_bp",
-    # flush_unissued_instr_i gates the scoreboard's mem_n write at the decode
-    # handshake (scoreboard.sv:171). While it is high DV and DA still fire but
-    # no slot is allocated, so firing here would drift `fetched` ahead of HW.
-    "issue_stage_i.i_scoreboard.flush_unissued_instr_i",
-
-    # I$ controller FSM, the 6-state enum at cva6_icache.sv:122. Separates a
-    # hit (READ at fe2) from a line miss (MISS at fe2). The frontend dreq
-    # signals above carry the handshake, this one the internal state.
-    "gen_cache_hpd.i_cache_subsystem.i_cva6_icache.state_q",
-
-    # I$ miss pulse. cva6_icache asserts miss_o for one cycle per accepted
-    # cacheable ifill (cva6_icache.sv:301-303), feeding perf_counters event 1.
-    # Counting its high cycles includes wrong-path fills squashed mid-fill.
-    "gen_cache_hpd.i_cache_subsystem.i_cva6_icache.miss_o",
-
-    # LSU pipeline FSM state registers, sampled per rising edge and attributed
-    # to the pending record set by the issue handshake. load_unit.sv:83 has 9
-    # states in 4 bits, store_unit.sv:119 has 4 in 2 bits.
-    "ex_stage_i.lsu_i.i_load_unit.state_q",
-    "ex_stage_i.lsu_i.i_store_unit.state_q",
-    # lsu_ctrl is the combinational wire feeding both
-    # FSMs (load_store_unit.sv:174). Its trans_id at the cycle
-    # BEFORE an FSM IDLE->non-IDLE transition is the admitted record.
-    "ex_stage_i.lsu_i.lsu_ctrl.trans_id",
-    # pop_ld / pop_st fire when the load or store unit consumes a request
-    # from lsu_bypass. pop_ld in SEND_TAG (load_unit.sv:343) or pop_st in
-    # VALID_STORE (store_unit.sv:191) is an admit-while-busy event.
-    "ex_stage_i.lsu_i.lsu_bypass_i.pop_ld_i",
-    "ex_stage_i.lsu_i.lsu_bypass_i.pop_st_i",
-
-    # HPDcache miss and refill events. cva6.sv has three cache-subsystem
-    # variants under different gen_cache_* blocks, and this build uses
-    # HPDcache, so everything sits under gen_cache_hpd.
-    "gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache."
-    "hpdcache_miss_handler_i.mshr_alloc_i",
-    "gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache."
-    "hpdcache_miss_handler_i.mshr_alloc_tid_i",
-    "gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache."
-    "hpdcache_miss_handler_i.mshr_alloc_sid_i",
-    "gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache."
-    "hpdcache_miss_handler_i.mshr_alloc_is_prefetch_i",
-    "gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache."
-    "hpdcache_miss_handler_i.mshr_alloc_nline_i",
-    # mshr_check_i with mshr_check_hit_o on the same cycle is the secondary
-    # miss path, a request whose nline is already in an MSHR entry. This is
-    # the dominant path where loads follow stores to the same line.
-    "gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache."
-    "hpdcache_miss_handler_i.mshr_check_i",
-    "gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache."
-    "hpdcache_miss_handler_i.mshr_check_nline_i",
-    "gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache."
-    "hpdcache_miss_handler_i.mshr_check_hit_o",
-    # refill_fsm_q non-zero flags loads that overlap a refill without being
-    # part of the alloc or coalesce. id=142 in fdiv was a hit delayed by a
-    # refill holding the cache port.
-    "gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache."
-    "hpdcache_miss_handler_i.refill_fsm_q",
-    # refill_core_rsp_valid_o pulses when refill data is delivered
-    # back to the requesting core port. Refill_core_rsp_o.tid carries
-    # the requesting tid (see hpdcache_miss_handler.sv:382,397).
-    "gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache."
-    "hpdcache_miss_handler_i.refill_core_rsp_valid_o",
-    "gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache."
-    "hpdcache_miss_handler_i.refill_core_rsp_o.tid",
-
-    # Dirty victim writeback, write-back with the write buffer configured
-    # out. ALLOC is flush_alloc, SEND and ACK are mem_req/resp_write_flush.
-    # Send and ack pair by slot id, alloc and ack by nline.
-    "gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.flush_alloc",
-    "gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.flush_alloc_ready",
-    "gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.flush_alloc_nline",
-    "gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.mem_req_write_flush_valid",
-    "gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.mem_req_write_flush_ready",
-    "gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.mem_req_write_flush.mem_req_id",
-    "gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.mem_req_write_flush.mem_req_addr",
-    "gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.mem_resp_write_flush_valid",
-    "gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.mem_resp_write_flush_ready",
-    "gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.mem_resp_write_flush.mem_resp_w_id",
-    "gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.flush_ack_nline",
-
-    # Tie each writeback to its eviction. st2 drives flush_alloc with the miss
-    # allocation on the same cycle, and they join on (set, victim_way), with
-    # 256 sets and 8 ways giving set = nline & 0xff.
-    "gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache."
-    "hpdcache_miss_handler_i.mshr_alloc_wback_i",
-    "gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache."
-    "hpdcache_miss_handler_i.mshr_alloc_victim_way_i",
-    "gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.flush_alloc_way",
-    # Which unit raised flush_alloc. hpdcache.sv:981 merges them and
-    # hpdcache.sv:1258 asserts they are mutually exclusive, so the pair
-    # tags each writeback with its cause: an eviction or a CMO flush.
-    "gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.ctrl_flush_alloc",
-    "gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.cmo_flush_alloc",
-]
-
-# ------------------------------------------------------------------ #
-# Loop-generated per-port / per-entry signal paths.                  #
-#                                                                    #
-# All hardcoded indexed signals from the original WHITELIST were     #
-# moved here so the per-port arrays scale with the constants at the  #
-# top of this file. Adding a port needs only that one change.        #
-# ------------------------------------------------------------------ #
-
-# ex_stage dcache request ports (architectural, NOT scoreboard-derived)
-for _p in range(DCACHE_REQ_PORTS):
-    WHITELIST.append(f"ex_stage_i.dcache_req_ports_o[{_p}].data_req")
-
-# fetch_entry_if_id (per NrIssuePorts)
-for _p in range(NR_ISSUE_PORTS):
-    WHITELIST += [
-        f"fetch_entry_if_id[{_p}].address",
-        f"fetch_entry_if_id[{_p}].instruction",
-    ]
-
-# decoded_instr_i, per NrIssuePorts:
-# {fu, rs1, rs2, rd, bp.cf, bp.predict_address}
-for _p in range(NR_ISSUE_PORTS):
-    WHITELIST += [
-        f"issue_stage_i.i_scoreboard.decoded_instr_i[{_p}].fu",
-        f"issue_stage_i.i_scoreboard.decoded_instr_i[{_p}].rs1",
-        f"issue_stage_i.i_scoreboard.decoded_instr_i[{_p}].rs2",
-        f"issue_stage_i.i_scoreboard.decoded_instr_i[{_p}].rd",
-        f"issue_stage_i.i_scoreboard.decoded_instr_i[{_p}].bp.cf",
-        f"issue_stage_i.i_scoreboard.decoded_instr_i[{_p}].bp.predict_address",
-    ]
-
-# idx_hzd_rs{1,2,3} (per NrIssuePorts)
-for _p in range(NR_ISSUE_PORTS):
-    for _rs in (1, 2, 3):
-        WHITELIST.append(
-            f"issue_stage_i.i_issue_read_operands.idx_hzd_rs{_rs}[{_p}]")
-
-# trans_id_i (per NrWbPorts)
-for _p in range(NR_WB_PORTS):
-    WHITELIST.append(f"issue_stage_i.i_scoreboard.trans_id_i[{_p}]")
-
-# mem_q, per NrScoreboardEntries over fu, rs1, rs2, rd, bp.cf and
-# bp.predict_address. bp comes from the registered slot so the writeback fixup
-# avoids the pre-edge misattribution on back-to-back issues.
-for _i in range(NR_SB_ENTRIES):
-    for _f in ("fu", "rs1", "rs2", "rd", "bp.cf", "bp.predict_address"):
-        WHITELIST.append(
-            f"issue_stage_i.i_scoreboard.mem_q[{_i}].sbe.{_f}")
-
-# commit_pointer_q (per NrCommitPorts)
-for _p in range(NR_COMMIT_PORTS):
-    WHITELIST.append(f"issue_stage_i.i_scoreboard.commit_pointer_q[{_p}]")
-
-del _p, _rs, _i, _f  # keep module namespace clean
-
-REQUIRED_SIGNALS = {
-    "clk_i",
-    "id_stage_i.fetch_entry_valid_i",
-    "id_stage_i.fetch_entry_ready_o",
-    "fetch_entry_if_id[0].address",
-    "fetch_entry_if_id[0].instruction",
-    "issue_stage_i.i_scoreboard.decoded_instr_valid_i",
-    "issue_stage_i.i_scoreboard.decoded_instr_ack_o",
-    "issue_stage_i.i_scoreboard.decoded_instr_i[0].fu",
-    "issue_stage_i.i_scoreboard.decoded_instr_i[0].rs1",
-    "issue_stage_i.i_scoreboard.decoded_instr_i[0].rs2",
-    "issue_stage_i.i_scoreboard.decoded_instr_i[0].rd",
-    "issue_stage_i.i_scoreboard.issue_instr_valid_o",
-    "issue_stage_i.i_scoreboard.issue_ack_i",
-    "issue_stage_i.i_scoreboard.issue_pointer_q",
-    "issue_stage_i.i_scoreboard.wt_valid_i",
-    "issue_stage_i.i_scoreboard.trans_id_i[0]",
-    "commit_stage_i.commit_ack_o",
-}
-
-
-# ============================================================================
-# Functional-unit metadata (from ariane_pkg.sv fu_t enum + spec 5.7 rollup)
-# ============================================================================
-
+# fu_t, ariane_pkg.sv:188-201.
 FU_NAME = {
-    0:  "NONE",
-    1:  "LOAD",
-    2:  "STORE",
-    3:  "ALU",
-    4:  "CTRL_FLOW",
-    5:  "MULT",
-    6:  "CSR",
-    7:  "FPU",
-    8:  "FPU_VEC",
-    9:  "CVXIF",
+    0: "NONE",
+    1: "LOAD",
+    2: "STORE",
+    3: "ALU",
+    4: "CTRL_FLOW",
+    5: "MULT",
+    6: "CSR",
+    7: "FPU",
+    8: "FPU_VEC",
+    9: "CVXIF",
     10: "ACCEL",
     11: "AES",
 }
-
-# Per spec 5.7. MemFP (FP load/store) requires looking at the op or
-# is_rd_fpr/is_rs2_fpr flag, not just fu. Deferred to a later increment.
-# Both LOAD and STORE roll up to Mem regardless of int/FP target here.
+# LOAD and STORE are Mem whether the target register is integer or FP, since
+# telling them apart needs the op, which the tracer does not read.
 FU_CATEGORY = {
-    "ALU":       "Int",
+    "ALU": "Int",
     "CTRL_FLOW": "Int",
-    "MULT":      "Int",
-    "CSR":       "Int",
-    "AES":       "Int",     # AES extensions execute on the FLU/AES unit
-    "LOAD":      "Mem",
-    "STORE":     "Mem",
-    "FPU":       "FP",
-    "FPU_VEC":   "FP",
-    "CVXIF":     "CVXIF",
-    "ACCEL":     "ACCEL",
-    "NONE":      "None",
+    "MULT": "Int",
+    "CSR": "Int",
+    "AES": "Int",
+    "LOAD": "Mem",
+    "STORE": "Mem",
+    "FPU": "FP",
+    "FPU_VEC": "FP",
+    "CVXIF": "CVXIF",
+    "ACCEL": "ACCEL",
+    "NONE": "None",
 }
 
+# HPDcache requester ids, cva6_hpdcache_subsystem.sv:181-189 with NumPorts 4
+# (cva6.sv:380): 1 the load unit and 3 the store port.
+HPDCACHE_NUM_PORTS = 4
+LOAD_UNIT_SID = 1
+STORE_PORT_SID = HPDCACHE_NUM_PORTS - 1
 
-# ============================================================================
-# Instruction record
-# ============================================================================
+# Cycles from an access's release to its MSHR allocation, measured on daxpy:
+# 2,065 of 2,070 store allocations sit at +4 (three cache stages plus one),
+# and 2,047 of 2,047 otherwise unclaimed load allocations at +1.
+HPDCACHE_STORE_LOOKAHEAD = 4
+HPDCACHE_LOAD_LOOKAHEAD = 1
 
-@dataclass
-class InstructionRecord:
-    id: int = 0
-    pc: str = None
-    instr_word: str = None
-    disasm: str = None
-    is_compressed: bool = False
-    fu: str = None
-    fu_category: str = None
-    rd: int = None
-    rs1: int = None
-    rs2: int = None
-    trans_id: int = None
-    fetch_port: int = 0
-    # Request-accept and data-delivery cycles of the fetch carrying the low
-    # half of the instruction. For an aligned instruction this is the only
-    # fetch. On a hit if2 = if1 + 1, on a cacheable miss about if1 + 5.
-    if1_lo: int = None
-    if2_lo: int = None
-    # Same for the fetch carrying the high half. Only set when wraps_line,
-    # since an RVI at the last 2-byte slot of its fetch block has its upper
-    # 16 bits in the next block and the realigner combines the two.
-    if1_hi: int = None
-    if2_hi: int = None
-    # The instruction straddles a fetch-block boundary: pc at FETCH_BYTES-2
-    # of its block and not compressed. Set on flushed records too, since the
-    # realigner does its bookkeeping whether or not the instruction commits.
-    wraps_line: bool = False
-    # The I$ went to memory for this PC's line, state_q == MISS at if2.
-    # False for a hit, including one queued behind an earlier miss.
-    ic_miss: bool = None
-    # True when if1/if2 were synthesised rather than bound to an
-    # I-cache event. On such a record ic_miss stays None: nothing was
-    # observed, so a hit is not something to assert. Mirrors
-    # MinorFlow_tracer.py's _real_f2 / _real_dec / _real_ret.
-    if_synthesised: bool = None
-    # Hi-side miss, from the same signal at the hi fetch's fe2 cycle. Only
-    # meaningful when wraps_line, None when there is no hi fetch.
-    ic_miss_hi: bool = None
-    fe_cycle: int = None
-    # One measurement and two derivations. Decode and issue are one handshake
-    # (scoreboard.sv:151) so they share a cycle, and no dumped signal marks
-    # entry to execute, so ex_cycle is that cycle plus one.
-    id_cycle: int = None
-    is_cycle: int = None
-    ex_cycle: int = None
-    wb_cycle: int = None
-    co_cycle: int = None
-    flushed: bool = False
-    flush_reason: str = None
-    # Cycle the core squashed this record, from the flush_ctrl_* rising edge.
-    # None on a record that was not squashed, and on the EOF drain, where the
-    # trace simply ended.
-    flush_cycle: int = None
-    # Transitions of load_unit.state_q, or store_unit.state_q for stores,
-    # while the FSM held this trans_id. Entries are {cycle, state}, and only
-    # transitions are kept: the closing IDLE goes to lsu_complete_cycle.
-    lsu_state_history: list = None
-    # Cycle the LSU FSM left IDLE for this record, the admission cycle.
-    # Usually is_cycle + 1, later under stalls or a TLB miss insert.
-    lsu_admit_cycle: int = None
-    # Cycle the FSM returned to IDLE. For a load the data arrives later via
-    # ldbuf, so this marks the FSM's release rather than completion.
-    # Last cycle the access was live in the FSM, so the closing transition
-    # at cycle C records C-1. Without that the outgoing and incoming windows
-    # would share cycle C and one D-cache event would land in both.
-    lsu_complete_cycle: int = None
+# hpdcache_miss_handler.sv:154 leaves the refill FSM typedef unsized, so the
+# VCD holds 32 bits, and any value but 0 is a refill in progress.
+REFILL_FSM_IDLE = 0
 
-    # D$ correlation for LOAD and STORE records, filled by
-    # attribute_dc_events_to_records() from the events that fired during
-    # [lsu_admit_cycle, lsu_complete_cycle].
+# A writeback joins its eviction within this many cycles of the allocation.
+# On daxpy all 1,318 links share the cycle, so one cycle only absorbs skew.
+EVICTION_JOIN_WINDOW = 1
 
-    # An mshr_alloc with sid == LOAD_UNIT_SID and mTID == this trans_id.
-    # Rare when stores allocate first and loads coalesce behind them.
-    dc_primary_miss: bool = False
-    # An mshr_check_hit fired in this record's window, so something
-    # coalesced onto an existing MSHR. Approximate, no per-check sid.
-    dc_coalesced: bool = False
-    # refill_fsm_q non-IDLE for at least one cycle of the window, catching
-    # loads delayed by a concurrent refill holding the cache port.
-    dc_refill_overlap: bool = False
-    # Chronological events, each with 'cycle' and 'type' (alloc, check_hit,
-    # check_miss, refill_rsp) plus that type's own fields.
-    dc_events: list = None
+# Synthesised fetch cycles sit this far below fe_out_cycle, one more for a
+# wrapping instruction's second fetch.
+FETCH_SYNTH_DEPTH = 2
+FETCH_SYNTH_DEPTH_WRAP = 3
 
-    # Branch prediction and resolution, for records with fu == CTRL_FLOW.
+# The progress line is offered one line in this many plus one, a mask so
+# the test stays cheap.
+PROGRESS_LINE_MASK = 0x3FFF
 
-    # "NoCF", "Branch", "Jump", "JumpR" or "Return", which also names the
-    # source: Branch is the BHT, JumpR the BTB, Return the RAS, Jump direct.
-    # Captured at the issue handshake from mem_q[trans_id].sbe.bp.
-    bp_predicted_cf: str = None
-    # Gives mem_q precedence over the resolution derivation, which two
-    # writers would otherwise settle by arrival order. mem_q reads the stored
-    # prediction, and the derivation is exact only off JumpR. Never emitted.
-    bp_cf_from_memq: bool = False
-    # VLEN-bit target as int, None for NoCF.
-    bp_predicted_target: int = None
-    # Resolved type per branch_unit.sv:64-107. May differ from the
-    # predicted one when the BTB or RAS missed. Captured from
-    # resolved_branch_i, which pulses for one cycle at ex_cycle.
-    bp_resolved_cf: str = None
-    bp_resolved_target: int = None
-    # Actual outcome, False for not-taken.
-    bp_resolved_taken: bool = None
-    # is_mispredict straight from resolution, covering both a wrong
-    # direction and a wrong target.
-    bp_mispredict: bool = None
-    # Cycle resolved_branch_i.valid fired. Equals ex_cycle for a cleanly
-    # pipelined branch.
-    bp_resolution_cycle: int = None
+# Missing signals listed before the report is cut short, and the candidate
+# paths shown for each.
+MAX_MISSING_REPORTED = 10
+MAX_CANDIDATES_SHOWN = 5
 
-    # Operand forwarding, snapshotted pre-edge at the issue cycle because
-    # issue_read_operands' signals are combinational and live for one cycle.
-    # rs3 only applies to FMA-class FPU ops, and is None elsewhere.
+# A clock period under this many picoseconds is not a real clock.
+MIN_PLAUSIBLE_CLOCK_PS = 1000
+TIMESCALE_TO_PS = {"fs": 1e-3, "ps": 1.0, "ns": 1e3, "us": 1e6, "ms": 1e9,
+                   "s": 1e12}
 
-    # The issue stage took the operand from the forwarding network rather
-    # than the regfile, from i_issue_read_operands.forward_rsX. False also
-    # covers a stall, since capture only runs on a successful handshake.
-    fwd_rs1_used: bool = False
-    # Scoreboard slot the operand came from, read from idx_hzd_rsX[0].
-    # Only meaningful when the matching _used is True.
-    fwd_rs1_from_tid: int = None
-    # "sb" when the producer had already written back and the scoreboard
-    # holds the result, "wb" when it was bypassed on the same cycle from a
-    # writeback port. "wb" is the tight back-to-back dependent case.
-    fwd_rs1_via: str = None
-    fwd_rs2_used: bool = False
-    fwd_rs2_from_tid: int = None
-    fwd_rs2_via: str = None
-    fwd_rs3_used: bool = False
-    fwd_rs3_from_tid: int = None
-    fwd_rs3_via: str = None
+# Signal table. Each row maps the RTL name a mechanism reads to its path
+# under --scope-prefix and to the mechanisms needing it. A core signal is
+# required, and every other mechanism resolves all or nothing.
+SCOREBOARD = "issue_stage_i.i_scoreboard."
+READ_OPERANDS = "issue_stage_i.i_issue_read_operands."
+ICACHE = "gen_cache_hpd.i_cache_subsystem.i_cva6_icache."
+HPDCACHE = "gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache."
+MISS_HANDLER = HPDCACHE + "hpdcache_miss_handler_i."
+CORE = ("core",)
+SIGNALS = {
+    "clk_i": ("clk_i", CORE),
+    "fetch_entry_valid_i": ("id_stage_i.fetch_entry_valid_i", CORE),
+    "fetch_entry_ready_o": ("id_stage_i.fetch_entry_ready_o", CORE),
+    "fetch_entry.address": ("fetch_entry_if_id[0].address", CORE),
+    "fetch_entry.instruction": ("fetch_entry_if_id[0].instruction", CORE),
+    "rvfi_is_compressed_o": ("id_stage_i.rvfi_is_compressed_o", CORE),
+    # High while the realigner serves an instruction split across two
+    # fetches, a cross-check of wraps_line for --verbose.
+    "serving_unaligned_o": ("i_frontend.i_instr_realign.serving_unaligned_o",
+                            CORE),
+    "decoded_instr_valid_i": (SCOREBOARD + "decoded_instr_valid_i", CORE),
+    "decoded_instr_ack_o": (SCOREBOARD + "decoded_instr_ack_o", CORE),
+    "decoded_instr.fu": (SCOREBOARD + "decoded_instr_i[0].fu", CORE),
+    "decoded_instr.rs1": (SCOREBOARD + "decoded_instr_i[0].rs1", CORE),
+    "decoded_instr.rs2": (SCOREBOARD + "decoded_instr_i[0].rs2", CORE),
+    "decoded_instr.rd": (SCOREBOARD + "decoded_instr_i[0].rd", CORE),
+    "decoded_instr.bp.cf": (SCOREBOARD + "decoded_instr_i[0].bp.cf", CORE),
+    "decoded_instr.bp.predict_address": (
+        SCOREBOARD + "decoded_instr_i[0].bp.predict_address", CORE),
+    # While high the decode handshake still fires but no slot is allocated
+    # (scoreboard.sv:171), so counting it would drift every later trans_id.
+    "flush_unissued_instr_i": (SCOREBOARD + "flush_unissued_instr_i", CORE),
+    "issue_pointer_q": (SCOREBOARD + "issue_pointer_q", CORE),
+    "wt_valid_i": (SCOREBOARD + "wt_valid_i", CORE),
+    "commit_ack_o": ("commit_stage_i.commit_ack_o", CORE),
+    "flush_ctrl_if": ("flush_ctrl_if", CORE),
+    "flush_ctrl_ex": ("flush_ctrl_ex", CORE),
+    # Perf-counter event 16 (perf_counters.sv:126).
+    "icache_dreq_o.req": ("i_frontend.icache_dreq_o.req", CORE),
+    "icache_dreq_i.valid": ("i_frontend.icache_dreq_i.valid", ("icache",)),
+    "icache_dreq_i.vaddr": ("i_frontend.icache_dreq_i.vaddr", ("icache",)),
+    "icache_dreq_o.kill_s2": ("i_frontend.icache_dreq_o.kill_s2",
+                              ("icache",)),
+    "icache.state_q": (ICACHE + "state_q", ("icache",)),
+    # One high cycle per accepted cacheable ifill (cva6_icache.sv:301-303),
+    # perf-counter event 1, wrong-path fills included.
+    "icache.miss_o": (ICACHE + "miss_o", ("icache",)),
+    "load_unit.state_q": ("ex_stage_i.lsu_i.i_load_unit.state_q",
+                          ("lsu_fsm",)),
+    "store_unit.state_q": ("ex_stage_i.lsu_i.i_store_unit.state_q",
+                           ("lsu_fsm",)),
+    # The request feeding both FSMs (load_store_unit.sv:174). Its trans_id
+    # on the cycle before an FSM leaves IDLE names the admitted record.
+    "lsu_ctrl.trans_id": ("ex_stage_i.lsu_i.lsu_ctrl.trans_id",
+                          ("lsu_fsm",)),
+    "lsu_bypass.pop_ld_i": ("ex_stage_i.lsu_i.lsu_bypass_i.pop_ld_i",
+                            ("lsu_fsm",)),
+    "lsu_bypass.pop_st_i": ("ex_stage_i.lsu_i.lsu_bypass_i.pop_st_i",
+                            ("lsu_fsm",)),
+    "mshr_alloc_i": (MISS_HANDLER + "mshr_alloc_i",
+                     ("dcache", "mem_writeback")),
+    "mshr_alloc_tid_i": (MISS_HANDLER + "mshr_alloc_tid_i", ("dcache",)),
+    "mshr_alloc_sid_i": (MISS_HANDLER + "mshr_alloc_sid_i", ("dcache",)),
+    "mshr_alloc_is_prefetch_i": (MISS_HANDLER + "mshr_alloc_is_prefetch_i",
+                                 ("dcache",)),
+    "mshr_alloc_nline_i": (MISS_HANDLER + "mshr_alloc_nline_i",
+                           ("dcache", "mem_writeback")),
+    # A check with a hit on the same cycle joins an MSHR already open for the
+    # line, which is how loads following stores to one line miss.
+    "mshr_check_i": (MISS_HANDLER + "mshr_check_i", ("dcache",)),
+    "mshr_check_nline_i": (MISS_HANDLER + "mshr_check_nline_i", ("dcache",)),
+    "mshr_check_hit_o": (MISS_HANDLER + "mshr_check_hit_o", ("dcache",)),
+    # Busy while a refill holds the cache port, stalling unrelated loads.
+    "refill_fsm_q": (MISS_HANDLER + "refill_fsm_q", ("dcache",)),
+    "refill_core_rsp_valid_o": (MISS_HANDLER + "refill_core_rsp_valid_o",
+                                ("dcache",)),
+    "refill_core_rsp_o.tid": (MISS_HANDLER + "refill_core_rsp_o.tid",
+                              ("dcache",)),
+    # Dirty-line writebacks with the write buffer configured out: flush_alloc
+    # hands the line over, the flush channel's request and response write it.
+    "flush_alloc": (HPDCACHE + "flush_alloc", ("mem_writeback",)),
+    "flush_alloc_ready": (HPDCACHE + "flush_alloc_ready", ("mem_writeback",)),
+    "flush_alloc_nline": (HPDCACHE + "flush_alloc_nline", ("mem_writeback",)),
+    "flush_alloc_way": (HPDCACHE + "flush_alloc_way", ("mem_writeback",)),
+    # hpdcache.sv:981 merges the two and :1258 asserts they never overlap,
+    # which tells an eviction from a CMO flush.
+    "ctrl_flush_alloc": (HPDCACHE + "ctrl_flush_alloc", ("mem_writeback",)),
+    "cmo_flush_alloc": (HPDCACHE + "cmo_flush_alloc", ("mem_writeback",)),
+    "mem_req_write_flush_valid": (HPDCACHE + "mem_req_write_flush_valid",
+                                  ("mem_writeback",)),
+    "mem_req_write_flush_ready": (HPDCACHE + "mem_req_write_flush_ready",
+                                  ("mem_writeback",)),
+    "mem_req_write_flush.mem_req_id": (
+        HPDCACHE + "mem_req_write_flush.mem_req_id", ("mem_writeback",)),
+    "mem_req_write_flush.mem_req_addr": (
+        HPDCACHE + "mem_req_write_flush.mem_req_addr", ("mem_writeback",)),
+    "mem_resp_write_flush_valid": (HPDCACHE + "mem_resp_write_flush_valid",
+                                   ("mem_writeback",)),
+    "mem_resp_write_flush_ready": (HPDCACHE + "mem_resp_write_flush_ready",
+                                   ("mem_writeback",)),
+    "mem_resp_write_flush.mem_resp_w_id": (
+        HPDCACHE + "mem_resp_write_flush.mem_resp_w_id", ("mem_writeback",)),
+    "flush_ack_nline": (HPDCACHE + "flush_ack_nline", ("mem_writeback",)),
+    # The miss allocation that evicted the line: the join to its writeback is
+    # on (set, victim way), set being the nline masked by the set count.
+    "mshr_alloc_wback_i": (MISS_HANDLER + "mshr_alloc_wback_i",
+                           ("mem_writeback",)),
+    "mshr_alloc_victim_way_i": (MISS_HANDLER + "mshr_alloc_victim_way_i",
+                                ("mem_writeback",)),
+    # bp_resolve_t (cva6.sv:134), valid for one cycle at the branch's
+    # ex_cycle, or just after under contention.
+    "resolved_branch_i.valid": (SCOREBOARD + "resolved_branch_i.valid",
+                                ("bp_resolution",)),
+    "resolved_branch_i.pc": (SCOREBOARD + "resolved_branch_i.pc",
+                             ("bp_resolution",)),
+    "resolved_branch_i.target_address": (
+        SCOREBOARD + "resolved_branch_i.target_address", ("bp_resolution",)),
+    "resolved_branch_i.is_taken": (SCOREBOARD + "resolved_branch_i.is_taken",
+                                   ("bp_resolution",)),
+    "resolved_branch_i.is_mispredict": (
+        SCOREBOARD + "resolved_branch_i.is_mispredict", ("bp_resolution",)),
+    "resolved_branch_i.cf_type": (SCOREBOARD + "resolved_branch_i.cf_type",
+                                  ("bp_resolution",)),
+    # issue_read_operands.sv:175, :180 and :185 declare idx_hzd_rs1 to rs3,
+    # and :215 forward_rs1 to rs3.
+    "forward_rs1": (READ_OPERANDS + "forward_rs1", ("forwarding",)),
+    "forward_rs2": (READ_OPERANDS + "forward_rs2", ("forwarding",)),
+    "forward_rs3": (READ_OPERANDS + "forward_rs3", ("forwarding",)),
+    "idx_hzd_rs1": (READ_OPERANDS + "idx_hzd_rs1[0]", ("forwarding",)),
+    "idx_hzd_rs2": (READ_OPERANDS + "idx_hzd_rs2[0]", ("forwarding",)),
+    "idx_hzd_rs3": (READ_OPERANDS + "idx_hzd_rs3[0]", ("forwarding",)),
+}
 
-    # Branch and flush bubbles, tagged by tag_branch_bubbles() after the walk.
-    # A non-flushed record followed by flushed ones then another non-flushed
-    # one is the CAUSER, and the one that resumes is the RECOVERY.
+# The registered scoreboard entry, written at the decode and issue handshake
+# and stable until commit, bar the target DebugEn overwrites at writeback.
+# Generated per slot by signal_table.
+MEM_Q_FIELDS = ("fu", "rs1", "rs2", "rd", "bp.cf", "bp.predict_address")
 
-    # On the causer. 'mispred' when the predictor guessed and was wrong,
-    # 'unpred' when it said NoCF, 'flush_other' for a non-branch cause such
-    # as a CSR write, a FENCE, an AMO commit drain or an exception entry.
-    bubble_kind: str = None
-    # Wrong-path instructions that consumed fetch bandwidth, strictly between
-    # causer and recovery. Zero for a bubble with no flushed run behind it.
-    bubble_caused_records: int = None
-    # Idle cycles between the causer's last fetch and the recovery's first,
-    # which is what the viewer draws and classifies as stall. A record count
-    # is not a cycle count: a 4-record fence drain can idle 4,100 cycles.
-    bubble_caused_cycles: int = None
-    # Id of the recovery record, for cross-record joins.
-    bubble_recovery_id: int = None
-    # On the recovery. Id of the causer, plus copies of both measures so
-    # either end can be queried without a join.
-    bubble_from_branch_id: int = None
-    bubble_squashed_records: int = None
-    bubble_cycles: int = None
-    # Unclamped idle gap, set on both ends of every bubble. Equals
-    # bubble_cycles except on pred_taken, where the attributed figure is
-    # capped at 1 and the rest is queue backpressure, not the predictor.
-    bubble_gap_cycles: int = None
+# Build-size probes, over every header path, so a build larger than the
+# table above is refused rather than half tracked.
+MEM_Q_SLOT_PROBE = re.compile(r"mem_q\[(\d+)\]\.sbe\.fu(?:\[[\d:]+\])?$")
+DECODED_PORT_PROBE = re.compile(
+    r"decoded_instr_i\[(\d+)\]\.fu(?:\[[\d:]+\])?$")
+COMMIT_PORT_PROBE = re.compile(r"commit_pointer_q\[(\d+)\](?:\[[\d:]+\])?$")
+WB_PORT_PROBE = re.compile(r"trans_id_i\[(\d+)\](?:\[[\d:]+\])?$")
 
+# hpdcache_set_t, setWidth bits (hpdcache_miss_handler.sv:107), where
+# setWidth is $clog2(sets) (hpdcache_pkg.sv:493).
+DCACHE_SET_SIGNAL = MISS_HANDLER + "refill_set_o"
+HPDCACHE_SCOPE = "gen_cache_hpd."
 
-# ============================================================================
-# I$ event timeline
-# ============================================================================
+BIT_RANGE = re.compile(r"\[\d+:\d+\]$")
 
-@dataclass
-class ICacheEvent:
-    fe1_cycle: int
-    fe2_cycle: int
-    vaddr_word: int   # 4-byte aligned
-    ic_miss: bool
-
-
-class ICacheTimeline:
-    """Walks the VCD's I$ signals alongside the main tracer and emits one
-    ICacheEvent per delivered fetch. A new access starts when vaddr_o changes
-    or state_q re-enters READ, the second catching a re-fetch of the same PC."""
-
-    NON_READ_STATES = frozenset({
-        FSM_FLUSH, FSM_IDLE, FSM_MISS, FSM_KILL_ATRANS, FSM_KILL_MISS, None,
-    })
-
-    def __init__(self):
-        self.events = []
-        self.last_vaddr_o_str = None
-        self.last_state_q = None
-        self.last_access_start_cycle = None
-
-    def on_cycle(self, cycle, state_q_str, vld, vaddr_o_str, k2):
-        """Process one rising clock edge."""
-
-        # --- Detect new access (either path) ---
-        vaddr_o_changed = (vaddr_o_str != self.last_vaddr_o_str)
-        state_to_read = (state_q_str == FSM_READ
-                         and self.last_state_q in self.NON_READ_STATES)
-
-        if vaddr_o_changed or state_to_read:
-            self.last_access_start_cycle = cycle
-
-        self.last_vaddr_o_str = vaddr_o_str
-        self.last_state_q = state_q_str
-
-        # --- Emit event on delivery ---
-        if vld == "1" and k2 != "1" and vaddr_o_str is not None:
-            try:
-                vaddr_o = int(vaddr_o_str, 2)
-            except ValueError:
-                return
-            if self.last_access_start_cycle is not None:
-                fe1 = self.last_access_start_cycle - 1
-            else:
-                fe1 = cycle - 1
-            fe1 = max(0, fe1)
-            ic_miss = (state_q_str == FSM_MISS)
-            self.events.append(ICacheEvent(
-                fe1_cycle=fe1,
-                fe2_cycle=cycle,
-                vaddr_word=vaddr_o & ~FETCH_OFFSET_MASK,
-                ic_miss=ic_miss,
-            ))
-
-
-def match_records_to_events(records, events):
-    """Bind I$ timing onto each record: if1_lo, if2_lo and ic_miss from the
-    event for the record's own word with the highest fe2 at or before fe_cycle,
-    plus if1_hi and if2_hi at pc+2 when it wraps. No match leaves them None."""
-
-    by_word = defaultdict(list)
-    for ev in events:
-        by_word[ev.vaddr_word].append(ev)
-    # fe2_cycle keys per word, sorted alongside the events so each lookup can
-    # binary-search its window. A hot loop puts one event per iteration on a
-    # word, which made the old linear scan quadratic and could hang.
-    by_word_fe2 = {}
-    for word in by_word:
-        by_word[word].sort(key=lambda e: e.fe2_cycle)
-        by_word_fe2[word] = [e.fe2_cycle for e in by_word[word]]
-
-    def find_best(word, fe_cycle):
-        candidates = by_word.get(word, [])
-        if not candidates:
-            return None
-        idx = bisect.bisect_right(by_word_fe2[word], fe_cycle) - 1
-        if idx < 0:
-            return None
-        return candidates[idx]
-
-    n_matched = 0
-    n_unmatched = 0
-    n_wraps_with_hi = 0
-
-    for rec in records:
-        if rec.pc is None or rec.fe_cycle is None:
-            n_unmatched += 1
-            continue
-        try:
-            pc_int = int(rec.pc, 16)
-        except (TypeError, ValueError):
-            n_unmatched += 1
-            continue
-        # First fetch: word containing the LOWER half of the instr.
-        lo_word = pc_int & ~FETCH_OFFSET_MASK
-        best_lo = find_best(lo_word, rec.fe_cycle)
-        if best_lo is not None:
-            rec.if1_lo = best_lo.fe1_cycle
-            rec.if2_lo = best_lo.fe2_cycle
-            rec.ic_miss = best_lo.ic_miss
-            n_matched += 1
-        else:
-            n_unmatched += 1
-            # Flushed-record fallback. A wrong-path fetch is killed before
-            # the icache responds, so no event exists. Synthesize cycles two
-            # before fe_cycle so the timeline draws if1/if2, not an orphan.
-            if rec.flushed and rec.fe_cycle is not None:
-                rec.if2_lo = max(0, rec.fe_cycle - 1)
-                rec.if1_lo = max(0, rec.fe_cycle - 2)
-                rec.if_synthesised = True
-                # Cleared, not left: any earlier value came from a different
-                # event than the timing now on this record.
-                rec.ic_miss = None
-                rec.ic_miss_hi = None
-        # Second fetch, wraps_line records only, upper half at pc+2.
-        # fe1_cycle >= rec.if1_lo or find_best picks a stale prefetch, the
-        # frontend being non-blocking on the hi side.
-        if rec.wraps_line:
-            hi_word = (pc_int + 2) & ~FETCH_OFFSET_MASK
-            hi_candidates = by_word.get(hi_word, [])
-            best_hi = None
-            lo_floor = rec.if1_lo if rec.if1_lo is not None else 0
-            hi_fe2 = by_word_fe2.get(hi_word, [])
-            hi_top = bisect.bisect_right(hi_fe2, rec.fe_cycle)
-            hi_start = bisect.bisect_left(hi_fe2, lo_floor)
-            for i in range(hi_top - 1, hi_start - 1, -1):
-                ev = hi_candidates[i]
-                if ev.fe1_cycle >= lo_floor:
-                    best_hi = ev
-                    break
-            if best_hi is not None:
-                rec.if1_hi = best_hi.fe1_cycle
-                rec.if2_hi = best_hi.fe2_cycle
-                # Authoritative hi-miss from the icache FSM. The hi event
-                # carries the same ic_miss bit as the lo one, replacing an
-                # if2-if1 heuristic that over-counted on port-busy stalls.
-                rec.ic_miss_hi = best_hi.ic_miss
-                n_wraps_with_hi += 1
-
-    # Enforce fetch monotonicity in commit order. find_best takes the latest
-    # event with fe2 <= fe_cycle, so in a loop whose line stays cached an
-    # iteration can bind to the previous iteration's delivery.
-    #
-    #   1. Rebind to a later event for the same word with fe1 >= prev_if1.
-    #   2. Failing that, synthesize cycles just before id_stage entry and
-    #      assume a cached hit, which respects program-order fetch.
-    prev_if1 = -1
-    prev_rec_with_if1 = None
-    n_rebound = 0
-    n_synth = 0
-    for rec in records:
-        if rec.if1_lo is None:
-            continue
-        if rec.if1_lo >= prev_if1:
-            prev_if1 = rec.if1_lo
-            prev_rec_with_if1 = rec
-            continue
-        # Violation. First try rebind.
-        if rec.pc is None or rec.fe_cycle is None:
-            prev_if1 = max(prev_if1, rec.if1_lo)
-            continue
-        try:
-            pc_int = int(rec.pc, 16)
-        except (TypeError, ValueError):
-            prev_if1 = max(prev_if1, rec.if1_lo)
-            continue
-        lo_word = pc_int & ~FETCH_OFFSET_MASK
-        candidates = by_word.get(lo_word, [])
-        new_ev = None
-        lo_fe2 = by_word_fe2.get(lo_word, [])
-        lo_start = bisect.bisect_left(lo_fe2, prev_if1)
-        lo_top = bisect.bisect_right(lo_fe2, rec.fe_cycle)
-        for i in range(lo_start, lo_top):
-            ev = candidates[i]
-            if ev.fe1_cycle >= prev_if1:
-                new_ev = ev
-                break
-        if new_ev is not None:
-            rec.if1_lo = new_ev.fe1_cycle
-            rec.if2_lo = new_ev.fe2_cycle
-            rec.ic_miss = new_ev.ic_miss
-            # This record is measured again, and if_synthesised promises
-            # ic_miss is None, which the assignment above just broke.
-            rec.if_synthesised = None
-            n_rebound += 1
-            # Re-evaluate hi side too if this is a wraps_line record.
-            if rec.wraps_line:
-                hi_word = (pc_int + 2) & ~FETCH_OFFSET_MASK
-                hi_candidates = by_word.get(hi_word, [])
-                new_hi = None
-                hi_fe2b = by_word_fe2.get(hi_word, [])
-                hi_start2 = bisect.bisect_left(hi_fe2b, new_ev.fe1_cycle)
-                hi_top2 = bisect.bisect_right(hi_fe2b, rec.fe_cycle)
-                for i in range(hi_start2, hi_top2):
-                    ev = hi_candidates[i]
-                    if ev.fe1_cycle >= new_ev.fe1_cycle:
-                        new_hi = ev
-                        break
-                if new_hi is not None:
-                    rec.if1_hi = new_hi.fe1_cycle
-                    rec.if2_hi = new_hi.fe2_cycle
-                    rec.ic_miss_hi = new_hi.ic_miss
-        else:
-            # No later event for this record's lo word. The line is
-            # still resident from an earlier iteration and the icache
-            # state never re-pulsed. Synthesize fetch cycles.
-            #
-            # Sequential FE timing off the previous record's if1. A matching
-            # lo or hi word shares that fetch, anything else takes the next
-            # cycle, and fe_cycle is the ceiling minus the pipeline depth.
-            depth = 3 if rec.wraps_line else 2
-            seq_if1 = None
-            if (prev_rec_with_if1 is not None
-                    and prev_rec_with_if1.pc is not None
-                    and prev_rec_with_if1.if1_lo is not None):
-                try:
-                    prev_pc_int = int(prev_rec_with_if1.pc, 16)
-                    prev_lo_word = prev_pc_int & ~FETCH_OFFSET_MASK
-                    prev_hi_word = (prev_lo_word + FETCH_BYTES
-                                    if prev_rec_with_if1.wraps_line
-                                    else None)
-                    if prev_lo_word == lo_word:
-                        seq_if1 = prev_rec_with_if1.if1_lo
-                    elif (prev_hi_word == lo_word
-                          and prev_rec_with_if1.if1_hi is not None):
-                        seq_if1 = prev_rec_with_if1.if1_hi
-                    else:
-                        last_prev_fetch = (prev_rec_with_if1.if1_hi
-                                           if prev_rec_with_if1.wraps_line
-                                           and prev_rec_with_if1.if1_hi
-                                           is not None
-                                           else prev_rec_with_if1.if1_lo)
-                        seq_if1 = last_prev_fetch + 1
-                except (TypeError, ValueError):
-                    seq_if1 = None
-            if seq_if1 is None:
-                # No usable prev context. Anchoring on fe_cycle overstates
-                # the FE gap when the issue stage stalled, since the FE
-                # fetched on time and the instruction sat in instr_queue.
-                seq_if1 = max(prev_if1, rec.fe_cycle - depth)
-            synth_if1 = max(seq_if1, prev_if1)
-            # Ceiling: synth must leave enough room before fe_cycle
-            # for the FE pipeline depth.
-            if rec.fe_cycle is not None:
-                ceiling = rec.fe_cycle - depth
-                if synth_if1 > ceiling:
-                    synth_if1 = max(prev_if1, ceiling)
-            if rec.wraps_line:
-                rec.if1_lo = synth_if1
-                rec.if2_lo = synth_if1 + 1
-                rec.if1_hi = rec.if2_lo  # shares cycle (pipelined)
-                rec.if2_hi = rec.if1_hi + 1
-            else:
-                rec.if1_lo = synth_if1
-                rec.if2_lo = synth_if1 + 1
-            rec.if_synthesised = True
-            rec.ic_miss = None
-            rec.ic_miss_hi = None
-            n_synth += 1
-        prev_if1 = rec.if1_lo
-        prev_rec_with_if1 = rec
-
-    # RVC-pair sharing. Two compressed instructions in one fetch word arrive
-    # in a single transaction, so the second inherits the first's binding. The
-    # main loop is per-record and can otherwise pick different events.
-    n_rvc_paired = 0
-    for i in range(1, len(records)):
-        prev = records[i - 1]
-        curr = records[i]
-        if prev.pc is None or curr.pc is None:
-            continue
-        if not (prev.is_compressed and curr.is_compressed):
-            continue
-        try:
-            prev_pc = int(prev.pc, 16)
-            curr_pc = int(curr.pc, 16)
-        except (TypeError, ValueError):
-            continue
-        # Same FETCH_BYTES-aligned block and consecutive 2-byte slots. At
-        # FETCH_BYTES=4 a pair check suffices, at 8 the iteration chains
-        # across a run of up to 4 compressed records in one block.
-        if (prev_pc & ~FETCH_OFFSET_MASK) != (curr_pc & ~FETCH_OFFSET_MASK):
-            continue
-        if curr_pc != prev_pc + 2:
-            continue
-        if prev.if1_lo is None:
-            continue
-        if curr.if1_lo == prev.if1_lo:
-            continue  # already aligned (the common case after main loop)
-        curr.if1_lo = prev.if1_lo
-        curr.if2_lo = prev.if2_lo
-        curr.ic_miss = prev.ic_miss
-        # curr's timing is now prev's wholesale, so its provenance is too.
-        # Either half alone would let a record claim what it did not measure.
-        curr.if_synthesised = True if prev.if_synthesised else None
-        # Hi side too if both records are wraps_line. (Unusual for a
-        # compressed pair to wrap, but defensive.)
-        if prev.wraps_line and curr.wraps_line:
-            curr.if1_hi = prev.if1_hi
-            curr.if2_hi = prev.if2_hi
-            curr.ic_miss_hi = prev.ic_miss_hi
-        n_rvc_paired += 1
-
-    return (n_matched, n_unmatched, n_wraps_with_hi, n_rebound, n_synth,
-            n_rvc_paired)
-
-
-def _bubble_gap_cycles(causer, recovery):
-    """Idle cycles between the causer's last fetch and the recovery's first.
-    Measured from if2_hi when the causer wraps a fetch block and if2_lo
-    otherwise, since the redirect cannot precede delivery and measuring from
-    if1 would absorb the causer's own icache stall."""
-    end = (causer.if2_hi
-           if (causer.wraps_line and causer.if2_hi is not None)
-           else causer.if2_lo)
-    if end is None or recovery.if1_lo is None:
-        return None
-    return max(0, recovery.if1_lo - end - 1)
-
-
-def tag_branch_bubbles(records):
-    """Attribute each bubble to its causer and recovery, walking records in id
-    order for [non-flushed][flushed run][non-flushed]. The causer is classified
-    mispred, unpred or flush_other. Returns the kind counts and diagnostics."""
-    counts = {"mispred": 0, "unpred": 0, "flush_other": 0, "pred_taken": 0}
-    diag = {
-        "bp_mispredict_total":         0,
-        "bp_mispredict_flushed":       0,
-        "bp_mispredict_no_followers":  0,
-        "bp_mispredict_end_of_trace":  0,
-    }
-    if len(records) < 2:
-        return counts, diag
-
-    # Defensive sort by id. completed[] is mostly ordered already, but a
-    # flushed record is appended at detection time, which can fire on the same
-    # cycle as a commit. At about 50k records the cost is negligible.
-    ordered = sorted(records, key=lambda r: r.id if r.id is not None else -1)
-    n = len(ordered)
-
-    # First pass diagnostic: count total bp_mispredict=True records
-    # and how many are flushed. This is a sanity check against Phase
-    # 7a's resolved-branch mispredict count.
-    for r in ordered:
-        if r.bp_mispredict is True:
-            diag["bp_mispredict_total"] += 1
-            if r.flushed:
-                diag["bp_mispredict_flushed"] += 1
-
-    i = 0
-    while i < n:
-        # Advance to the next non-flushed record. Records at the very
-        # start of the trace that are flushed (early kills) have
-        # no causer. We skip them silently.
-        while i < n and ordered[i].flushed:
-            i += 1
-        if i >= n:
-            break
-        causer = ordered[i]
-        # Look ahead: count consecutive flushed records after the
-        # causer, then find the next non-flushed (the recovery).
-        j = i + 1
-        while j < n and ordered[j].flushed:
-            j += 1
-        if j == i + 1:
-            # The very next record is also non-flushed -> no bubble.
-            # If this causer was a mispredicting branch, note it as
-            # "instant recovery". No wrong-path fetches happened.
-            if causer.bp_mispredict is True:
-                diag["bp_mispredict_no_followers"] += 1
-            i = j
-            continue
-        if j >= n:
-            # Bubble exists but the trace ended before a recovery
-            # record materialized. We don't tag this one (no recovery
-            # id to point at).
-            if causer.bp_mispredict is True:
-                diag["bp_mispredict_end_of_trace"] += 1
-            break
-        recovery = ordered[j]
-        bubble_records = j - i - 1  # flushed records strictly between
-
-        # unpred is NoCF, the predictor said nothing. mispred is a guess
-        # that was wrong. pred_taken belongs to the second pass, since a
-        # correct prediction leaves no flushed run behind it.
-        # bp_predicted_cf decides this. It is only authoritative when the
-        # mem_q correction resolved, so stats.bubbles.taxonomy_reliable
-        # records whether it did. Without it these become unpred wholesale.
-        pcf = causer.bp_predicted_cf
-        if causer.fu == "CTRL_FLOW" and (pcf is None or pcf == "NoCF"):
-            kind = "unpred"
-        elif causer.bp_mispredict is True:
-            kind = "mispred"
-        else:
-            kind = "flush_other"
-            # Dual-commit CSR partner. A CSR flush takes effect a cycle
-            # after commit, so an op that dual-committed beside it looks like
-            # the causer. Prefer a CSR that committed in the same cycle.
-            if i > 0:
-                prev = ordered[i - 1]
-                if (not prev.flushed
-                        and prev.co_cycle is not None
-                        and causer.co_cycle is not None
-                        and prev.co_cycle == causer.co_cycle
-                        and prev.fu == "CSR"):
-                    causer = prev
-            # Self-flushed CSR. A committing CSR write asserts flush_ex_o,
-            # which re-flushes the CSR itself, leaving it flushed with wb_cycle
-            # but no co_cycle. It, not the innocent predecessor, is the cause.
-            #
-            # fu='CSR' with wb_cycle set and flushed=True, anywhere in the
-            # run. Take the first in commit order, and shrink bubble_size by
-            # one since the CSR did real work.
-            if causer.fu != "CSR":
-                for k in range(i + 1, j):
-                    cand = ordered[k]
-                    if (cand.fu == "CSR"
-                            and cand.wb_cycle is not None
-                            and cand.flushed):
-                        causer = cand
-                        bubble_records = (j - i - 1) - 1
-                        break
-
-        # Cycle measure, computed the same way as the second pass so the two
-        # agree: causer's last fetch cycle to the recovery's first, exclusive
-        # at both ends. None when either endpoint is missing.
-        bubble_cycles = _bubble_gap_cycles(causer, recovery)
-
-        causer.bubble_kind = kind
-        causer.bubble_caused_records = bubble_records
-        causer.bubble_caused_cycles = bubble_cycles
-        # Nothing is clamped in this pass, so the two are one number. Set
-        # here as well, or mispred, unpred and flush_other carry no gap.
-        causer.bubble_gap_cycles = bubble_cycles
-        causer.bubble_recovery_id = recovery.id
-        recovery.bubble_from_branch_id = causer.id
-        recovery.bubble_squashed_records = bubble_records
-        recovery.bubble_cycles = bubble_cycles
-        recovery.bubble_gap_cycles = bubble_cycles
-        counts[kind] += 1
-
-        # Continue from the recovery, which may itself cause the next bubble,
-        # a corrected branch that mispredicts in turn. Leaving i = j lets the
-        # outer scan pick it up immediately.
-        i = j
-
-    # Second pass. Taken-branch fetch bubbles (no-flush cases).
-    # After the flush-based pass above, three categories of taken
-    # control flow can still be untagged:
-    #
-    #   pred_taken: the predictor was right. Every correctly predicted taken
-    #               branch still leaves a 1 to 2 cycle FE1 gap, since the
-    #               BHT and BTB see the branch at FE2. Always no-flush.
-    #
-    #   mispred:    the predictor guessed and was wrong. Handled by the
-    #               flush-based pass when a flushed run exists. CVA6 also
-    #               recovers instantly with no records flushed.
-    #
-    #   unpred:     the predictor was silent, so not-taken is assumed and a
-    #               branch that resolves taken sets mispredict. Same instant
-    #               recovery, sometimes with no wrong-path fetches to kill.
-    #
-    # All three are found by scanning forward to the next non-flushed record
-    # with if1_lo set, and a gap over 1 cycle is a bubble. The flush-based pass
-    # wins, so causers and recoveries it already tagged are skipped.
-    for i in range(n):
-        causer = ordered[i]
-        if causer.flushed:
-            continue
-        if causer.if1_lo is None:
-            continue
-        if causer.bubble_kind is not None:
-            continue  # already tagged by flush-based pass
-
-        # Only a branch, jump or return can cause an FE redirect bubble, and
-        # fu == 'CTRL_FLOW' is required too: the RVFI predict bus does not
-        # self-clear, so a following load can carry a stale prediction.
-        if causer.fu != "CTRL_FLOW":
-            continue
-
-        # Is this taken control flow? bp_resolved_taken is the authoritative
-        # signal and jumps and returns are always taken. A seen prediction is
-        # enough when bp_resolved_taken was dropped.
-        is_taken = (causer.bp_resolved_taken is True
-                    or causer.bp_predicted_cf in ("Jump", "Return"))
-        if not is_taken:
-            continue
-
-        # Measure from the causer's LAST fetch cycle, if2_hi when it wraps and
-        # if2_lo otherwise. The redirect cannot happen before delivery, and
-        # measuring from if1 would absorb the causer's own icache stall.
-        causer_fetch_end = (causer.if2_hi
-                            if (causer.wraps_line
-                                and causer.if2_hi is not None)
-                            else causer.if2_lo)
-        if causer_fetch_end is None:
-            continue
-
-        for j in range(i + 1, n):
-            nxt = ordered[j]
-            if nxt.flushed:
-                continue
-            if nxt.if1_lo is None:
-                continue
-            if nxt.bubble_from_branch_id is not None:
-                break  # next is already a recovery for another bubble
-            delta = nxt.if1_lo - causer_fetch_end
-            if delta > 1:
-                bubble_cycles = delta - 1
-                # Classify by predictor state, as the flush-based pass does.
-                # NoCF means nothing was predicted, so the redirect is unpred
-                # whatever bp_mispredict says, JAL bypassing resolution.
-                pcf = causer.bp_predicted_cf
-                if pcf is None or pcf == "NoCF":
-                    kind = "unpred"
-                elif causer.bp_mispredict is True:
-                    kind = "mispred"
-                else:
-                    kind = "pred_taken"
-                    # CVA6's static decoder fires at FE2, so the FE issues
-                    # the target one cycle later and the redirect costs 1.
-                    # Beyond that is IQ backpressure, not the predictor, so
-                    # the attributed figure is clamped while bubble_gap_cycles
-                    # keeps the unclamped measurement.
-                    bubble_cycles = min(bubble_cycles, 1)
-                causer.bubble_kind = kind
-                # This pass fires only where no flushed run exists, so the
-                # squashed-record count is zero by construction.
-                causer.bubble_caused_records = 0
-                causer.bubble_caused_cycles = bubble_cycles
-                causer.bubble_gap_cycles = delta - 1
-                causer.bubble_recovery_id = nxt.id
-                nxt.bubble_from_branch_id = causer.id
-                nxt.bubble_squashed_records = 0
-                nxt.bubble_cycles = bubble_cycles
-                nxt.bubble_gap_cycles = delta - 1
-                counts[kind] += 1
-            break
-
-    return counts, diag
+# An instruction line of an objdump -d -S -l listing: indented, the address,
+# a colon, the word and the text. The indent keeps the address labels out, and
+# source lines practically never start with hex, a colon and hex.
+DISASM_LINE = re.compile(r"^\s+([0-9a-fA-F]+):\s+([0-9a-fA-F]+)\s+(.+)$")
 
 
 # ============================================================================
-# Pipeline tracker
+# 5. Progress and logging
 # ============================================================================
 
-class PipelineTracker:
-    """Maintains queues of in-flight instances and applies handshake/flush
-    events. Order discipline: each queue is strict FIFO (in-order pipeline)."""
+# SHARED BEGIN py-progress
 
-    def __init__(self, n_wb_ports=NR_WB_PORTS, n_commit_ports=NR_COMMIT_PORTS):
-        self.n_wb_ports = n_wb_ports
-        self.n_commit_ports = n_commit_ports
+# Needs: sys, time
 
-        self.fetched = deque()        # has fe_cycle, awaiting decode
-        self.issued = {}              # trans_id -> record, awaiting wb/commit
-        self.completed = []           # terminal list
+PROGRESS_INTERVAL_S = 0.25
+PLAIN_PROGRESS_INTERVAL_S = 5.0
 
-        self.next_id = 0
-        self.n_committed = 0
-        # Squashed by the core. The end-of-trace drain is counted apart, in
-        # n_drained_*: those records were in flight when the VCD ended and
-        # the core never squashed them, so folding them in overstates the
-        # flush rate by 100% on a benchmark with one real EX flush.
-        self.n_flushed_if = 0
-        self.n_flushed_ex = 0
-        self.n_drained_if = 0
-        self.n_drained_ex = 0
-        self.n_unmatched_writebacks = 0
-        self.n_unmatched_commits = 0
 
-        # Realigner signal counters.
-        #
-        # serving_unaligned_o is registered unaligned_q, high while the
-        # realigner holds a fetch's upper half. It chains: a fetch that
-        # completes one unaligned and begins another has no 0 to 1 edge.
-        #
-        # Therefore neither counter below equals the wraps_line record
-        # count directly. The relationships are:
-        #
-        #   - n_realigner_unaligned_starts, the 0 to 1 transitions, counts
-        #     the unaligned runs the realigner began. A run can yield no
-        #     records if kill_s2 catches it, or several when they chain.
-        #
-        #   - n_realigner_unaligned_cycles, the cycles high, is the stall
-        #     time unaligned_q was held. It inflates with icache gaps between
-        #     the contributing fetches, so it is a stall metric not a count.
-        #
-        # wraps_line tagging is verified separately by the 100% lo to hi
-        # binding rate in match_records_to_events: every such record finds two
-        # distinct I$ events at the expected word addresses.
-        self.n_realigner_unaligned_starts = 0
-        self.n_realigner_unaligned_cycles = 0
+class Progress:
+    """One progress line on stderr: rewritten in place on a terminal, a new
+    line every few seconds in a log, and nothing when quiet."""
 
-        # Forwarding diagnostics, firing only when a real forward coincides
-        # with the producer on the wb bus. All zero means via=wb is impossible
-        # here. Nonzero with a zero via=wb stat means the via writer is wrong.
-        self._diag_n_issue_cycles = 0
-        self._diag_n_issue_with_any_wb = 0
-        self._diag_n_real_match_rs1 = 0
-        self._diag_n_real_match_rs2 = 0
-        self._diag_n_real_match_rs3 = 0
+    def __init__(self, label, total_bytes=0, quiet=False):
+        self.label = label
+        self.total_bytes = total_bytes
+        self.live = not quiet and sys.stderr.isatty()
+        self.plain = not quiet and not sys.stderr.isatty()
+        self.start = time.time()
+        self.last_emit = 0.0
+        self.last_plain = self.start
+        self.lines = 0
+        self.records = 0
+        self.bytes_done = 0
 
-        # I$ event timeline, filled per cycle by the walker. After the walk
-        # match_records_to_events binds if1/if2/ic_miss onto each record by
-        # 4-byte-aligned PC.
-        self.icache_timeline = ICacheTimeline()
-
-        # LSU FSM correlation via lsu_ctrl.trans_id.
-        # See on_lsu_fsm_sample for details.
-        #
-        # An admit-while-busy is pop_ld=1 in SEND_TAG or pop_st=1 in
-        # VALID_STORE, so state_q does not transition. pending_admit_*_tid_str
-        # defers it a cycle to line up with the FSM's logical handoff.
-        self.active_lsu_load = None
-        self.active_lsu_store = None
-        self.prev_load_state_str = None
-        self.prev_store_state_str = None
-        self.prev_lsu_ctrl_trans_id_str = None
-        self.pending_admit_load_tid_str = None
-        self.pending_admit_store_tid_str = None
-
-        # D$ event log, filled by on_dcache_sample during the scan. After it
-        # completes, attribute_dc_events_to_records binds events to records by
-        # the [admit, complete] window, plus tid where the event carries one.
-        #
-        # Events arrive in cycle order, since the caller invokes
-        # on_dcache_sample once per rising edge ascending. The attribution
-        # pass relies on that instead of re-sorting.
-        self._dc_events = []
-        self._rfsm_active_cycles = set()
-
-        # Dirty victim writeback events, logged in cycle order. Pairing and
-        # the AXI-write-latency aggregate happen in finalize_writebacks().
-        # Send and ack pair by flush slot id, alloc and ack join by nline.
-        self._wb_allocs = []   # (cycle, nline_hex, way_onehot)
-        self._wb_sends = []    # (cycle, slot_id_int, addr_hex)
-        self._wb_acks = []     # (cycle, slot_id_int, nline_hex)
-        # Send/ack pairs whose ack preceded its send, so the slot was
-        # mispaired. Kept out of the latency histogram and counted here.
-        self.n_wb_negative_latency = 0
-        # Dirty-victim evictions from the miss handler.
-        # (cycle, incoming_nline_hex, victim_way_onehot). Joined to writebacks
-        # by (set, way) in finalize_writebacks.
-        self._mshr_alloc_samples = []
-        self.writeback_events = []
-        self.writeback_stats = {}
-
-    # -- per-stage event handlers ------------------------------------------
-
-    def on_fetch(self, cycle, pc, instr_word, is_compressed):
-        # Mask the instruction word to 16 bits when compressed. The frontend
-        # field carries the line's lower 32 bits, which for an RVC pair holds
-        # both, and the one at this PC is in the low half.
-        if is_compressed and instr_word is not None:
-            try:
-                instr_word = f"0x{int(instr_word, 16) & 0xFFFF:04x}"
-            except ValueError:
-                pass
-        # wraps_line comes from PC and size: a 32-bit instruction at offset
-        # FETCH_BYTES-2 has its upper half in the next fetch. Equivalent to
-        # serving_unaligned_o asserting at the realigner's output cycle.
-        wraps = self._compute_wraps_line(pc, is_compressed)
-        rec = InstructionRecord(
-            id=self.next_id,
-            pc=pc,
-            instr_word=instr_word,
-            is_compressed=is_compressed,
-            fe_cycle=cycle,
-            wraps_line=wraps,
-        )
-        self.fetched.append(rec)
-        self.next_id += 1
-
-    @staticmethod
-    def _compute_wraps_line(pc, is_compressed):
-        """True when the instruction straddles a fetch-block boundary: a 32-bit
-        instruction at offset FETCH_BYTES-2 has its upper half in the next
-        block, so the realigner combines two fetches. The mechanism is
-        instr_realign.sv, where serving_unaligned_o = unaligned_q at line 63.
-        The earlier citation pointed at cva6_icache.sv lines 158 and 428,
-        which are the noncacheable cl_offset and the way-select mux, neither
-        of which has anything to do with a straddling instruction."""
-        if is_compressed or pc is None:
-            return False
-        try:
-            return (int(pc, 16) & FETCH_OFFSET_MASK) == FETCH_BYTES - 2
-        except (TypeError, ValueError):
-            return False
-
-    def on_fetch_dropped(self, cycle, pc, instr_word, is_compressed):
-        """An FE handshake on a cycle where flush_ctrl_if is high.
-        id_stage.sv:444 forces issue_n[0].valid=0 from its flush_i input,
-        which cva6.sv:719 wires to flush_ctrl_if, so the frontend pops but the
-        entry is discarded. Recorded as flushed and kept out of `fetched`."""
-        if is_compressed and instr_word is not None:
-            try:
-                instr_word = f"0x{int(instr_word, 16) & 0xFFFF:04x}"
-            except ValueError:
-                pass
-        wraps = self._compute_wraps_line(pc, is_compressed)
-        rec = InstructionRecord(
-            id=self.next_id,
-            pc=pc,
-            instr_word=instr_word,
-            is_compressed=is_compressed,
-            fe_cycle=cycle,
-            flushed=True,
-            flush_reason="fetch_dropped_fui",
-            # Dropped on the same cycle it was fetched, so the squash cycle
-            # and the fetch cycle coincide.
-            flush_cycle=cycle,
-            wraps_line=wraps,
-        )
-        self.completed.append(rec)
-        self.next_id += 1
-        self.n_flushed_if += 1
-
-    def on_decode_issue(self, cycle, trans_id,
-                        fu_val=None, rs1=None, rs2=None, rd=None,
-                        bp_cf_val=None, bp_predict_target=None,
-                        fwd_rs1_used=False, fwd_rs2_used=False, fwd_rs3_used=False,
-                        ihz_rs1=None, ihz_rs2=None, ihz_rs3=None,
-                        wb_view=None):
-        """Combined decode and issue. issue_instr_o is a combinational passthrough
-        of decoded_instr_i (scoreboard.sv:151), so both handshakes fire together
-        and trans_id must be read from IPTR on that one cycle."""
-        if not self.fetched:
+    def update(self, lines, records=0, bytes_done=0):
+        self.lines, self.records, self.bytes_done = lines, records, bytes_done
+        now = time.time()
+        if now - self.last_emit < PROGRESS_INTERVAL_S:
             return
-        # Forwarding diagnostics, counted only on a real forward. All zero
-        # means no forward in the trace coincides with the producer's wb, so
-        # via=wb=0 is the true answer for this build.
-        self._diag_n_issue_cycles += 1
-        wb_tids_set = {tid for _port, tid in (wb_view or [])}
-        if wb_view:
-            self._diag_n_issue_with_any_wb += 1
-            if fwd_rs1_used and ihz_rs1 in wb_tids_set:
-                self._diag_n_real_match_rs1 += 1
-            if fwd_rs2_used and ihz_rs2 in wb_tids_set:
-                self._diag_n_real_match_rs2 += 1
-            if fwd_rs3_used and ihz_rs3 in wb_tids_set:
-                self._diag_n_real_match_rs3 += 1
-        rec = self.fetched.popleft()
-        # One measurement, two derivations. See the InstructionRecord fields:
-        # decode and issue are one handshake, and ex_cycle is derived, not
-        # observed.
-        rec.id_cycle = cycle
-        rec.is_cycle = cycle
-        rec.ex_cycle = cycle + 1
-        rec.trans_id = trans_id
-        if fu_val is not None:
-            rec.fu = FU_NAME.get(fu_val, f"UNK_{fu_val}")
-            rec.fu_category = FU_CATEGORY.get(rec.fu, "Unknown")
-        rec.rs1 = rs1
-        rec.rs2 = rs2
-        rec.rd = rd
-        # Branch prediction snapshot, both from the pre-edge
-        # decoded_instr_i[0].bp. Back-to-back issue makes both stale, so
-        # writeback overwrites them from mem_q. bp_cf_val is the cf_t enum
-        # int, bp_predict_target the VLEN-bit predict_address (or None).
-        if bp_cf_val is not None:
-            rec.bp_predicted_cf = CF_T_NAMES.get(
-                bp_cf_val, f"UNK_{bp_cf_val}")
-            # Only attach a target when a prediction was made, leaving None
-            # for NoCF to avoid the misleading 0 target.
-            if rec.bp_predicted_cf != "NoCF":
-                rec.bp_predicted_target = bp_predict_target
-        # Forwarding capture. Where forwarding fired, look the producer
-        # trans_id up in the same-cycle wb_view to classify the path as "wb",
-        # bypassed off the writeback bus, or "sb", read from the scoreboard.
-        wb_tids = {tid for _port, tid in (wb_view or [])}
-        if fwd_rs1_used:
-            rec.fwd_rs1_used = True
-            rec.fwd_rs1_from_tid = ihz_rs1
-            rec.fwd_rs1_via = "wb" if ihz_rs1 in wb_tids else "sb"
-        if fwd_rs2_used:
-            rec.fwd_rs2_used = True
-            rec.fwd_rs2_from_tid = ihz_rs2
-            rec.fwd_rs2_via = "wb" if ihz_rs2 in wb_tids else "sb"
-        if fwd_rs3_used:
-            rec.fwd_rs3_used = True
-            rec.fwd_rs3_from_tid = ihz_rs3
-            rec.fwd_rs3_via = "wb" if ihz_rs3 in wb_tids else "sb"
-        self.issued[trans_id] = rec
-        # No LSU pending-assignment needed here.
-        # Correlation happens via lsu_ctrl.trans_id at FSM-transition
-        # time in on_lsu_fsm_sample, looking up self.issued[prev_tid].
+        self.last_emit = now
+        if self.live:
+            sys.stderr.write("\r" + self.message(now) + "   ")
+            sys.stderr.flush()
+        elif (self.plain
+              and now - self.last_plain >= PLAIN_PROGRESS_INTERVAL_S):
+            self.last_plain = now
+            sys.stderr.write(self.message(now) + "\n")
+            sys.stderr.flush()
 
-    def on_branch_resolved(self, cycle, pc_str, target_str,
-                           is_taken_str, is_mispredict_str, cf_type_str):
-        """Handle a resolution pulse, high for one cycle when branch_unit resolves
-        (branch_unit.sv:84). Bound to an in-flight CTRL_FLOW record by pc,
-        oldest is_cycle first. A resolution with no match is dropped."""
-        if pc_str is None:
-            return
-        pc_int = binary_to_int(pc_str)
-        if pc_int is None:
-            return
-        # Find candidate records: in-flight CTRL_FLOW with matching pc.
-        candidates = []
-        for tid, rec in self.issued.items():
-            if rec.fu != "CTRL_FLOW":
-                continue
-            if rec.pc is None:
-                continue
-            # rec.pc is the hex string written by on_fetch. Normalize
-            # both sides for comparison (some pc values lose leading
-            # zeros after binary_to_hex. Compare as ints).
-            try:
-                rec_pc_int = int(rec.pc, 16)
-            except (TypeError, ValueError):
-                continue
-            if rec_pc_int == pc_int:
-                candidates.append((rec.is_cycle or 0, tid, rec))
+    def message(self, now):
+        # A count not known yet is left out rather than printed as zero.
+        parts = [f"{self.lines:,} lines"]
+        if self.records:
+            parts.append(f"{self.records:,} instructions")
+        if self.total_bytes and self.bytes_done:
+            share = min(100, int(100 * self.bytes_done / self.total_bytes))
+            parts.append(f"{share}%")
+        parts.append(f"{now - self.start:.1f}s")
+        return f"[{self.label}] " + ", ".join(parts)
 
-        if not candidates:
-            return
+    def done(self):
+        """The final line, printed once."""
+        if self.live:
+            sys.stderr.write("\r" + self.message(time.time()) + "   \n")
+        elif self.plain:
+            sys.stderr.write(self.message(time.time()) + "\n")
+        sys.stderr.flush()
 
-        # Oldest-first if multiple share the PC (loop iteration).
-        candidates.sort(key=lambda x: (x[0], x[1]))
-        _, _, rec = candidates[0]
+# SHARED END py-progress
 
-        # Refuse to overwrite a prior resolution on the same record,
-        # would only happen if the same record were resolved twice,
-        # which CVA6's in-order issue precludes.
-        if rec.bp_resolution_cycle is not None:
-            return
 
-        rec.bp_resolution_cycle = cycle
-        rec.bp_resolved_cf = cf_name(cf_type_str)
-        rec.bp_resolved_target = binary_to_int(
-            target_str) if target_str else None
-        rec.bp_resolved_taken = (is_taken_str == "1")
-        rec.bp_mispredict = (is_mispredict_str == "1")
+# SHARED BEGIN py-log
 
-        # Derive bp_predicted_cf from the resolution signals. The pre-edge
-        # decoded_instr_i.bp.cf misattributes back-to-back issues and
-        # mem_q is not always dumped, but branch_unit.sv:99 gives an
-        # invertible relation:
-        #
-        #   is_mispredict = comp_res XOR (predict.cf == Branch)
-        #
-        # so predict.cf is reconstructable from (resolved_cf, taken,
-        # mispredict) for any record that reached resolution. More
-        # authoritative than either capture, being the logic HW flushes on.
-        resolved = rec.bp_resolved_cf
-        taken = rec.bp_resolved_taken
-        mis = rec.bp_mispredict
-        derived = None
-        if resolved == "Branch":
-            # Conditional branch. branch_unit overwrites cf_type to Branch on
-            # the resolution path, losing the predictor's cf, but the XOR
-            # recovers it: predict.cf was Branch iff taken XOR mispredict.
-            if taken is not None and mis is not None:
-                derived = "Branch" if (taken ^ mis) else "NoCF"
-        elif resolved == "Jump":
-            # Direct JAL. Frontend.sv:256 unconditionally sets cf=Jump
-            # for every JAL. There is no NoCF path for a direct jump
-            # the front end identifies as such.
-            derived = "Jump"
-        elif resolved == "JumpR":
-            # JALR. branch_unit.sv:101-107 enters this path only on JALR,
-            # and a mispredict means either a BTB miss or a wrong target. The
-            # BTB-miss case dominates, so use NoCF on mispredict else JumpR.
-            if mis is True:
-                derived = "NoCF"
-            elif mis is False:
-                derived = "JumpR"
-        elif resolved == "Return":
-            # Returns are predicted by the RAS, so predict.cf was Return
-            # either way. No mispredict is a RAS hit, mispredict is a wrong
-            # target or an underflow, and only the address was wrong.
-            derived = "Return"
-        # else leave whatever the pre-edge capture put in. Rare, a record
-        # reaching resolution with a resolved_cf outside the four, which
-        # resolve_branch's gating should prevent.
-        # Precedence: mem_q first, this derivation only where mem_q was
-        # silent. See InstructionRecord.bp_cf_from_memq.
-        if derived is not None and not rec.bp_cf_from_memq:
-            rec.bp_predicted_cf = derived
+# Needs: sys
 
-    def on_lsu_fsm_sample(self, cycle, load_state_str, store_state_str,
-                          lsu_ctrl_trans_id_str=None,
-                          pop_ld_str=None, pop_st_str=None):
-        """Correlate the LSU FSMs. Admissions come from IDLE to non-IDLE, from
-        pop_ld/pop_st while the FSM stays in SEND_TAG or VALID_STORE, and from
-        leaving those two states, which are mutually exclusive by construction."""
 
-        # ---- LOAD FSM ----
-        if load_state_str is not None:
-            try:
-                new_int = int(load_state_str, 2)
-            except (ValueError, TypeError):
-                new_int = None
-            new_name = LOAD_FSM_NAMES.get(new_int, f"?{load_state_str}")
+def log_info(message):
+    print(f"[INFO] {message}", file=sys.stderr)
 
-            if self.prev_load_state_str is None:
-                # First sample. Just prime the cache.
-                self.prev_load_state_str = load_state_str
-            else:
-                handled_admit_this_cycle = False
 
-                # Rule B: pending admit from prev-cycle's
-                # pop_ld_o=1 / SEND_TAG combination.
-                if self.pending_admit_load_tid_str is not None:
-                    tid = binary_to_int(self.pending_admit_load_tid_str)
-                    rec = self.issued.get(tid) if tid is not None else None
-                    # Close out the old active record (handoff).
-                    if self.active_lsu_load is not None:
-                        self.active_lsu_load.lsu_complete_cycle = cycle - 1
-                    if rec is not None:
-                        self.active_lsu_load = rec
-                        rec.lsu_admit_cycle = cycle
-                        if rec.lsu_state_history is None:
-                            rec.lsu_state_history = []
-                        rec.lsu_state_history.append({
-                            "cycle": cycle, "state": new_name})
-                    else:
-                        self.active_lsu_load = None
-                    self.pending_admit_load_tid_str = None
-                    handled_admit_this_cycle = True
+def log_warn(message):
+    print(f"[WARN] {message}", file=sys.stderr)
 
-                # Rule A: state transition admission / completion /
-                # mid-flight, only if rule B didn't already handle
-                # an admission this cycle.
-                if (not handled_admit_this_cycle
-                        and load_state_str != self.prev_load_state_str):
-                    try:
-                        old_int = int(self.prev_load_state_str, 2)
-                    except (ValueError, TypeError):
-                        old_int = None
-                    old_name = LOAD_FSM_NAMES.get(old_int, "?")
 
-                    if old_name == "IDLE" and new_name != "IDLE":
-                        # Rule A: standard admission.
-                        tid = None
-                        if self.prev_lsu_ctrl_trans_id_str is not None:
-                            tid = binary_to_int(
-                                self.prev_lsu_ctrl_trans_id_str)
-                        rec = self.issued.get(tid) if tid is not None else None
-                        if rec is not None:
-                            self.active_lsu_load = rec
-                            rec.lsu_admit_cycle = cycle
-                            if rec.lsu_state_history is None:
-                                rec.lsu_state_history = []
-                            rec.lsu_state_history.append({
-                                "cycle": cycle, "state": new_name})
-                        else:
-                            # The trans id did not resolve to an in-flight
-                            # record, so nothing owns the FSM now. Clearing
-                            # matches rules B and B'. Leaving the previous
-                            # load active would hand it this one's state
-                            # history and keep its window open.
-                            self.active_lsu_load = None
-                    elif old_name == "SEND_TAG" and new_name != "IDLE":
-                        # Rule B', admit-while-busy: SEND_TAG to any
-                        # non-IDLE state. Per load_unit.sv:320-354 only IDLE
-                        # and SEND_TAG are not new admissions.
-                        if self.active_lsu_load is not None:
-                            self.active_lsu_load.lsu_complete_cycle = cycle - 1
-                        tid = None
-                        if self.prev_lsu_ctrl_trans_id_str is not None:
-                            tid = binary_to_int(
-                                self.prev_lsu_ctrl_trans_id_str)
-                        rec = self.issued.get(tid) if tid is not None else None
-                        if rec is not None:
-                            self.active_lsu_load = rec
-                            rec.lsu_admit_cycle = cycle
-                            if rec.lsu_state_history is None:
-                                rec.lsu_state_history = []
-                            rec.lsu_state_history.append({
-                                "cycle": cycle, "state": new_name})
-                        else:
-                            self.active_lsu_load = None
-                    elif new_name == "IDLE":
-                        if self.active_lsu_load is not None:
-                            self.active_lsu_load.lsu_complete_cycle = cycle - 1
-                            self.active_lsu_load = None
-                    else:
-                        if self.active_lsu_load is not None:
-                            rec = self.active_lsu_load
-                            if rec.lsu_state_history is None:
-                                rec.lsu_state_history = []
-                            rec.lsu_state_history.append({
-                                "cycle": cycle, "state": new_name})
+def log_error(message):
+    print(f"[ERROR] {message}", file=sys.stderr)
 
-                self.prev_load_state_str = load_state_str
+# SHARED END py-log
 
-                # Rule B detect: schedule pending admit for next cycle.
-                if (pop_ld_str == "1" and new_name == "SEND_TAG"
-                        and lsu_ctrl_trans_id_str is not None):
-                    self.pending_admit_load_tid_str = lsu_ctrl_trans_id_str
 
-        # ---- STORE FSM (mirror) ----
-        if store_state_str is not None:
-            try:
-                new_int = int(store_state_str, 2)
-            except (ValueError, TypeError):
-                new_int = None
-            new_name = STORE_FSM_NAMES.get(new_int, f"?{store_state_str}")
+# SHARED BEGIN py-human-size
 
-            if self.prev_store_state_str is None:
-                self.prev_store_state_str = store_state_str
-            else:
-                handled_admit_this_cycle = False
+# Needs: none
 
-                if self.pending_admit_store_tid_str is not None:
-                    tid = binary_to_int(self.pending_admit_store_tid_str)
-                    rec = self.issued.get(tid) if tid is not None else None
-                    if self.active_lsu_store is not None:
-                        self.active_lsu_store.lsu_complete_cycle = cycle - 1
-                    if rec is not None:
-                        self.active_lsu_store = rec
-                        rec.lsu_admit_cycle = cycle
-                        if rec.lsu_state_history is None:
-                            rec.lsu_state_history = []
-                        rec.lsu_state_history.append({
-                            "cycle": cycle, "state": new_name})
-                    else:
-                        self.active_lsu_store = None
-                    self.pending_admit_store_tid_str = None
-                    handled_admit_this_cycle = True
 
-                if (not handled_admit_this_cycle
-                        and store_state_str != self.prev_store_state_str):
-                    try:
-                        old_int = int(self.prev_store_state_str, 2)
-                    except (ValueError, TypeError):
-                        old_int = None
-                    old_name = STORE_FSM_NAMES.get(old_int, "?")
+def human(size):
+    """A size in bytes as whole B, or as KiB, MiB or GiB with one decimal."""
+    if size < 1024:
+        return f"{size:.0f} B"
+    for unit in ("KiB", "MiB", "GiB"):
+        size /= 1024
+        if size < 1024 or unit == "GiB":
+            return f"{size:.1f} {unit}"
 
-                    if old_name == "IDLE" and new_name != "IDLE":
-                        # Rule A: standard admission.
-                        tid = None
-                        if self.prev_lsu_ctrl_trans_id_str is not None:
-                            tid = binary_to_int(
-                                self.prev_lsu_ctrl_trans_id_str)
-                        rec = self.issued.get(tid) if tid is not None else None
-                        if rec is not None:
-                            self.active_lsu_store = rec
-                            rec.lsu_admit_cycle = cycle
-                            if rec.lsu_state_history is None:
-                                rec.lsu_state_history = []
-                            rec.lsu_state_history.append({
-                                "cycle": cycle, "state": new_name})
-                        else:
-                            # The trans id did not resolve to an in-flight
-                            # record, so nothing owns the FSM now. Clearing
-                            # matches rules B and B'. Leaving the previous
-                            # store active would hand it this one's state
-                            # history and keep its window open.
-                            self.active_lsu_store = None
-                    elif old_name == "VALID_STORE" and new_name != "IDLE":
-                        # Rule B', admit-while-busy out of VALID_STORE. Per
-                        # store_unit.sv:179-206 only IDLE and VALID_STORE are
-                        # not admissions, leaving the two wait states.
-                        if self.active_lsu_store is not None:
-                            self.active_lsu_store.lsu_complete_cycle = cycle - 1
-                        tid = None
-                        if self.prev_lsu_ctrl_trans_id_str is not None:
-                            tid = binary_to_int(
-                                self.prev_lsu_ctrl_trans_id_str)
-                        rec = self.issued.get(tid) if tid is not None else None
-                        if rec is not None:
-                            self.active_lsu_store = rec
-                            rec.lsu_admit_cycle = cycle
-                            if rec.lsu_state_history is None:
-                                rec.lsu_state_history = []
-                            rec.lsu_state_history.append({
-                                "cycle": cycle, "state": new_name})
-                        else:
-                            self.active_lsu_store = None
-                    elif new_name == "IDLE":
-                        if self.active_lsu_store is not None:
-                            self.active_lsu_store.lsu_complete_cycle = cycle - 1
-                            self.active_lsu_store = None
-                    else:
-                        if self.active_lsu_store is not None:
-                            rec = self.active_lsu_store
-                            if rec.lsu_state_history is None:
-                                rec.lsu_state_history = []
-                            rec.lsu_state_history.append({
-                                "cycle": cycle, "state": new_name})
-
-                self.prev_store_state_str = store_state_str
-
-                if (pop_st_str == "1" and new_name == "VALID_STORE"
-                        and lsu_ctrl_trans_id_str is not None):
-                    self.pending_admit_store_tid_str = lsu_ctrl_trans_id_str
-
-        # ---- Cache lsu_ctrl.trans_id for next cycle's transitions ----
-        if lsu_ctrl_trans_id_str is not None:
-            self.prev_lsu_ctrl_trans_id_str = lsu_ctrl_trans_id_str
-
-    def on_dcache_sample(self, cycle,
-                         mallo, mtid, msid, mpf, mnline_alloc,
-                         mchk, mchk_nline, mchkhit,
-                         rfsm, rrsp, rtid):
-        """Capture per-cycle HPDcache miss-handler events into `self._dc_events`,
-        with refill-FSM activity tracked separately for the overlap test.
-        Missing signals are tolerated, their events are simply not generated."""
-        # MSHR allocation pulse. The sid separates a load-adapter allocation
-        # from a store, CMO or HWPF one, and only LOAD_ADAPTER_SIDS can become
-        # a dc_primary_miss. Stored raw so it can be reclassified later.
-        if mallo == "1":
-            self._dc_events.append({
-                "cycle": cycle,
-                "type":  "alloc",
-                "sid":   binary_to_int(msid) if msid else None,
-                "tid":   binary_to_int(mtid) if mtid else None,
-                "pf":    binary_to_int(mpf) if mpf else None,
-                "nline": binary_to_int(mnline_alloc) if mnline_alloc else None,
-            })
-
-        # MSHR-check pulse, 'check_hit' or 'check_miss' from the
-        # combinational mshr_check_hit_o on the same edge. check_hit is
-        # coalescing. The check path has no sid, so attribution is by cycle.
-        if mchk == "1":
-            hit = (mchkhit == "1")
-            self._dc_events.append({
-                "cycle": cycle,
-                "type":  "check_hit" if hit else "check_miss",
-                "nline": binary_to_int(mchk_nline) if mchk_nline else None,
-            })
-
-        # Refill response: when refill data finally reaches the core
-        # port for a primary miss. Tid identifies which requestor
-        # gets the data (see hpdcache_miss_handler.sv:382,397).
-        if rrsp == "1":
-            self._dc_events.append({
-                "cycle": cycle,
-                "type":  "refill_rsp",
-                "tid":   binary_to_int(rtid) if rtid else None,
-            })
-
-        # Any non-zero refill state means a refill is writing the data RAM,
-        # updating the directory or invalidating, consuming the RAM port and
-        # stalling unrelated loads. Hence dc_refill_overlap even for hits.
-        if rfsm is not None:
-            rfsm_val = binary_to_int(rfsm)
-            if rfsm_val is not None and rfsm_val != REFILL_FSM_IDLE:
-                self._rfsm_active_cycles.add(cycle)
-
-    def attribute_dc_events_to_records(self):
-        """Bind D$ events to LOAD and STORE records once the scan is done, copying
-        events inside each record's [admit, complete] window and setting
-        dc_primary_miss, dc_coalesced and dc_refill_overlap from them."""
-        # Index events by cycle so each record binary-searches into its
-        # window instead of rescanning from zero, rfsm_sorted the same for
-        # refill overlap. The old per-record scan looked like a hang.
-        evlog = self._dc_events
-        n_events = len(evlog)
-        ev_cycles = [ev["cycle"] for ev in evlog]
-        rfsm_sorted = sorted(self._rfsm_active_cycles)
-
-        # Positions in evlog already claimed by an earlier store. The store
-        # window is extended by HPDCACHE_STORE_LOOKAHEAD, so without this two
-        # nearby stores would both count the same alloc.
-        # First claim wins, so attribution depends on self.completed being in
-        # program order. finalize() sorts it by id and this runs after, but
-        # nothing enforces that ordering, so move the two together.
-        consumed_store_alloc_idx = set()
-        consumed_load_alloc_idx = set()
-        consumed_check_hit_idx = set()
-
-        n_loads = n_stores = 0
-        n_prim_ld = n_prim_st = n_coal = n_overlap = 0
-
-        for rec in self.completed:
-            if rec.fu_category != "Mem":
-                continue
-            if rec.fu == "LOAD":
-                n_loads += 1
-            elif rec.fu == "STORE":
-                n_stores += 1
-
-            admit = rec.lsu_admit_cycle
-            complete = rec.lsu_complete_cycle
-            if admit is None or complete is None:
-                rec.dc_events = []
-                continue
-
-            # Bounded to this record's [admit, window_end] via the bisect
-            # below, so the work per record is proportional to the events in
-            # its window, not the whole log.
-            events_in_window = []
-            primary_miss = False
-            coalesced = False
-
-            if rec.fu == "STORE":
-                window_end = complete + HPDCACHE_STORE_LOOKAHEAD
-            elif rec.fu == "LOAD":
-                window_end = complete + HPDCACHE_LOAD_LOOKAHEAD
-            else:
-                window_end = complete
-
-            start_idx = bisect.bisect_left(ev_cycles, admit)
-            for ev_idx in range(start_idx, n_events):
-                ev = evlog[ev_idx]
-                c = ev["cycle"]
-                if c > window_end:
-                    break
-                events_in_window.append(ev)
-                etype = ev["type"]
-                if etype == "alloc":
-                    sid = ev.get("sid")
-                    # Both LSU FSMs are serial, so a sid=1 alloc in a LOAD's
-                    # window is that load and sid=3 in a STORE's is that
-                    # store. The cache's tid cannot disambiguate.
-                    # Both LSU FSMs are serial, so at most one in-flight
-                    # access per unit can own an alloc. The consumed sets
-                    # enforce that rather than assuming it, so an alloc in
-                    # the lookahead tail of one window and the head of the
-                    # next is claimed by the earlier access only.
-                    if rec.fu == "LOAD" and sid == LOAD_UNIT_SID:
-                        if ev_idx in consumed_load_alloc_idx:
-                            continue
-                        consumed_load_alloc_idx.add(ev_idx)
-                        primary_miss = True
-                    elif rec.fu == "STORE" and sid == STORE_ADAPTER_SID:
-                        if ev_idx in consumed_store_alloc_idx:
-                            continue
-                        consumed_store_alloc_idx.add(ev_idx)
-                        primary_miss = True
-                elif etype == "check_hit" and rec.fu == "LOAD":
-                    # Same enforcement for coalescing. check_hit carries no
-                    # source id, so ownership rests entirely on the serial
-                    # FSM, which makes the consumed set the only guard.
-                    if ev_idx in consumed_check_hit_idx:
-                        continue
-                    consumed_check_hit_idx.add(ev_idx)
-                    coalesced = True
-
-            # Refill overlap: any cycle in [admit, complete] in the
-            # rFSM-active set. LOAD only, since that is the only fu the
-            # result is assigned to below, so a store skips the bisect.
-            refill_overlap = False
-            if rec.fu == "LOAD":
-                rf_lo = bisect.bisect_left(rfsm_sorted, admit)
-                refill_overlap = (rf_lo < len(rfsm_sorted)
-                                  and rfsm_sorted[rf_lo] <= complete)
-
-            rec.dc_events = events_in_window
-
-            # check_hit has no source-ID on the miss handler, but load_unit's
-            # FSM is single-threaded and holds at most one load in WGT, so a
-            # check_hit inside a LOAD's window is almost surely that load's.
-            #
-            # For STOREs, an sid=3 alloc in their window sets
-            # dc_primary_miss, store_unit being serial too. dc_coalesced and
-            # dc_refill_overlap stay LOAD-only, stores do not emit check_i.
-            if rec.fu == "LOAD":
-                rec.dc_primary_miss = primary_miss
-                rec.dc_coalesced = coalesced
-                rec.dc_refill_overlap = refill_overlap
-
-                if primary_miss:
-                    n_prim_ld += 1
-                if coalesced:
-                    n_coal += 1
-                if refill_overlap:
-                    n_overlap += 1
-            elif rec.fu == "STORE":
-                rec.dc_primary_miss = primary_miss
-                if primary_miss:
-                    n_prim_st += 1
-
-        # Perf-counter view of misses. evt_cache_read_miss_o counts every
-        # non-prefetch MSHR alloc (hpdcache_ctrl_pe.sv:368), a global count.
-        # The n_primary_miss_* pair above is the per-record attribution, split
-        # by fu, and each should track its same-sid global counterpart.
-        n_miss_total = 0
-        n_miss_loads_g = 0   # global, sid==LOAD_UNIT_SID, regardless of tid match
-        n_miss_stores = 0   # sid==STORE_ADAPTER_SID
-        n_miss_other = 0   # PTW, accel, CMO, unknown
-        for ev in evlog:
-            if ev.get("type") != "alloc":
-                continue
-            if ev.get("pf") == 1:
-                continue
-            n_miss_total += 1
-            sid = ev.get("sid")
-            if sid == LOAD_UNIT_SID:
-                n_miss_loads_g += 1
-            elif sid == STORE_ADAPTER_SID:
-                n_miss_stores += 1
-            else:
-                n_miss_other += 1
-
-        return {
-            "total_dc_events":       n_events,
-            "rfsm_active_cycles":    len(self._rfsm_active_cycles),
-            "n_loads":               n_loads,
-            "n_stores":              n_stores,
-            "n_primary_miss_loads":  n_prim_ld,
-            "n_primary_miss_stores": n_prim_st,
-            "n_coalesced_loads":     n_coal,
-            "n_refill_overlap_loads": n_overlap,
-            "n_dcache_miss_events_total":  n_miss_total,
-            "n_dcache_miss_events_loads":  n_miss_loads_g,
-            "n_dcache_miss_events_stores": n_miss_stores,
-            "n_dcache_miss_events_other":  n_miss_other,
-        }
-
-    # -- Dirty victim writeback (flush/wback unit) ----------------------
-
-    def on_wback_sample(self, cycle,
-                        alloc_v, alloc_r, alloc_nline, alloc_way,
-                        send_v, send_r, send_id, send_addr,
-                        ack_v, ack_r, ack_id, ack_nline,
-                        alloc_ctrl=None, alloc_cmo=None):
-        """Log writeback handshakes in cycle order: alloc hands the line to the
-        flush unit, send issues the memory write, ack is the response. Pairing
-        is deferred to finalize_writebacks(). alloc_ctrl and alloc_cmo say
-        which unit raised flush_alloc, so a CMO flush is not mistaken for a
-        miss-handler eviction (hpdcache.sv:981)."""
-        if alloc_v == "1" and alloc_r == "1":
-            if alloc_ctrl == "1":
-                producer = "evict"
-            elif alloc_cmo == "1":
-                producer = "cmo"
-            else:
-                producer = None
-            self._wb_allocs.append((cycle, binary_to_hex(alloc_nline),
-                                    binary_to_int(alloc_way), producer))
-        if send_v == "1" and send_r == "1":
-            self._wb_sends.append((cycle, binary_to_int(send_id),
-                                   binary_to_hex(send_addr)))
-        if ack_v == "1" and ack_r == "1":
-            self._wb_acks.append((cycle, binary_to_int(ack_id),
-                                  binary_to_hex(ack_nline)))
-
-    def on_mshr_alloc_sample(self, cycle, alloc_v, wback, mshr_nline,
-                             victim_way):
-        """Log an MSHR allocation carrying the write-back attribute, with the
-        incoming nline and the selected victim way. These are join candidates
-        for finalize_writebacks, not evictions: mshr_alloc_wback_i describes
-        the incoming line's policy, not whether the victim was dirty
-        (hpdcache_ctrl_pe.sv:582). The dirty-eviction count is n_allocs."""
-        if alloc_v == "1" and wback == "1":
-            self._mshr_alloc_samples.append(
-                (cycle, binary_to_hex(mshr_nline), binary_to_int(victim_way)))
-
-    def finalize_writebacks(self):
-        """Pair send with ack by flush slot id for the AXI write latency, join
-        alloc with ack by nline for total residency, and build the event list
-        and latency aggregate."""
-        send_q = defaultdict(deque)
-        for c, sid, addr in self._wb_sends:
-            send_q[sid].append((c, addr))
-
-        events = []
-        latencies = []
-        unmatched_acks = 0
-        for ac, sid, nline in self._wb_acks:     # acks already in cycle order
-            if send_q.get(sid):
-                sc, addr = send_q[sid].popleft()
-                lat = ac - sc
-                # A mispaired slot yields a negative latency, which would
-                # drag the aggregate. Counted instead, so it stays visible.
-                if lat < 0:
-                    self.n_wb_negative_latency += 1
-                else:
-                    latencies.append(lat)
-                events.append({
-                    "send_cycle":          sc,
-                    "ack_cycle":           ac,
-                    "alloc_cycle":         None,   # filled by the nline join
-                    "flush_slot":          sid,
-                    "nline":               nline,
-                    "addr":                addr,
-                    "axi_write_latency":   lat,
-                    "residency":           None,
-                    "way":                 None,   # victim way (one-hot->idx)
-                    "evict_incoming_nline": None,   # line X that displaced Y
-                    "evict_cycle":         None,
-                    # "evict" for a miss-handler eviction, "cmo" for a CMO or
-                    # AMO flush, None when the producer signals were absent.
-                    # Only "evict" writebacks have an eviction to link to.
-                    "producer":            None,
-                    "linked":              False,
-                })
-            else:
-                unmatched_acks += 1
-        sends_never_acked = sum(len(q) for q in send_q.values())
-
-        # alloc -> ack join by nline (FIFO per nline, ack-time order). Also
-        # carries the one-hot victim way captured at flush_alloc.
-        alloc_q = defaultdict(deque)
-        for c, nline, way, producer in self._wb_allocs:
-            alloc_q[nline].append((c, way, producer))
-        for ev in events:
-            q = alloc_q.get(ev["nline"])
-            if q:
-                ac_cycle, way_oh, producer = q.popleft()
-                ev["alloc_cycle"] = ac_cycle
-                ev["residency"] = ev["ack_cycle"] - ac_cycle
-                ev["way"] = _onehot_to_idx(way_oh)
-                ev["producer"] = producer
-
-        events.sort(key=lambda e: e["send_cycle"])
-
-        # --- eviction linkage: join each writeback to the dirty eviction
-        # that caused it, by (set, victim_way) nearest within a small window.
-        # Measured on daxpy the alloc and the eviction are the same cycle on
-        # 1,318 of 1,318 links, and 0, 1 and 4 all give the identical result,
-        # so 1 keeps a cycle of tolerance for handshake skew without the
-        # unexplained slack the old 4 carried.
-        SET_MASK = (1 << 8) - 1          # 256 sets -> setWidth 8
-        WINDOW = 1
-        n_linked = 0
-        # (set, way_oh) -> [(cycle, X_hex), ...]
-        ev_by_key = defaultdict(list)
-        for ec, x_nline, vway_oh in self._mshr_alloc_samples:
-            x_int = int(x_nline, 16) if x_nline else None
-            s = None if x_int is None else (x_int & SET_MASK)
-            ev_by_key[(s, vway_oh)].append((ec, x_nline))
-        for v in ev_by_key.values():
-            v.sort()
-        used = defaultdict(set)
-        n_cmo = n_evict = n_untagged = 0
-        for ev in events:
-            if ev["producer"] == "cmo":
-                n_cmo += 1
-                # A CMO or AMO flush walks the cache and writes dirty lines
-                # back without any miss, so there is no eviction to join to.
-                # Attempting the join would report a spurious miss.
-                continue
-            elif ev["producer"] == "evict":
-                n_evict += 1
-            else:
-                n_untagged += 1
-            y_int = int(ev["nline"], 16) if ev["nline"] else None
-            s = None if y_int is None else (y_int & SET_MASK)
-            anchor = ev["alloc_cycle"] if ev["alloc_cycle"] is not None else ev["send_cycle"]
-            way_oh = None
-            # recover the one-hot from the stored index (single bit)
-            if ev["way"] is not None:
-                way_oh = 1 << ev["way"]
-            cands = ev_by_key.get((s, way_oh), [])
-            best = None
-            for idx, (ec, x_hex) in enumerate(cands):
-                if idx in used[(s, way_oh)]:
-                    continue
-                if abs(ec - anchor) <= WINDOW:
-                    if best is None or abs(ec - anchor) < abs(best[1] - anchor):
-                        best = (idx, ec, x_hex)
-            if best is not None:
-                used[(s, way_oh)].add(best[0])
-                ev["evict_cycle"] = best[1]
-                ev["evict_incoming_nline"] = best[2]
-                ev["linked"] = True
-                n_linked += 1
-
-        agg = {}
-        if latencies:
-            ls = sorted(latencies)
-            hist = defaultdict(int)
-            for L in latencies:
-                hist[L] += 1
-            agg = {
-                "n":         len(ls),
-                "min":       ls[0],
-                # round, not int: truncating an even-length median lands
-                # between the two middle values and reports a latency no
-                # writeback experienced.
-                "median":    round(median(ls)),
-                "max":       ls[-1],
-                "histogram": {str(k): v for k, v in sorted(hist.items())},
-            }
-
-        self.writeback_events = events
-        self.writeback_stats = {
-            "n_allocs":            len(self._wb_allocs),
-            "n_sends":             len(self._wb_sends),
-            "n_acks":              len(self._wb_acks),
-            "matched_pairs":       len(latencies),
-            "acks_no_prior_send":  unmatched_acks,
-            "sends_never_acked":   sends_never_acked,
-            # MSHR allocations sampled as join candidates, NOT evictions.
-            # n_allocs below is the dirty-eviction count, being the
-            # writebacks the flush unit actually issued.
-            "n_mshr_allocs_sampled": len(self._mshr_alloc_samples),
-            # Split by cause. Only evict-producer writebacks are linkable, so
-            # n_unlinked counts those alone. A non-zero value there is a real
-            # join failure, where a CMO writeback simply has no eviction.
-            "n_allocs_evict":      n_evict,
-            "n_allocs_cmo":        n_cmo,
-            "n_allocs_untagged":   n_untagged,
-            "n_linked":            n_linked,
-            "n_unlinked":          n_evict + n_untagged - n_linked,
-            # Non-zero means writeback slots were mispaired: those pairs are
-            # excluded from axi_write_latency rather than skewing it.
-            "n_negative_latency":  self.n_wb_negative_latency,
-            "axi_write_latency":   agg,
-        }
-        return self.writeback_stats
-
-    def on_writeback(self, cycle, port, trans_id,
-                     mq_fu=None, mq_rs1=None, mq_rs2=None, mq_rd=None,
-                     mq_bp_cf=None, mq_bp_tgt=None):
-        rec = self.issued.get(trans_id)
-        if rec is None:
-            self.n_unmatched_writebacks += 1
-            return
-        if rec.wb_cycle is None:
-            rec.wb_cycle = cycle
-        # Overwrite the decoded fields with the authoritative values from the
-        # registered mem_q ring, stable from decode+1 to commit. When mem_q is
-        # absent the caller passes mq_* = None and the pre-edge values stay.
-        if mq_fu is not None:
-            rec.fu = FU_NAME.get(mq_fu, f"UNK_{mq_fu}")
-            rec.fu_category = FU_CATEGORY.get(rec.fu, "Unknown")
-        if mq_rs1 is not None:
-            rec.rs1 = mq_rs1
-        if mq_rs2 is not None:
-            rec.rs2 = mq_rs2
-        if mq_rd is not None:
-            rec.rd = mq_rd
-        # Same correction for the predictor verdict, both halves of bp. The
-        # pre-edge decoded_instr_i.bp holds the previous instruction on
-        # back-to-back issue, while mem_q[trans_id].sbe.bp is stable through
-        # commit. Correcting cf alone leaves the target on the stale path.
-        if mq_bp_cf is not None:
-            rec.bp_predicted_cf = CF_T_NAMES.get(mq_bp_cf, f"UNK_{mq_bp_cf}")
-            rec.bp_cf_from_memq = True
-        if rec.bp_predicted_cf == "NoCF":
-            # No prediction was made, so any pre-edge target is another
-            # instruction's. Clearing it beats reporting a misleading value.
-            rec.bp_predicted_target = None
-        elif mq_bp_tgt is not None and rec.bp_predicted_cf is not None:
-            rec.bp_predicted_target = mq_bp_tgt
-
-    def on_commit(self, cycle, port, trans_id,
-                  mq_fu=None, mq_rs1=None, mq_rs2=None, mq_rd=None,
-                  mq_bp_cf=None, mq_bp_tgt=None):
-        rec = self.issued.pop(trans_id, None)
-        if rec is None:
-            self.n_unmatched_commits += 1
-            return
-        rec.co_cycle = cycle
-        # Apply mem_q decoded fields if rec.fu wasn't set at
-        # writeback (e.g., NONE-fu instructions auto-validate without going
-        # through a writeback port. See scoreboard.sv line 189).
-        if mq_fu is not None and rec.fu is None:
-            rec.fu = FU_NAME.get(mq_fu, f"UNK_{mq_fu}")
-            rec.fu_category = FU_CATEGORY.get(rec.fu, "Unknown")
-        if mq_rs1 is not None and rec.rs1 is None:
-            rec.rs1 = mq_rs1
-        if mq_rs2 is not None and rec.rs2 is None:
-            rec.rs2 = mq_rs2
-        if mq_rd is not None and rec.rd is None:
-            rec.rd = mq_rd
-        # Same fallback for bp on no-writeback paths (NONE-fu instructions).
-        # The writeback fixup catches most, but NONE-fu ones reach commit
-        # without ever going through a wb port.
-        if mq_bp_cf is not None and rec.bp_predicted_cf is None:
-            rec.bp_predicted_cf = CF_T_NAMES.get(mq_bp_cf, f"UNK_{mq_bp_cf}")
-            rec.bp_cf_from_memq = True
-        if rec.bp_predicted_cf == "NoCF":
-            rec.bp_predicted_target = None
-        elif (mq_bp_tgt is not None and rec.bp_predicted_target is None
-              and rec.bp_predicted_cf is not None):
-            rec.bp_predicted_target = mq_bp_tgt
-        self.completed.append(rec)
-        self.n_committed += 1
-    # -- flush handlers ----------------------------------------------------
-
-    def _flush_fetched(self, reason, cycle):
-        while self.fetched:
-            rec = self.fetched.popleft()
-            rec.flushed = True
-            rec.flush_reason = reason
-            rec.flush_cycle = cycle
-            self.completed.append(rec)
-            if reason == "eof":
-                self.n_drained_if += 1
-            else:
-                self.n_flushed_if += 1
-
-    def _flush_issued(self, reason, cycle):
-        for tid in list(self.issued.keys()):
-            rec = self.issued.pop(tid)
-            rec.flushed = True
-            rec.flush_reason = reason
-            rec.flush_cycle = cycle
-            self.completed.append(rec)
-            if reason == "eof":
-                self.n_drained_ex += 1
-            else:
-                self.n_flushed_ex += 1
-
-    def on_flush_if(self, cycle):
-        self._flush_fetched("flush_if", cycle)
-
-    def on_flush_id(self, cycle):
-        # Cascades up to fetched. Unreachable on cv64a6: all eight
-        # flush_id_o assignments in controller.sv raise flush_ex_o on the
-        # same line, and the dispatcher tests EX first. Kept because the
-        # cascade is correct for any core where the two can differ.
-        self._flush_fetched("flush_id_cascade_if", cycle)
-
-    def on_flush_ex(self, cycle):
-        # EX flush cascades back through ID and IF.
-        self._flush_fetched("flush_ex_cascade_if", cycle)
-        self._flush_issued("flush_ex_commit_drain", cycle)
-
-    # -- finalization ------------------------------------------------------
-
-    def finalize(self, last_cycle=None):
-        # Anything still in-flight at EOF is incomplete. Mark as flushed with
-        # reason "eof" and no flush_cycle: the trace ended, the core did not
-        # squash these, so attaching a cycle would invent an event.
-        if self.fetched or self.issued:
-            self._flush_fetched("eof", None)
-            self._flush_issued("eof", None)
-        # Restore id-sorted order. Flushes can interleave.
-        self.completed.sort(key=lambda r: r.id)
+# SHARED END py-human-size
 
 
 # ============================================================================
-# VCD header parsing
+# 6. Input reader
 # ============================================================================
-
-_BIT_RANGE_RE = re.compile(r"\[\d+:\d+\]$")
-_ARRAY_INDEX_RE = re.compile(r"\[(\d+)\]")
-
 
 def strip_bit_range(path):
     while True:
-        new = _BIT_RANGE_RE.sub("", path)
-        if new == path:
+        stripped = BIT_RANGE.sub("", path)
+        if stripped == path:
             return path
-        path = new
+        path = stripped
 
 
 def parse_var_block(f):
+    """Read the VCD header up to $enddefinitions. Returns (path_to_id,
+    path_width, timescale), path_width holding each declared size so a width
+    such as the D-cache set index can be read back. Verilator writes $var
+    lines with and without a separate bit-range token, and both are read."""
     scope_stack = []
     path_to_id = {}
-    id_to_path = {}
-    timescale = "unknown"
+    path_width = {}
+    timescale = None
     for line in f:
         line = line.strip()
         if not line:
             continue
         if line.startswith("$enddefinitions"):
-            return path_to_id, id_to_path, timescale
+            break
         if line.startswith("$scope"):
             tokens = line.split()
             if len(tokens) >= 3:
@@ -2368,149 +536,136 @@ def parse_var_block(f):
             tokens = line.split()
             if len(tokens) < 6:
                 continue
-            vcd_id = tokens[3]
-            sig_name = tokens[4]
+            name = tokens[4]
             if len(tokens) >= 7 and tokens[5] != "$end":
-                sig_name += tokens[5]
-            full_path = ".".join(scope_stack + [sig_name])
-            path_to_id[full_path] = vcd_id
-            id_to_path[vcd_id] = full_path
-    return path_to_id, id_to_path, timescale
+                name += tokens[5]
+            full_path = ".".join(scope_stack + [name])
+            path_to_id[full_path] = tokens[3]
+            if tokens[2].isdigit():
+                path_width[full_path] = int(tokens[2])
+    return path_to_id, path_width, timescale
 
 
-def match_whitelist(whitelist, path_to_id, scope_prefix):
+def signal_table(nr_sb_entries, nr_commit_ports, nr_wb_ports):
+    """SIGNALS plus the per-slot and per-port rows of the build the probes
+    found, so a smaller sweep build requires only the slots it has."""
+    table = dict(SIGNALS)
+    for port in range(DCACHE_REQ_PORTS):
+        table[f"dcache_req_ports_o[{port}].data_req"] = (
+            f"ex_stage_i.dcache_req_ports_o[{port}].data_req", CORE)
+    for port in range(nr_wb_ports):
+        table[f"trans_id_i[{port}]"] = (
+            SCOREBOARD + f"trans_id_i[{port}]", CORE)
+    for port in range(nr_commit_ports):
+        table[f"commit_pointer_q[{port}]"] = (
+            SCOREBOARD + f"commit_pointer_q[{port}]", CORE)
+    for slot in range(nr_sb_entries):
+        for name in MEM_Q_FIELDS:
+            table[f"mem_q[{slot}].{name}"] = (
+                SCOREBOARD + f"mem_q[{slot}].sbe.{name}", CORE)
+    return table
+
+
+def match_signal_table(table, path_to_id, scope_prefix):
+    """(ids, missing): the VCD id of every table row found exactly once
+    under the scope prefix, and the rows found never or more than once."""
     by_stripped = defaultdict(list)
     for full_path, vcd_id in path_to_id.items():
-        by_stripped[strip_bit_range(full_path)].append((full_path, vcd_id))
-    matches = []
-    for entry in whitelist:
-        target = f"{scope_prefix}.{entry}" if scope_prefix else entry
-        hits = by_stripped.get(target, [])
-        matches.append({
-            "whitelist_path": entry,
-            "full_paths": [h[0] for h in hits],
-            "vcd_ids": [h[1] for h in hits],
-        })
-    return matches
+        by_stripped[strip_bit_range(full_path)].append(vcd_id)
+    ids, missing = {}, []
+    for name, (path, _mechanisms) in table.items():
+        hits = by_stripped.get(f"{scope_prefix}.{path}" if scope_prefix
+                               else path, [])
+        if len(hits) == 1:
+            ids[name] = hits[0]
+        else:
+            missing.append(name)
+    return ids, missing
 
 
-# Matches the "mem_q[<N>].sbe.fu" tail of a VCD path, with or without a bit
-# range. Probes the build's real scoreboard depth before the whitelist runs,
-# so a build with more slots than NR_SB_ENTRIES can be refused.
-_MEMQ_SLOT_PROBE_RE = re.compile(r"mem_q\[(\d+)\]\.sbe\.fu(?:\[[\d:]+\])?$")
-
-# Probes for the pre-flight guards in main(). A larger value than the
-# compile-time default means silent wrong output, since the high indices are
-# not in the whitelist. Smaller is fine, the unused slots stay None.
-_DECODED_PORT1_RE = re.compile(
-    r"decoded_instr_i\[1\]\.fu(?:\[[\d:]+\])?$")
-_COMMIT_PTR_RE = re.compile(
-    r"commit_pointer_q\[(\d+)\](?:\[[\d:]+\])?$")
-_WB_TRANSID_RE = re.compile(
-    r"trans_id_i\[(\d+)\](?:\[[\d:]+\])?$")
+def resolved_mechanisms(table, ids):
+    """Mechanism name to whether every signal it needs was found."""
+    resolved = {}
+    for name, (_path, mechanisms) in table.items():
+        for mechanism in mechanisms:
+            resolved[mechanism] = resolved.get(mechanism, True) and (
+                name in ids)
+    return resolved
 
 
-def probe_max_scoreboard_slot(path_to_id):
-    """Largest N with mem_q[N].sbe.fu in the VCD, or -1 when none are present.
-    Scans every signal path, not just whitelisted ones, so it sees slots past
-    what the tracer enumerates at compile time."""
-    max_n = -1
+def probe_max_index(path_to_id, pattern):
+    """The largest index pattern captures in any header path, or -1."""
+    largest = -1
     for path in path_to_id:
-        m = _MEMQ_SLOT_PROBE_RE.search(path)
-        if m:
-            n = int(m.group(1))
-            if n > max_n:
-                max_n = n
-    return max_n
+        match = pattern.search(path)
+        if match:
+            largest = max(largest, int(match.group(1)))
+    return largest
 
 
-def probe_superscalar(path_to_id):
-    """Return True iff the build has SuperscalarEn=1 (NrIssuePorts > 1).
-    Detected by the presence of decoded_instr_i[1].fu, which only exists
-    when the scoreboard's decoded_instr_i array has more than one entry."""
-    for path in path_to_id:
-        if _DECODED_PORT1_RE.search(path):
-            return True
-    return False
+def probe_dcache_sets(path_width, scope_prefix):
+    """The D-cache set count from the width of refill_set_o, or None when
+    the VCD does not declare it."""
+    by_stripped = {strip_bit_range(p): w for p, w in path_width.items()}
+    path = (f"{scope_prefix}.{DCACHE_SET_SIGNAL}" if scope_prefix
+            else DCACHE_SET_SIGNAL)
+    width = by_stripped.get(path)
+    return 1 << width if width else None
 
 
-def probe_max_commit_port(path_to_id):
-    """Find the largest N such that commit_pointer_q[N] exists in the VCD.
-    Tells us the build's NrCommitPorts. Returns -1 if none found."""
-    max_n = -1
-    for path in path_to_id:
-        m = _COMMIT_PTR_RE.search(path)
-        if m:
-            n = int(m.group(1))
-            if n > max_n:
-                max_n = n
-    return max_n
+def refuse(what, found, limit, constant, needed):
+    """Say why a build larger than this tracer's tables is refused, and
+    return the exit status."""
+    log_error(f"The VCD has {what} up to index {found}, and this tracer "
+              f"handles {limit} ({constant}). The rest would go untracked, "
+              f"so the JSON would be silently wrong.")
+    print(f"        Set {constant} near the top of CVA6Flow_tracer.py to "
+          f"{needed} and rerun.", file=sys.stderr)
+    return 2
 
 
-def probe_max_wb_port(path_to_id):
-    """Find the largest N such that trans_id_i[N] exists in the VCD.
-    Tells us the build's NrWbPorts. Returns -1 if none found."""
-    max_n = -1
-    for path in path_to_id:
-        m = _WB_TRANSID_RE.search(path)
-        if m:
-            n = int(m.group(1))
-            if n > max_n:
-                max_n = n
-    return max_n
-
-
-def build_port_map(full_paths, vcd_ids):
-    """For array-indexed multi-element signals, map port (first single-index
-    in the path) to its VCD ID."""
-    result = {}
-    for path, vid in zip(full_paths, vcd_ids):
-        indices = _ARRAY_INDEX_RE.findall(path)
-        if indices:
-            port = int(indices[0])
-            result[port] = vid
-    return result
-
-
-# ============================================================================
-# Value helpers
-# ============================================================================
-
-# Bits suppressed because the VCD held x or z at that position. Counted
-# because a suppressed strobe silently drops the commit or writeback it
-# would have signalled, and the record simply never appears.
-_GET_BIT_UNKNOWN = [0]
+def report_missing(table, missing, path_to_id):
+    """List the table rows the VCD lacks, with candidate paths, capped so
+    one wrong scope prefix does not bury the diagnosis."""
+    if not missing:
+        return
+    log_warn(f"{len(missing)} signal(s) of the table are not in the VCD:")
+    for name in missing[:MAX_MISSING_REPORTED]:
+        path, mechanisms = table[name]
+        # The last segment without its index, to search candidates by.
+        leaf = path.rsplit(".", 1)[-1].split("[")[0]
+        print(f"         {path} ({', '.join(mechanisms)})", file=sys.stderr)
+        candidates = [p for p in path_to_id if leaf in p]
+        for candidate in candidates[:MAX_CANDIDATES_SHOWN]:
+            print(f"             candidate: {candidate}", file=sys.stderr)
+        if len(candidates) > MAX_CANDIDATES_SHOWN:
+            print(f"             and {len(candidates) - MAX_CANDIDATES_SHOWN}"
+                  f" more", file=sys.stderr)
+    if len(missing) > MAX_MISSING_REPORTED:
+        print(f"         and {len(missing) - MAX_MISSING_REPORTED:,} more. "
+              f"This many usually means --scope-prefix is wrong rather "
+              f"than the signals being absent.", file=sys.stderr)
 
 
 def get_bit(binary_str, bit_idx):
-    """Return bit bit_idx counted from the LSB, or None when the VCD holds x
-    or z there. None matches binary_to_int's sentinel, so an unknown is
-    distinguishable from a deasserted bit. A short value is not unknown: VCD
-    left-truncates, and IEEE 1364 extends with the leftmost character, so a
-    value starting 0 or 1 extends with 0 and one starting x or z extends
-    with that."""
+    """Bit bit_idx counted from the LSB, or None when the VCD holds x or z
+    there. A short value is not unknown: VCD left-truncates, and IEEE 1364
+    extends with the leftmost character, so 0 or 1 extends with 0."""
     if not binary_str:
         return 0
-    s = binary_str.strip()
-    if not s:
-        return 0
-    if len(s) > bit_idx:
-        c = s[-(bit_idx + 1)].lower()
+    if len(binary_str) > bit_idx:
+        char = binary_str[-(bit_idx + 1)].lower()
     else:
-        c = s[0].lower()
-        if c not in ("x", "z"):
+        char = binary_str[0].lower()
+        if char not in ("x", "z"):
             return 0
-    if c in ("x", "z"):
-        _GET_BIT_UNKNOWN[0] += 1
+    if char in ("x", "z"):
         return None
-    return 1 if c == "1" else 0
+    return 1 if char == "1" else 0
 
 
 def binary_to_int(s):
-    if not s:
-        return None
-    s = s.strip()
-    if any(c in s.lower() for c in "xz"):
+    if not s or any(c in "xXzZ" for c in s):
         return None
     try:
         return int(s, 2)
@@ -2519,2094 +674,2313 @@ def binary_to_int(s):
 
 
 def binary_to_hex(s):
-    n = binary_to_int(s)
-    return None if n is None else f"0x{n:x}"
+    value = binary_to_int(s)
+    return None if value is None else f"0x{value:x}"
 
 
-def _onehot_to_idx(v):
-    """One-hot integer -> bit index (way number). None or non-one-hot -> None."""
-    if v is None or v <= 0:
+def onehot_to_index(value):
+    """The bit index of a one-hot value, None when it is not one-hot."""
+    if value is None or value <= 0 or value & (value - 1):
         return None
-    if v & (v - 1):          # more than one bit set: not clean one-hot
+    return value.bit_length() - 1
+
+
+def cf_name(value):
+    """A cf_t value's name, UNK_<n> outside the enum, None when unknown."""
+    return None if value is None else CF_T_NAMES.get(value, f"UNK_{value}")
+
+
+def fu_name(value):
+    return None if value is None else FU_NAME.get(value, f"UNK_{value}")
+
+
+def pc_value(rec):
+    """A record's PC as an int, None when the VCD held x in it."""
+    return None if rec.pc is None else int(rec.pc, 16)
+
+
+def timescale_ps(timescale):
+    """Picoseconds per timescale unit, None when it does not parse."""
+    match = re.fullmatch(r"(\d+)\s*(fs|ps|ns|us|ms|s)", timescale or "")
+    if not match:
         return None
-    return v.bit_length() - 1
+    return int(match.group(1)) * TIMESCALE_TO_PS[match.group(2)]
 
 
 # ============================================================================
-# Streaming
+# 7. Event extraction
 # ============================================================================
 
-def stream_and_extract(f, matches, args, n_wb_ports, n_commit_ports):
-    # Build lookup maps from matches.
-    single_id = {}    # whitelist_path -> vcd_id (for entries with one match)
-    port_maps = {}    # whitelist_path -> {port: vcd_id} (for multi-element)
-    for m in matches:
-        if not m["vcd_ids"]:
-            continue
-        if len(m["vcd_ids"]) == 1:
-            single_id[m["whitelist_path"]] = m["vcd_ids"][0]
+@dataclass
+class InstructionRecord:
+    """One fetched instruction. The fields up to n_caused_bubble_flushed are
+    the JSON record, in the order the JSON writes them."""
+
+    id: int
+    pc: str
+    instr_word: str
+    disasm: str = None
+    is_compressed: bool = False
+    fu: str = None
+    fu_category: str = None
+    rd: int = None
+    rs1: int = None
+    rs2: int = None
+    trans_id: int = None
+    # A 32-bit instruction at the last 2-byte slot of its fetch block, so its
+    # high half arrives in the next fetch. Set on flushed records too, since
+    # the realigner combines the halves whether or not the instruction commits.
+    wraps_line: bool = False
+    fe1_lo_cycle: int = None
+    fe1_hi_cycle: int = None
+    fe2_lo_cycle: int = None
+    fe2_hi_cycle: int = None
+    # state_q == MISS at the delivery. Null when the fetch cycles were
+    # synthesised, since nothing was observed.
+    ic_miss_lo: bool = None
+    ic_miss_hi: bool = None
+    fe_out_cycle: int = None
+    # Decode and issue are one handshake (scoreboard.sv:151), so they share a
+    # cycle, and no dumped signal marks entry to execute, hence is_cycle + 1.
+    dec_cycle: int = None
+    is_cycle: int = None
+    ex_cycle: int = None
+    wb_cycle: int = None
+    co_cycle: int = None
+    flushed: bool = False
+    flush_reason: str = None
+    flush_cycle: int = None
+    # The load or store FSM left IDLE for this record, usually is_cycle + 1
+    # and later under stalls or a TLB miss.
+    lsu_admit_cycle: int = None
+    # One cycle before the FSM returned to IDLE, so windows never share a
+    # cycle. A load's data arrives later through ldbuf, so this is a release.
+    lsu_release_cycle: int = None
+    dc_miss: bool = None
+    dc_coalesced: bool = None
+    dc_refill_overlap: bool = None
+    lsu_state_history: list = None
+    dc_event_log: list = None
+    fwd_rs1_used: bool = False
+    fwd_rs1_via: str = None
+    fwd_rs1_producer_id: int = None
+    fwd_rs2_used: bool = False
+    fwd_rs2_via: str = None
+    fwd_rs2_producer_id: int = None
+    fwd_rs3_used: bool = False
+    fwd_rs3_via: str = None
+    fwd_rs3_producer_id: int = None
+    # Read from decoded_instr_i at issue, then from mem_q at writeback and
+    # commit. cf_t names the predictor: Branch the BHT, JumpR the BTB, Return
+    # the RAS, Jump the predecoder, NoCF none or not taken.
+    bp_predicted_cf: str = None
+    bp_predicted_target: int = None
+    bp_resolved_cf: str = None
+    bp_resolved_target: int = None
+    bp_resolved_taken: bool = None
+    bp_mispredict: bool = None
+    bp_resolve_cycle: int = None
+    bp_outcome: str = None
+    bp_decided_at: str = None
+    synthesised_stages: list = field(default_factory=list)
+    n_pre_fetch_wait_cycles: int = None
+    pre_fetch_wait_shared_id: int = None
+    # pred_taken, unpred, mispred, or flush for a CSR write, a fence, an
+    # atomic commit or an exception entry.
+    bubble_kind: str = None
+    bubble_causer_id: int = None
+    n_bubble_cycles: int = None
+    bubble_shared_id: int = None
+    n_bubble_gap_cycles: int = None
+    caused_bubble_kind: str = None
+    caused_bubble_recovery_id: int = None
+    n_caused_bubble_cycles: int = None
+    n_caused_bubble_flushed: int = None
+    fwd_rs1_tid: int = None
+    fwd_rs2_tid: int = None
+    fwd_rs3_tid: int = None
+
+
+class Run:
+    """One conversion's settings and what its walk measured, passed around
+    in place of module globals so the tracer can run twice in one process."""
+
+    def __init__(self, verbose=False, progress=None):
+        self.verbose = verbose
+        self.progress = progress
+        self.n_lines = 0
+        self.n_changes = 0
+        self.n_cycles = 0
+        self.last_ts = 0
+        self.first_edge_ts = None
+        self.vcd_clock_period = None
+        self.ends_cleanly = True
+
+
+class EdgeSample:
+    """The VCD values at one rising edge, read by signal-table name. It holds
+    the walker's own state dict, so one sample serves every edge."""
+
+    def __init__(self, state, ids):
+        self.state = state
+        self.ids = ids
+        self.n_unknown_bit_reads = 0
+
+    def get(self, name):
+        return self.state.get(self.ids.get(name))
+
+    def bit(self, name, index):
+        value = get_bit(self.get(name), index)
+        if value is None:
+            # A strobe read as x drops the commit or writeback it carried, so
+            # the count says records are missing, not merely untimed.
+            self.n_unknown_bit_reads += 1
+        return value
+
+
+@dataclass
+class ICacheEvent:
+    fe1_cycle: int
+    fe2_cycle: int
+    vaddr_word: int
+    is_miss: bool
+
+
+class ICacheTimeline:
+    """One ICacheEvent per delivered fetch. An access starts when the
+    response address changes or state_q re-enters READ, the second catching a
+    fetch of the same address again."""
+
+    def __init__(self):
+        self.events = []
+        self.last_vaddr = None
+        self.last_state = None
+        self.access_start_cycle = None
+
+    def on_edge(self, cycle, sample):
+        state = sample.get("icache.state_q")
+        vaddr = sample.get("icache_dreq_i.vaddr")
+        if vaddr != self.last_vaddr or (
+                state == FSM_READ
+                and self.last_state in ICACHE_NON_READ_STATES):
+            self.access_start_cycle = cycle
+        self.last_vaddr = vaddr
+        self.last_state = state
+        if (sample.get("icache_dreq_i.valid") != "1"
+                or sample.get("icache_dreq_o.kill_s2") == "1"):
+            return
+        word = binary_to_int(vaddr)
+        if word is None:
+            return
+        start = (self.access_start_cycle
+                 if self.access_start_cycle is not None else cycle)
+        self.events.append(ICacheEvent(
+            fe1_cycle=max(0, start - 1), fe2_cycle=cycle,
+            vaddr_word=word & ~FETCH_OFFSET_MASK, is_miss=state == FSM_MISS))
+
+
+class PerfCounterSamples:
+    """The cycles the perf-counter event inputs 1, 16 and 17 were high, so a
+    page counts any range the way the counters do, and the realigner's
+    unaligned runs for --verbose."""
+
+    def __init__(self, icache):
+        self.icache = icache
+        self.ic_access_cycles = []
+        self.dc_access_cycles = []
+        self.ic_miss_cycles = []
+        self.n_unaligned_runs = 0
+        self.n_unaligned_cycles = 0
+        self.last_unaligned = None
+        self.dc_request_names = [f"dcache_req_ports_o[{port}].data_req"
+                                 for port in range(DCACHE_REQ_PORTS)]
+
+    def on_edge(self, cycle, sample):
+        # A value read after the edge holds for the cycle starting there,
+        # which the counter adds at the next edge.
+        if sample.get("icache_dreq_o.req") == "1":
+            self.ic_access_cycles.append(cycle)
+        if any(sample.get(name) == "1" for name in self.dc_request_names):
+            self.dc_access_cycles.append(cycle)
+        if self.icache and sample.get("icache.miss_o") == "1":
+            self.ic_miss_cycles.append(cycle)
+        unaligned = sample.get("serving_unaligned_o")
+        if unaligned == "1":
+            self.n_unaligned_cycles += 1
+            if self.last_unaligned != "1":
+                self.n_unaligned_runs += 1
+        self.last_unaligned = unaligned
+
+
+def spans_fetch_blocks(pc, is_compressed):
+    """A 32-bit instruction at offset FETCH_BYTES - 2 of its fetch block has
+    its high half in the next block, which instr_realign.sv combines and
+    flags with serving_unaligned_o (line 63). The two match except on a
+    record flushed mid-realignment."""
+    if is_compressed or pc is None:
+        return False
+    return (int(pc, 16) & FETCH_OFFSET_MASK) == FETCH_BYTES - 2
+
+
+class PipelineTracker:
+    """The in-flight records and the handshake and flush events applied to
+    them. fetched is a FIFO in program order, issued maps a trans_id to its
+    record, and completed collects every record that left the pipeline."""
+
+    def __init__(self, nr_sb_entries, nr_commit_ports, nr_wb_ports,
+                 forwarding):
+        self.nr_sb_entries = nr_sb_entries
+        self.nr_commit_ports = nr_commit_ports
+        self.nr_wb_ports = nr_wb_ports
+        self.forwarding = forwarding
+        self.mem_q_names = [[f"mem_q[{slot}].{name}" for name in MEM_Q_FIELDS]
+                            for slot in range(nr_sb_entries)]
+        self.fetched = deque()
+        self.issued = {}
+        self.completed = []
+        self.next_id = 1
+        self.n_committed = 0
+        # Flushed by the core. Records still in flight when the VCD ended
+        # are drained instead, or one real flush would count twice.
+        self.n_flushed_fetched = 0
+        self.n_flushed_issued = 0
+        self.n_drained_fetched = 0
+        self.n_drained_issued = 0
+        self.n_unmatched_writebacks = 0
+        self.n_discarded_writebacks = 0
+        self.flushed_tids = set()
+        self.flushed_tids_cycle = None
+        self.n_unmatched_commits = 0
+        self.n_unmatched_decodes = 0
+        self.n_unmatched_resolutions = 0
+        self.n_issue_cycles = 0
+        self.n_issue_cycles_with_any_wb = 0
+        self.wb_bus_tids = set()
+        self.last_flush_if = "0"
+        self.last_flush_ex = "0"
+
+    def read_mem_q(self, sample, tid):
+        """fu, rs1, rs2, rd, bp.cf and bp.predict_address of slot tid, all
+        None for a slot past the build's scoreboard."""
+        if not 0 <= tid < self.nr_sb_entries:
+            return [None] * len(MEM_Q_FIELDS)
+        return [binary_to_int(sample.get(name))
+                for name in self.mem_q_names[tid]]
+
+    def apply_mem_q(self, rec, mem_q, with_target):
+        fu, rs1, rs2, rd, cf, target = mem_q
+        if fu is not None:
+            rec.fu = fu_name(fu)
+            rec.fu_category = FU_CATEGORY.get(rec.fu, "Unknown")
+        if rs1 is not None:
+            rec.rs1 = rs1
+        if rs2 is not None:
+            rec.rs2 = rs2
+        if rd is not None:
+            rec.rd = rd
+        if cf is not None:
+            rec.bp_predicted_cf = cf_name(cf)
+        if rec.bp_predicted_cf == "NoCF":
+            rec.bp_predicted_target = None
+        elif (with_target and target is not None
+              and rec.bp_predicted_cf is not None):
+            rec.bp_predicted_target = target
+
+    def on_commit_edge(self, cycle, sample):
+        for port in range(self.nr_commit_ports):
+            if sample.bit("commit_ack_o", port) != 1:
+                continue
+            tid = binary_to_int(sample.get(f"commit_pointer_q[{port}]"))
+            if tid is None:
+                continue
+            rec = self.issued.pop(tid, None)
+            if rec is None:
+                self.n_unmatched_commits += 1
+                continue
+            rec.co_cycle = cycle
+            # DebugEn writes the resolved target over bp.predict_address at
+            # writeback (scoreboard.sv:211-213), so only a record that never
+            # wrote back still holds its prediction here.
+            self.apply_mem_q(rec, self.read_mem_q(sample, tid),
+                             with_target=rec.wb_cycle is None)
+            self.completed.append(rec)
+            self.n_committed += 1
+
+    def on_flush_edge(self, cycle, sample):
+        flush_if = sample.get("flush_ctrl_if") or "0"
+        flush_ex = sample.get("flush_ctrl_ex") or "0"
+        # EX first, since it also empties the fetched queue. On cv64a6
+        # flush_ctrl_if rises alone on a mispredict (controller.sv:117).
+        if flush_ex == "1" and self.last_flush_ex == "0":
+            self.flush_fetched("flush_ex_fetched", cycle)
+            self.flush_issued("flush_ex_issued", cycle)
+        if flush_if == "1" and self.last_flush_if == "0":
+            self.flush_fetched("flush_if", cycle)
+        self.last_flush_if, self.last_flush_ex = flush_if, flush_ex
+
+    def on_writeback_edge(self, cycle, sample):
+        self.wb_bus_tids = set()
+        for port in range(self.nr_wb_ports):
+            if sample.bit("wt_valid_i", port) != 1:
+                continue
+            tid = binary_to_int(sample.get(f"trans_id_i[{port}]"))
+            if tid is None:
+                continue
+            self.wb_bus_tids.add(tid)
+            rec = self.issued.get(tid)
+            if rec is None:
+                # scoreboard.sv clears every slot after the writeback when
+                # flush_i is high, so a writeback into a slot this edge
+                # flushed is dropped by the core, not lost by the tracer.
+                if cycle == self.flushed_tids_cycle and \
+                        tid in self.flushed_tids:
+                    self.n_discarded_writebacks += 1
+                else:
+                    self.n_unmatched_writebacks += 1
+                continue
+            first = rec.wb_cycle is None
+            if first:
+                rec.wb_cycle = cycle
+            # Before this edge's write the slot still holds what issue
+            # registered, prediction included.
+            self.apply_mem_q(rec, self.read_mem_q(sample, tid),
+                             with_target=first)
+
+    def on_issue_edge(self, cycle, sample):
+        """The decode and issue handshake, one event since issue_instr_o
+        passes decoded_instr_i straight through (scoreboard.sv:151). Every
+        field is read after the edge, like the handshake, which daxpy.vcd
+        confirms on all 42,842 issues against mem_q."""
+        if (sample.get("decoded_instr_valid_i") != "1"
+                or sample.get("decoded_instr_ack_o") != "1"
+                or sample.get("flush_unissued_instr_i") == "1"):
+            return
+        tid = binary_to_int(sample.get("issue_pointer_q"))
+        if tid is None:
+            return
+        if not self.fetched:
+            self.n_unmatched_decodes += 1
+            return
+        self.n_issue_cycles += 1
+        if self.wb_bus_tids:
+            self.n_issue_cycles_with_any_wb += 1
+        rec = self.fetched.popleft()
+        rec.dec_cycle = rec.is_cycle = cycle
+        rec.ex_cycle = cycle + 1
+        rec.trans_id = tid
+        fu = binary_to_int(sample.get("decoded_instr.fu"))
+        if fu is not None:
+            rec.fu = fu_name(fu)
+            rec.fu_category = FU_CATEGORY.get(rec.fu, "Unknown")
+        rec.rs1 = binary_to_int(sample.get("decoded_instr.rs1"))
+        rec.rs2 = binary_to_int(sample.get("decoded_instr.rs2"))
+        rec.rd = binary_to_int(sample.get("decoded_instr.rd"))
+        rec.bp_predicted_cf = cf_name(
+            binary_to_int(sample.get("decoded_instr.bp.cf")))
+        if rec.bp_predicted_cf not in (None, "NoCF"):
+            rec.bp_predicted_target = binary_to_int(
+                sample.get("decoded_instr.bp.predict_address"))
+        if self.forwarding:
+            self.capture_forwarding(rec, sample)
+        self.issued[tid] = rec
+
+    def capture_forwarding(self, rec, sample):
+        # A producer writing back on this cycle forwards off the writeback
+        # bus, and one already written back from its valid scoreboard slot
+        # (issue_read_operands.sv:524-535).
+        for n in (1, 2, 3):
+            if sample.get(f"forward_rs{n}") != "1":
+                continue
+            tid = binary_to_int(sample.get(f"idx_hzd_rs{n}"))
+            setattr(rec, f"fwd_rs{n}_used", True)
+            setattr(rec, f"fwd_rs{n}_tid", tid)
+            setattr(rec, f"fwd_rs{n}_via",
+                    "wb" if tid in self.wb_bus_tids else "sb")
+
+    def on_fetch_edge(self, cycle, sample):
+        if (sample.get("fetch_entry_valid_i") != "1"
+                or sample.get("fetch_entry_ready_o") != "1"):
+            return
+        # id_stage.sv:444 discards the entry while flush_i, which cva6.sv:719
+        # wires to flush_ctrl_if, so queuing it would put every later issue
+        # one record ahead.
+        dropped = sample.get("flush_ctrl_if") == "1"
+        rec = self.new_record(cycle, sample, dropped)
+        if dropped:
+            self.completed.append(rec)
+            self.n_flushed_fetched += 1
         else:
-            port_maps[m["whitelist_path"]] = build_port_map(
-                m["full_paths"], m["vcd_ids"])
+            self.fetched.append(rec)
 
-    # Collect all tracked VCD IDs for the body filter.
-    tracked = set()
-    for vid in single_id.values():
-        tracked.add(vid)
-    for pm in port_maps.values():
-        tracked.update(pm.values())
+    def new_record(self, cycle, sample, dropped):
+        pc = binary_to_hex(sample.get("fetch_entry.address"))
+        word = binary_to_hex(sample.get("fetch_entry.instruction"))
+        compressed = sample.get("rvfi_is_compressed_o") == "1"
+        # fetch_entry.instruction is 32 bits wide, and a compressed
+        # instruction sits in its low 16.
+        if compressed and word is not None:
+            word = f"0x{int(word, 16) & 0xFFFF:04x}"
+        rec = InstructionRecord(
+            id=self.next_id, pc=pc, instr_word=word, is_compressed=compressed,
+            wraps_line=spans_fetch_blocks(pc, compressed), fe_out_cycle=cycle)
+        if dropped:
+            rec.flushed = True
+            rec.flush_reason = "fetch_dropped"
+            # Dropped on the cycle it was fetched.
+            rec.flush_cycle = cycle
+        self.next_id += 1
+        return rec
 
-    state = {}
-    tracker = PipelineTracker(
-        n_wb_ports=n_wb_ports,
-        n_commit_ports=n_commit_ports,
-    )
+    def on_branch_resolved_edge(self, cycle, sample):
+        """Bind a resolution pulse (branch_unit.sv:66) to the oldest
+        unresolved in-flight CTRL_FLOW record issued before it with its PC. A
+        loop iteration resolved but not yet committed must not take the next
+        iteration's resolution."""
+        if sample.get("resolved_branch_i.valid") != "1":
+            return
+        pc = binary_to_int(sample.get("resolved_branch_i.pc"))
+        candidates = [
+            rec for rec in self.issued.values()
+            if rec.fu == "CTRL_FLOW" and rec.bp_resolve_cycle is None
+            and rec.is_cycle < cycle and pc is not None
+            and pc_value(rec) == pc]
+        if not candidates:
+            self.n_unmatched_resolutions += 1
+            return
+        rec = min(candidates, key=lambda candidate: candidate.is_cycle)
+        rec.bp_resolve_cycle = cycle
+        rec.bp_resolved_cf = cf_name(
+            binary_to_int(sample.get("resolved_branch_i.cf_type")))
+        rec.bp_resolved_target = binary_to_int(
+            sample.get("resolved_branch_i.target_address"))
+        rec.bp_resolved_taken = (
+            sample.get("resolved_branch_i.is_taken") == "1")
+        rec.bp_mispredict = (
+            sample.get("resolved_branch_i.is_mispredict") == "1")
 
-    # Quick aliases for the hot path.
-    CLK = single_id.get("clk_i")
-    FE_V = single_id.get("id_stage_i.fetch_entry_valid_i")
-    FE_R = single_id.get("id_stage_i.fetch_entry_ready_o")
-    PC_ID = single_id.get("fetch_entry_if_id[0].address")
-    IN_ID = single_id.get("fetch_entry_if_id[0].instruction")
-    RVC = single_id.get("id_stage_i.rvfi_is_compressed_o")
+    def flush_record(self, rec, reason, cycle):
+        rec.flushed = True
+        rec.flush_reason = reason
+        rec.flush_cycle = cycle
+        self.completed.append(rec)
 
-    DV = single_id.get("issue_stage_i.i_scoreboard.decoded_instr_valid_i")
-    DA = single_id.get("issue_stage_i.i_scoreboard.decoded_instr_ack_o")
-    # decoded_instr_i fields sampled at decode handshake.
-    DFU = single_id.get("issue_stage_i.i_scoreboard.decoded_instr_i[0].fu")
-    DRS1 = single_id.get("issue_stage_i.i_scoreboard.decoded_instr_i[0].rs1")
-    DRS2 = single_id.get("issue_stage_i.i_scoreboard.decoded_instr_i[0].rs2")
-    DRD = single_id.get("issue_stage_i.i_scoreboard.decoded_instr_i[0].rd")
-    # decoded_instr_i.bp.{cf,predict_address} at the decode handshake, taken
-    # from the pre-edge snapshot to avoid the same advance-on-rising-edge
-    # problem as fu/rs1/rs2/rd.
-    DBP_CF = single_id.get(
-        "issue_stage_i.i_scoreboard.decoded_instr_i[0].bp.cf")
-    DBP_TGT = single_id.get(
-        "issue_stage_i.i_scoreboard.decoded_instr_i[0].bp.predict_address")
-
-    # Forwarding signals from issue_read_operands, snapshotted pre-edge like
-    # decoded_instr_i.*, since forward_rsX and idx_hzd_rsX are combinational
-    # too and advance to the next instruction's view on the edge.
-    FWD_RS1 = single_id.get("issue_stage_i.i_issue_read_operands.forward_rs1")
-    FWD_RS2 = single_id.get("issue_stage_i.i_issue_read_operands.forward_rs2")
-    FWD_RS3 = single_id.get("issue_stage_i.i_issue_read_operands.forward_rs3")
-    IHZ_RS1 = single_id.get(
-        "issue_stage_i.i_issue_read_operands.idx_hzd_rs1[0]")
-    IHZ_RS2 = single_id.get(
-        "issue_stage_i.i_issue_read_operands.idx_hzd_rs2[0]")
-    IHZ_RS3 = single_id.get(
-        "issue_stage_i.i_issue_read_operands.idx_hzd_rs3[0]")
-    FWD_AVAILABLE = all(s is not None for s in (
-        FWD_RS1, FWD_RS2, FWD_RS3, IHZ_RS1, IHZ_RS2, IHZ_RS3))
-    if FWD_AVAILABLE:
-        stagelog("issue_read_operands forwarding signals resolved",
-                 file=sys.stderr)
-    else:
-        missing = [name for name, sig in [
-            ("forward_rs1",   FWD_RS1), ("forward_rs2", FWD_RS2),
-            ("forward_rs3",   FWD_RS3), ("idx_hzd_rs1[0]", IHZ_RS1),
-            ("idx_hzd_rs2[0]", IHZ_RS2), ("idx_hzd_rs3[0]", IHZ_RS3),
-        ] if sig is None]
-        stagelog("WARNING: Forwarding signals not resolved. "
-                 "fwd_rsX_* fields will be left null on all records. "
-                 "Missing: " + ", ".join(missing), file=sys.stderr)
-    IPTR = single_id.get("issue_stage_i.i_scoreboard.issue_pointer_q")
-
-    WTV = single_id.get("issue_stage_i.i_scoreboard.wt_valid_i")
-    # trans_id_i per port: explicit per-port whitelist entries.
-    TID_MAP = {}
-    for port in range(n_wb_ports):
-        vid = single_id.get(f"issue_stage_i.i_scoreboard.trans_id_i[{port}]")
-        if vid is not None:
-            TID_MAP[port] = vid
-
-    # Per-slot maps for scoreboard's registered mem_q.
-    # MEMQ_FU[N] = vcd_id of mem_q[N].sbe.fu (None if slot not exposed).
-    NR_SB = NR_SB_ENTRIES
-    MEMQ_FU = [None] * NR_SB
-    MEMQ_RS1 = [None] * NR_SB
-    MEMQ_RS2 = [None] * NR_SB
-    MEMQ_RD = [None] * NR_SB
-    # Authoritative bp.cf and bp.predict_address. The pre-edge
-    # decoded_instr_i snapshot holds the PREVIOUS instruction's bp on
-    # back-to-back issue, while registered mem_q[trans_id].sbe.bp is stable
-    # from issue+1 through commit. Both halves need the same correction.
-    MEMQ_BP_CF = [None] * NR_SB
-    MEMQ_BP_TGT = [None] * NR_SB
-    memq_resolved = 0
-    memq_bp_cf_resolved = 0
-    memq_bp_tgt_resolved = 0
-    for n in range(NR_SB):
-        f_vid = single_id.get(f"issue_stage_i.i_scoreboard.mem_q[{n}].sbe.fu")
-        r1_vid = single_id.get(
-            f"issue_stage_i.i_scoreboard.mem_q[{n}].sbe.rs1")
-        r2_vid = single_id.get(
-            f"issue_stage_i.i_scoreboard.mem_q[{n}].sbe.rs2")
-        rd_vid = single_id.get(f"issue_stage_i.i_scoreboard.mem_q[{n}].sbe.rd")
-        bp_cf_vid = single_id.get(
-            f"issue_stage_i.i_scoreboard.mem_q[{n}].sbe.bp.cf")
-        bp_tgt_vid = single_id.get(
-            f"issue_stage_i.i_scoreboard.mem_q[{n}].sbe.bp.predict_address")
-        MEMQ_FU[n] = f_vid
-        MEMQ_RS1[n] = r1_vid
-        MEMQ_RS2[n] = r2_vid
-        MEMQ_RD[n] = rd_vid
-        MEMQ_BP_CF[n] = bp_cf_vid
-        MEMQ_BP_TGT[n] = bp_tgt_vid
-        if all(v is not None for v in (f_vid, r1_vid, r2_vid, rd_vid)):
-            memq_resolved += 1
-        if bp_cf_vid is not None:
-            memq_bp_cf_resolved += 1
-        if bp_tgt_vid is not None:
-            memq_bp_tgt_resolved += 1
-
-    # Detect the real scoreboard depth from MEMQ_FU presence. A sweep build
-    # may be smaller, and without shrinking NR_SB the memq check fails and the
-    # off-by-one pre-edge fallback produces wrong FU types throughout.
-    detected_nr_sb = 0
-    for n in range(NR_SB):
-        if MEMQ_FU[n] is not None:
-            detected_nr_sb = n + 1
-        else:
-            break
-    if 0 < detected_nr_sb < NR_SB:
-        stagelog(f"Scoreboard depth: detected {detected_nr_sb} slots in VCD "
-                 f"(tracer default NR_SB_ENTRIES={NR_SB}). Adapting NR_SB and "
-                 f"per-slot arrays. This usually means the build has "
-                 f"NrScoreboardEntries={detected_nr_sb} (TRANS_ID_BITS="
-                 f"{(detected_nr_sb - 1).bit_length()}).",
-                 file=sys.stderr)
-        NR_SB = detected_nr_sb
-        MEMQ_FU = MEMQ_FU[:NR_SB]
-        MEMQ_RS1 = MEMQ_RS1[:NR_SB]
-        MEMQ_RS2 = MEMQ_RS2[:NR_SB]
-        MEMQ_RD = MEMQ_RD[:NR_SB]
-        MEMQ_BP_CF = MEMQ_BP_CF[:NR_SB]
-        MEMQ_BP_TGT = MEMQ_BP_TGT[:NR_SB]
-        memq_resolved = sum(1 for v in MEMQ_FU if v is not None)
-        memq_bp_cf_resolved = sum(1 for v in MEMQ_BP_CF if v is not None)
-        memq_bp_tgt_resolved = sum(1 for v in MEMQ_BP_TGT if v is not None)
-
-    MEMQ_AVAILABLE = (memq_resolved == NR_SB)
-    # Gated independently: a dump carrying cf but not predict_address still
-    # gets the cf correction, and the target simply stays uncorrected.
-    MEMQ_BP_CF_AVAILABLE = (memq_bp_cf_resolved == NR_SB)
-    MEMQ_BP_TGT_AVAILABLE = (memq_bp_tgt_resolved == NR_SB)
-    if MEMQ_BP_CF_AVAILABLE:
-        stagelog("mem_q[*].sbe.bp.cf resolved. Using authoritative "
-                 "reads at writeback to correct the pre-edge decoded_instr_i "
-                 "bp.cf misattribution for back-to-back issues",
-                 file=sys.stderr)
-    else:
-        stagelog(f"WARNING: mem_q[*].sbe.bp.cf not resolved "
-                 f"({memq_bp_cf_resolved}/{NR_SB} slots found). "
-                 f"Falling back to "
-                 f"the pre-edge decoded_instr_i.bp.cf snapshot, which is "
-                 f"INCORRECT for back-to-back issues (the typical loop case): "
-                 f"the pre-edge sample reads the PREVIOUS instruction's bp.cf "
-                 f"because issue_q only flips at the rising edge. Most loop "
-                 f"branches will appear as predicted_cf=NoCF in the output. "
-                 f"To fix: ensure your Verilator dump includes "
-                 f"mem_q[N].sbe.bp "
-                 f"for all scoreboard slots.",
-                 file=sys.stderr)
-    if MEMQ_BP_TGT_AVAILABLE:
-        stagelog("mem_q[*].sbe.bp.predict_address resolved. Correcting the "
-                 "predicted target alongside cf, so a branch recovered at "
-                 "writeback carries its target instead of null",
-                 file=sys.stderr)
-    else:
-        stagelog(f"WARNING: mem_q[*].sbe.bp.predict_address not resolved "
-                 f"({memq_bp_tgt_resolved}/{NR_SB} slots found). "
-                 f"bp_predicted_target keeps the pre-edge snapshot, "
-                 f"so branches "
-                 f"whose cf is recovered at writeback will report a null "
-                 f"target. To fix: ensure your Verilator dump includes "
-                 f"mem_q[N].sbe.bp for all scoreboard slots.",
-                 file=sys.stderr)
-
-    # decoded_instr_i[0].bp.{cf,predict_address} availability.
-    BP_DECODE_AVAILABLE = (DBP_CF is not None and DBP_TGT is not None)
-    if BP_DECODE_AVAILABLE:
-        stagelog("decoded_instr_i[0].bp.{cf,predict_address} resolved. "
-                 "using pre-edge snapshot for prediction capture",
-                 file=sys.stderr)
-    else:
-        missing = [name for name, sig in [
-            ("decoded_instr_i[0].bp.cf", DBP_CF),
-            ("decoded_instr_i[0].bp.predict_address", DBP_TGT),
-        ] if sig is None]
-        stagelog("WARNING: decoded_instr_i.bp.* not resolved. "
-                 "bp_predicted_* fields will be left None on all records. "
-                 "Missing: " + ", ".join(missing), file=sys.stderr)
-
-    if MEMQ_AVAILABLE:
-        stagelog(f"mem_q ring buffer: all {NR_SB} slots resolved. Using authoritative reads",
-                 file=sys.stderr)
-    elif memq_resolved > 0:
-        stagelog(f"mem_q ring buffer: only {memq_resolved}/{NR_SB} slots resolved. "
-                 "falling back to decode-time pre-edge capture",
-                 file=sys.stderr)
-        MEMQ_AVAILABLE = False
-    else:
-        stagelog("mem_q ring buffer: NOT exposed in VCD. Falling back to decode-time pre-edge capture",
-                 file=sys.stderr)
-
-    CA = single_id.get("commit_stage_i.commit_ack_o")
-    CPTR_PORTS = [single_id.get(
-        f"issue_stage_i.i_scoreboard.commit_pointer_q[{port}]")
-        for port in range(NR_COMMIT_PORTS)]
-
-    FIF = single_id.get("flush_ctrl_if")
-    FID = single_id.get("flush_ctrl_id")
-    FEX = single_id.get("flush_ctrl_ex")
-    # Gate the decode handshake by !flush_unissued_instr_i.
-    FUI = single_id.get("issue_stage_i.i_scoreboard.flush_unissued_instr_i")
-    if FUI is None:
-        stagelog("WARNING: flush_unissued_instr_i not resolved. Phantom-decode "
-                 "gating will be DISABLED and the +N slot drift may return. "
-                 "This gates the decode/issue handshake only "
-                 "(scoreboard.sv:171). The fetch-drop path reads "
-                 "flush_ctrl_if.",
-                 file=sys.stderr)
-
-    # I$ lookups for ICacheTimeline.on_cycle. STATE_Q is the controller FSM
-    # (cva6_icache.sv:122), dreq_o the frontend-side mirror. Access counters
-    # increment on icache_dreq_o.req or any ex_stage data_req.
-    IC_REQ = single_id.get("i_frontend.icache_dreq_o.req")
-    DC_REQ_PORTS = [single_id.get(
-        f"ex_stage_i.dcache_req_ports_o[{p}].data_req")
-        for p in range(DCACHE_REQ_PORTS)]
-    csr_access_resolved = (IC_REQ is not None
-                           and all(s is not None for s in DC_REQ_PORTS))
-    if csr_access_resolved:
-        port_list = ", ".join(
-            f"ex_stage_i.dcache_req_ports_o[{p}].data_req"
-            for p in range(DCACHE_REQ_PORTS))
-        stagelog("CSR-equivalent access counters enabled "
-                 f"(icache_dreq_o.req + {port_list})",
-                 file=sys.stderr)
-    else:
-        missing = []
-        if IC_REQ is None:
-            missing.append("icache_dreq_o.req")
-        for p, s in enumerate(DC_REQ_PORTS):
-            if s is None:
-                missing.append(f"ex_stage_i.dcache_req_ports_o[{p}].data_req")
-        stagelog(f"WARNING: CSR-equivalent access counters not all resolved. "
-                 f"viewer will fall back to record-derived access counts. "
-                 f"Missing: {', '.join(missing)}",
-                 file=sys.stderr)
-
-    # Per-cycle access-event lists, filled by at_rising_edge when the signal
-    # was high at the edge, meaning the elapsed cycle had the request up. The
-    # viewer windows them for the CSR-equivalent access count.
-    ic_access_cycles = []
-    dc_access_cycles = []
-    # I$ miss pulse cycles, filled where miss_o was high. len() equals
-    # perf_counters.sv event 1, and the viewer windows it like the access
-    # lists for a region-scoped figure that tracks the counter.
-    icache_miss_cycles = []
-
-    STATE_Q = single_id.get(
-        "gen_cache_hpd.i_cache_subsystem.i_cva6_icache.state_q")
-    IC_VLD = single_id.get("i_frontend.icache_dreq_i.valid")
-    IC_VADDR = single_id.get("i_frontend.icache_dreq_i.vaddr")
-    IC_K2 = single_id.get("i_frontend.icache_dreq_o.kill_s2")
-    IC_MISS_O = single_id.get(
-        "gen_cache_hpd.i_cache_subsystem.i_cva6_icache.miss_o")
-    icache_resolved = all(s is not None
-                          for s in (STATE_Q, IC_VLD, IC_VADDR, IC_K2))
-    if not icache_resolved:
-        stagelog("WARNING: I$ signals not all resolved. "
-                 "if1_lo/if2_lo/if1_hi/if2_hi/ic_miss will be left as None "
-                 "on every record. Missing: " +
-                 ", ".join(name for name, s in [
-                     ("state_q", STATE_Q),
-                     ("dreq_o.valid", IC_VLD),
-                     ("dreq_o.vaddr", IC_VADDR),
-                     ("dreq_i.kill_s2", IC_K2),
-                 ] if s is None),
-                 file=sys.stderr)
-    else:
-        stagelog("I$ tracking enabled (state_q + frontend dreq mirror)",
-                 file=sys.stderr)
-
-    # instr_realign output flag for the per-cycle pulse
-    # counter. Optional. If absent, wraps_line is still populated
-    # from PC, just without the cross-validation counter.
-    SVU = single_id.get("i_frontend.i_instr_realign.serving_unaligned_o")
-    if SVU is None:
-        stagelog("WARNING: serving_unaligned_o not resolved. "
-                 "wraps_line will still be set per record from PC, but the "
-                 "realigner-pulse cross-validation count will be 0",
-                 file=sys.stderr)
-    else:
-        stagelog("instr_realign tracking enabled "
-                 "(serving_unaligned_o pulse counter for wraps_line "
-                 "cross-validation)",
-                 file=sys.stderr)
-
-    # LSU FSM state register lookups.
-    LOAD_STATE = single_id.get("ex_stage_i.lsu_i.i_load_unit.state_q")
-    STORE_STATE = single_id.get("ex_stage_i.lsu_i.i_store_unit.state_q")
-    # lsu_ctrl.trans_id for FSM admission correlation.
-    LSU_CTRL_TID = single_id.get("ex_stage_i.lsu_i.lsu_ctrl.trans_id")
-    # pop_ld / pop_st for admit-while-busy detection.
-    POP_LD = single_id.get("ex_stage_i.lsu_i.lsu_bypass_i.pop_ld_i")
-    POP_ST = single_id.get("ex_stage_i.lsu_i.lsu_bypass_i.pop_st_i")
-    lsu_resolved = (LOAD_STATE is not None and STORE_STATE is not None)
-
-    # HPDcache miss-handler signals. The gen_cache_hpd. prefix is mandatory:
-    # cva6.sv instantiates three cache variants under different generate
-    # branches, the others being gen_cache_std and gen_cache_wt.
-    _DC_BASE = ("gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache."
-                "hpdcache_miss_handler_i.")
-    DC_MALLO = single_id.get(_DC_BASE + "mshr_alloc_i")
-    DC_MTID = single_id.get(_DC_BASE + "mshr_alloc_tid_i")
-    DC_MSID = single_id.get(_DC_BASE + "mshr_alloc_sid_i")
-    DC_MPF = single_id.get(_DC_BASE + "mshr_alloc_is_prefetch_i")
-    DC_MNLINE = single_id.get(_DC_BASE + "mshr_alloc_nline_i")
-    DC_MCHK = single_id.get(_DC_BASE + "mshr_check_i")
-    DC_MCHKN = single_id.get(_DC_BASE + "mshr_check_nline_i")
-    DC_MCHKH = single_id.get(_DC_BASE + "mshr_check_hit_o")
-    DC_RFSM = single_id.get(_DC_BASE + "refill_fsm_q")
-    DC_RRSP = single_id.get(_DC_BASE + "refill_core_rsp_valid_o")
-    DC_RTID = single_id.get(_DC_BASE + "refill_core_rsp_o.tid")
-    dcache_resolved = all(s is not None for s in [
-        DC_MALLO, DC_MTID, DC_MSID, DC_MPF, DC_MNLINE,
-        DC_MCHK, DC_MCHKN, DC_MCHKH, DC_RFSM, DC_RRSP, DC_RTID,
-    ])
-
-    # Dirty victim writeback (flush/wback unit) signals, all at
-    # the i_hpdcache level. Send/ack are the live flush channel. The wbuf
-    # channel is dead in this WB config (gen_no_wbuf).
-    _WB_BASE = "gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache."
-    WB_ALLOC_V = single_id.get(_WB_BASE + "flush_alloc")
-    WB_ALLOC_R = single_id.get(_WB_BASE + "flush_alloc_ready")
-    WB_ALLOC_NL = single_id.get(_WB_BASE + "flush_alloc_nline")
-    WB_SEND_V = single_id.get(_WB_BASE + "mem_req_write_flush_valid")
-    WB_SEND_R = single_id.get(_WB_BASE + "mem_req_write_flush_ready")
-    WB_SEND_ID = single_id.get(_WB_BASE + "mem_req_write_flush.mem_req_id")
-    WB_SEND_AD = single_id.get(_WB_BASE + "mem_req_write_flush.mem_req_addr")
-    WB_ACK_V = single_id.get(_WB_BASE + "mem_resp_write_flush_valid")
-    WB_ACK_R = single_id.get(_WB_BASE + "mem_resp_write_flush_ready")
-    WB_ACK_ID = single_id.get(_WB_BASE + "mem_resp_write_flush.mem_resp_w_id")
-    WB_ACK_NL = single_id.get(_WB_BASE + "flush_ack_nline")
-    wback_resolved = all(s is not None for s in [
-        WB_ALLOC_V, WB_ALLOC_R, WB_ALLOC_NL,
-        WB_SEND_V, WB_SEND_R, WB_SEND_ID, WB_SEND_AD,
-        WB_ACK_V, WB_ACK_R, WB_ACK_ID, WB_ACK_NL,
-    ])
-    # Flush-side victim way + miss-handler eviction signals
-    # (mshr_alloc_i / mshr_alloc_nline_i reused from the miss-handler group as
-    # DC_MALLO / DC_MNLINE).
-    WB_FWAY = single_id.get(_WB_BASE + "flush_alloc_way")
-    WB_ALLOC_CTRL = single_id.get(_WB_BASE + "ctrl_flush_alloc")
-    WB_ALLOC_CMO = single_id.get(_WB_BASE + "cmo_flush_alloc")
-    EV_WBACK = single_id.get(_DC_BASE + "mshr_alloc_wback_i")
-    EV_VWAY = single_id.get(_DC_BASE + "mshr_alloc_victim_way_i")
-    link_resolved = all(s is not None for s in [
-        WB_FWAY, EV_WBACK, EV_VWAY, DC_MALLO, DC_MNLINE,
-    ])
-
-    # Branch resolution, the bp_resolve_t fields under
-    # issue_stage_i.i_scoreboard.resolved_branch_i. valid pulses for one cycle
-    # when branch_unit emits a resolution, the rest carry the payload.
-    _RB = "issue_stage_i.i_scoreboard.resolved_branch_i."
-    RB_VLD = single_id.get(_RB + "valid")
-    RB_PC = single_id.get(_RB + "pc")
-    RB_TGT = single_id.get(_RB + "target_address")
-    RB_TKN = single_id.get(_RB + "is_taken")
-    RB_MISP = single_id.get(_RB + "is_mispredict")
-    RB_CFT = single_id.get(_RB + "cf_type")
-    bp_resolved = all(s is not None for s in
-                      [RB_VLD, RB_PC, RB_TGT, RB_TKN, RB_MISP, RB_CFT])
-    if not bp_resolved:
-        missing = [name for name, sig in [
-            ("resolved_branch_i.valid", RB_VLD),
-            ("resolved_branch_i.pc", RB_PC),
-            ("resolved_branch_i.target_address", RB_TGT),
-            ("resolved_branch_i.is_taken", RB_TKN),
-            ("resolved_branch_i.is_mispredict", RB_MISP),
-            ("resolved_branch_i.cf_type", RB_CFT),
-        ] if sig is None]
-        stagelog("WARNING: branch-resolve signals not all "
-                 "resolved. bp_resolved_* fields will be left None "
-                 "on all records. Missing: " + ", ".join(missing),
-                 file=sys.stderr)
-    else:
-        stagelog("Branch resolution tracking enabled "
-                 "(resolved_branch_i: valid + pc + target + taken + "
-                 "mispredict + cf_type)", file=sys.stderr)
-
-    if not lsu_resolved:
-        missing = []
-        if LOAD_STATE is None:
-            missing.append("i_load_unit.state_q")
-        if STORE_STATE is None:
-            missing.append("i_store_unit.state_q")
-        stagelog("WARNING: LSU signals not all resolved. "
-                 "lsu_state_history will be left as None on every record. "
-                 "Missing: " + ", ".join(missing), file=sys.stderr)
-    else:
-        extras = []
-        if not LSU_CTRL_TID:
-            extras.append("lsu_ctrl.trans_id")
-        if not POP_LD:
-            extras.append("pop_ld")
-        if not POP_ST:
-            extras.append("pop_st")
-        extras_msg = ("" if not extras
-                      else f". Degraded (missing: {', '.join(extras)})")
-        stagelog("LSU FSM tracking enabled "
-                 f"(load_unit.state_q + store_unit.state_q + "
-                 f"lsu_ctrl.trans_id + pop_ld + pop_st){extras_msg}",
-                 file=sys.stderr)
-
-    # Announce dcache event tracking status.
-    if not dcache_resolved:
-        missing = [name for name, sig in [
-            ("mshr_alloc_i", DC_MALLO),
-            ("mshr_alloc_tid_i", DC_MTID),
-            ("mshr_alloc_sid_i", DC_MSID),
-            ("mshr_alloc_is_prefetch_i", DC_MPF),
-            ("mshr_alloc_nline_i", DC_MNLINE),
-            ("mshr_check_i", DC_MCHK),
-            ("mshr_check_nline_i", DC_MCHKN),
-            ("mshr_check_hit_o", DC_MCHKH),
-            ("refill_fsm_q", DC_RFSM),
-            ("refill_core_rsp_valid_o", DC_RRSP),
-            ("refill_core_rsp_o.tid", DC_RTID),
-        ] if sig is None]
-        stagelog(f"WARNING: Dcache signals not all resolved. "
-                 f"dc_* fields will be left at defaults. "
-                 f"Missing: {', '.join(missing)}", file=sys.stderr)
-    else:
-        stagelog("D$ event tracking enabled "
-                 "(mshr_alloc + mshr_check + refill_fsm + refill_rsp)",
-                 file=sys.stderr)
-
-    # Announce writeback (flush/wback) tracking status.
-    if not wback_resolved:
-        missing = [name for name, sig in [
-            ("flush_alloc", WB_ALLOC_V),
-            ("flush_alloc_ready", WB_ALLOC_R),
-            ("flush_alloc_nline", WB_ALLOC_NL),
-            ("mem_req_write_flush_valid", WB_SEND_V),
-            ("mem_req_write_flush_ready", WB_SEND_R),
-            ("mem_req_write_flush.mem_req_id", WB_SEND_ID),
-            ("mem_req_write_flush.mem_req_addr", WB_SEND_AD),
-            ("mem_resp_write_flush_valid", WB_ACK_V),
-            ("mem_resp_write_flush_ready", WB_ACK_R),
-            ("mem_resp_write_flush.mem_resp_w_id", WB_ACK_ID),
-            ("flush_ack_nline", WB_ACK_NL),
-        ] if sig is None]
-        stagelog("WARNING: Writeback signals not all resolved. "
-                 "writebacks[] will be empty. Missing: " + ", ".join(missing),
-                 file=sys.stderr)
-    else:
-        stagelog("dirty-victim writeback tracking enabled "
-                 "(flush alloc + mem_req_write_flush + mem_resp_write_flush)",
-                 file=sys.stderr)
-        if link_resolved:
-            stagelog("writeback<->eviction linkage enabled "
-                     "(mshr_alloc_wback + victim_way + flush_alloc_way, "
-                     "join by (set,way))", file=sys.stderr)
-        else:
-            stagelog("WARNING: Linkage signals not all resolved. "
-                     "writebacks will have linked=false. (need "
-                     "mshr_alloc_wback_i, mshr_alloc_victim_way_i, "
-                     "flush_alloc_way)", file=sys.stderr)
-
-    cycle = -1
-    first_ts_seen = False
-    clk_at_ts_start = "0"
-    prev_flush_if = "0"
-    prev_flush_id = "0"
-    prev_flush_ex = "0"
-
-    # Pre-edge snapshot of decoded_instr_i, sourced from id_stage's registered
-    # issue_q which advances at the decode edge. Verilator dumps post-edge, so
-    # a naive read at the rising edge yields the NEXT instruction's fields.
-    pre_dfu = None
-    pre_drs1 = None
-    pre_drs2 = None
-    pre_drd = None
-    # Pre-edge snapshots of decoded_instr_i[0].bp. Reading them from state at
-    # the rising-edge timestamp lands on the next instruction, id_stage's
-    # issue_q advancing at the same edge that latches the handshake.
-    pre_dbp_cf = None
-    pre_dbp_tgt = None
-    # Pre-edge snapshot of forwarding signals.
-    # Pre-edge snapshot of the writeback bus, for the via=sb/wb call. A
-    # 1-cycle FU's wb pulse is gone by the consumer's is_cycle, so only the
-    # pre-edge value lands on the cycle the wb override fired.
-    pre_wtv = None
-    pre_tids = {}     # port -> pre-edge trans_id_i[port] (raw VCD string)
-
-    n_lines = 0
-    n_changes = 0
-    last_ts = 0
-    last_report = 0
-    start = time.time()
-    # Previous-cycle value of serving_unaligned_o, used by
-    # at_rising_edge to detect 0->1 transitions = the count of distinct
-    # unaligned-instr attempts.
-    last_svu = None
-    # Clock period detection. The absolute timestamps of the first two rising
-    # edges differ by one period, which lets downstream tools convert cycles
-    # to real time with no external knowledge of the clock.
-    first_re_ts = None
-    clock_period_ts = None
-
-    def at_rising_edge():
-        nonlocal cycle, prev_flush_if, prev_flush_id, prev_flush_ex, last_svu
-        cycle += 1
-
-        # CSR-equivalent access sampling. perf_counters.sv increments while
-        # icache_dreq_o.req or any dcache_req_ports_i[0..2].data_req is high.
-        # The pre-edge value is what the synchronous counter sees.
-        if csr_access_resolved:
-            if state.get(IC_REQ, "0") == "1":
-                ic_access_cycles.append(cycle)
-            if any(state.get(s, "0") == "1" for s in DC_REQ_PORTS):
-                dc_access_cycles.append(cycle)
-
-        # I$ miss, pre-edge miss_o. The counter adds one per high cycle and
-        # the FSM asserts it once per accepted cacheable ifill
-        # (cva6_icache.sv:301-303), wrong-path fills included.
-        if IC_MISS_O is not None and state.get(IC_MISS_O, "0") == "1":
-            icache_miss_cycles.append(cycle)
-
-        # No drain step. Correlation is via lsu_ctrl.trans_id at
-        # FSM-transition time, see on_lsu_fsm_sample, rather than a deferred
-        # pending slot. lsu_ctrl is what the FSM itself sees.
-
-        # 1. Commit, before the flush below and before issue can claim the
-        # scoreboard slots it releases.
-        if CA is not None:
-            ca_bus = state.get(CA, "0")
-            for port in range(n_commit_ports):
-                if get_bit(ca_bus, port) == 1:
-                    ptr_id = CPTR_PORTS[port] if port < len(
-                        CPTR_PORTS) else None
-                    if ptr_id is not None:
-                        tid = binary_to_int(state.get(ptr_id))
-                        if tid is not None:
-                            mq_fu = mq_rs1 = mq_rs2 = mq_rd = None
-                            mq_bp_cf = mq_bp_tgt = None
-                            if MEMQ_AVAILABLE and 0 <= tid < NR_SB:
-                                mq_fu = binary_to_int(state.get(MEMQ_FU[tid]))
-                                mq_rs1 = binary_to_int(
-                                    state.get(MEMQ_RS1[tid]))
-                                mq_rs2 = binary_to_int(
-                                    state.get(MEMQ_RS2[tid]))
-                                mq_rd = binary_to_int(state.get(MEMQ_RD[tid]))
-                            if MEMQ_BP_CF_AVAILABLE and 0 <= tid < NR_SB:
-                                mq_bp_cf = binary_to_int(
-                                    state.get(MEMQ_BP_CF[tid]))
-                            if MEMQ_BP_TGT_AVAILABLE and 0 <= tid < NR_SB:
-                                mq_bp_tgt = binary_to_int(
-                                    state.get(MEMQ_BP_TGT[tid]))
-                            tracker.on_commit(cycle, port, tid,
-                                              mq_fu, mq_rs1, mq_rs2, mq_rd,
-                                              mq_bp_cf, mq_bp_tgt)
-
-        # 2. Flush detection on rising edges of flush_ctrl_*.
-        flush_if_now = state.get(FIF, "0") if FIF else "0"
-        flush_id_now = state.get(FID, "0") if FID else "0"
-        flush_ex_now = state.get(FEX, "0") if FEX else "0"
-        # EX first, as its cascade covers ID and IF. On cv64a6 flush_if_o rises
-        # alone on a mispredict (controller.sv:117), flush_id_o only with EX.
-        # Separate ifs, not elif, so a core raising ID and IF at once keeps IF.
-        if flush_ex_now == "1" and prev_flush_ex == "0":
-            tracker.on_flush_ex(cycle)
-        if flush_id_now == "1" and prev_flush_id == "0":
-            tracker.on_flush_id(cycle)
-        if flush_if_now == "1" and prev_flush_if == "0":
-            tracker.on_flush_if(cycle)
-        prev_flush_if, prev_flush_id, prev_flush_ex = (
-            flush_if_now, flush_id_now, flush_ex_now)
-
-        # 3. Writeback.
-        if WTV is not None:
-            wt_bus = state.get(WTV, "0")
-            for port in range(n_wb_ports):
-                if get_bit(wt_bus, port) == 1:
-                    tid_vid = TID_MAP.get(port)
-                    if tid_vid is not None:
-                        tid = binary_to_int(state.get(tid_vid))
-                        if tid is not None:
-                            mq_fu = mq_rs1 = mq_rs2 = mq_rd = None
-                            mq_bp_cf = mq_bp_tgt = None
-                            if MEMQ_AVAILABLE and 0 <= tid < NR_SB:
-                                mq_fu = binary_to_int(state.get(MEMQ_FU[tid]))
-                                mq_rs1 = binary_to_int(
-                                    state.get(MEMQ_RS1[tid]))
-                                mq_rs2 = binary_to_int(
-                                    state.get(MEMQ_RS2[tid]))
-                                mq_rd = binary_to_int(state.get(MEMQ_RD[tid]))
-                            if MEMQ_BP_CF_AVAILABLE and 0 <= tid < NR_SB:
-                                mq_bp_cf = binary_to_int(
-                                    state.get(MEMQ_BP_CF[tid]))
-                            if MEMQ_BP_TGT_AVAILABLE and 0 <= tid < NR_SB:
-                                mq_bp_tgt = binary_to_int(
-                                    state.get(MEMQ_BP_TGT[tid]))
-                            tracker.on_writeback(cycle, port, tid,
-                                                 mq_fu, mq_rs1, mq_rs2, mq_rd,
-                                                 mq_bp_cf, mq_bp_tgt)
-
-        # 4+5. Combined decode+issue handshake. issue_instr_o is a
-        # combinational passthrough of decoded_instr_i (scoreboard.sv:151), so
-        # DV/DA and IV/IA fire together and must be read as one event.
-        if DV and DA and state.get(DV) == "1" and state.get(DA) == "1":
-            flush_unissued = (FUI is not None and state.get(FUI) == "1")
-            if not flush_unissued:
-                tid = binary_to_int(state.get(IPTR))
-                if tid is not None:
-                    fu_val = binary_to_int(pre_dfu)
-                    rs1 = binary_to_int(pre_drs1)
-                    rs2 = binary_to_int(pre_drs2)
-                    rd = binary_to_int(pre_drd)
-                    # bp.cf and bp.predict_address use the same pre-edge
-                    # pattern as fu/rs1/rs2/rd. issue_pointer_q advances on
-                    # this edge, so mem_q[tid].sbe.bp is the previous slot.
-                    bp_cf_val = (binary_to_int(pre_dbp_cf)
-                                 if BP_DECODE_AVAILABLE else None)
-                    bp_target = (binary_to_int(pre_dbp_tgt)
-                                 if BP_DECODE_AVAILABLE else None)
-                    # Forwarding snapshot. forward_rsX is combinational off
-                    # the current issue_q[0], so post-edge it reflects the
-                    # instruction just issued and pre-edge the one before.
-                    if FWD_AVAILABLE:
-                        live_fwd_rs1 = state.get(FWD_RS1) if FWD_RS1 else None
-                        live_fwd_rs2 = state.get(FWD_RS2) if FWD_RS2 else None
-                        live_fwd_rs3 = state.get(FWD_RS3) if FWD_RS3 else None
-                        fwd_rs1_bit = (live_fwd_rs1 == "1")
-                        fwd_rs2_bit = (live_fwd_rs2 == "1")
-                        fwd_rs3_bit = (live_fwd_rs3 == "1")
-                        ihz_rs1_v = binary_to_int(
-                            state.get(IHZ_RS1)) if IHZ_RS1 else None
-                        ihz_rs2_v = binary_to_int(
-                            state.get(IHZ_RS2)) if IHZ_RS2 else None
-                        ihz_rs3_v = binary_to_int(
-                            state.get(IHZ_RS3)) if IHZ_RS3 else None
-                    else:
-                        fwd_rs1_bit = fwd_rs2_bit = fwd_rs3_bit = False
-                        ihz_rs1_v = ihz_rs2_v = ihz_rs3_v = None
-                    # wb_view from the pre-edge writeback bus, which is Q's
-                    # at-head cycle and when the wb override made Q issuable.
-                    # Live state would read post-edge, after P's pulse ended.
-                    wb_view = []
-                    if WTV is not None and pre_wtv is not None:
-                        for port, raw_tid in pre_tids.items():
-                            # get_bit handles VCD left-truncation and counts
-                            # x or z, which a hand index reads as absent.
-                            if get_bit(pre_wtv, port) == 1:
-                                wb_tid = binary_to_int(raw_tid)
-                                if wb_tid is not None:
-                                    wb_view.append((port, wb_tid))
-                    tracker.on_decode_issue(cycle, tid,
-                                            fu_val, rs1, rs2, rd,
-                                            bp_cf_val, bp_target,
-                                            fwd_rs1_bit, fwd_rs2_bit, fwd_rs3_bit,
-                                            ihz_rs1_v, ihz_rs2_v, ihz_rs3_v,
-                                            wb_view)
-
-        # 6. Fetch.
-        #
-        # 6. Fetch.
-        #
-        # Queuing a handshake id_stage discards would put every later pop one
-        # slot ahead. id_stage.sv:444 discards on flush_i, which cva6.sv:719
-        # wires to flush_ctrl_if, so that is the gate.
-        if FE_V and FE_R and state.get(FE_V) == "1" and state.get(FE_R) == "1":
-            pc = binary_to_hex(state.get(PC_ID))
-            instr = binary_to_hex(state.get(IN_ID))
-            rvc = (state.get(RVC) == "1") if RVC else False
-            flush_active = (FIF is not None and state.get(FIF) == "1")
-            if flush_active:
-                tracker.on_fetch_dropped(cycle, pc, instr, rvc)
+    def flush_fetched(self, reason, cycle):
+        while self.fetched:
+            self.flush_record(self.fetched.popleft(), reason, cycle)
+            if reason == "eof":
+                self.n_drained_fetched += 1
             else:
-                tracker.on_fetch(cycle, pc, instr, rvc)
+                self.n_flushed_fetched += 1
 
-        # 7. Feed the I$ event timeline, independent of the record handlers.
-        # It observes the controller FSM and dreq handshake, and
-        # match_records_to_events binds the events on afterwards by PC.
-        if icache_resolved:
-            tracker.icache_timeline.on_cycle(
+    def flush_issued(self, reason, cycle):
+        self.flushed_tids = set(self.issued)
+        self.flushed_tids_cycle = cycle
+        for rec in self.issued.values():
+            self.flush_record(rec, reason, cycle)
+            if reason == "eof":
+                self.n_drained_issued += 1
+            else:
+                self.n_flushed_issued += 1
+        self.issued.clear()
+
+    def finalise(self):
+        # Still in flight when the VCD ended, which the core never flushed,
+        # so reason eof and no flush_cycle, since a cycle would invent one.
+        self.flush_fetched("eof", None)
+        self.flush_issued("eof", None)
+        self.completed.sort(key=lambda rec: rec.id)
+
+
+class LsuFsmTracker:
+    """One LSU FSM, load_unit or store_unit, attributing its admissions and
+    releases to in-flight records through lsu_ctrl.trans_id. An admission is
+    IDLE to busy, a pop in admit_state, or admit_state to another busy
+    state, the three ways a request enters (the IDLE and SEND_TAG cases at
+    load_unit.sv:254 and :320, IDLE and VALID_STORE at store_unit.sv:160 and
+    :179)."""
+
+    def __init__(self, names, admit_state):
+        self.names = names
+        self.admit_state = admit_state
+        self.active = None
+        self.last_state = None
+        self.pending_tid = None
+
+    def admit(self, cycle, rec, state):
+        self.active = rec
+        if rec is not None:
+            rec.lsu_admit_cycle = cycle
+            self.log_state(rec, cycle, state)
+
+    def release(self, cycle):
+        if self.active is not None:
+            self.active.lsu_release_cycle = cycle - 1
+
+    @staticmethod
+    def log_state(rec, cycle, state):
+        if rec.lsu_state_history is None:
+            rec.lsu_state_history = []
+        rec.lsu_state_history.append({"cycle": cycle, "state": state})
+
+    def on_edge(self, cycle, state_str, last_ctrl_tid, ctrl_tid, pop_str,
+                issued):
+        if state_str is None:
+            return
+        state = self.names.get(binary_to_int(state_str), f"?{state_str}")
+        if self.last_state is None:
+            self.last_state = state_str
+            return
+        if self.pending_tid is not None:
+            # pop_ld_i or pop_st_i on the last edge took a request while busy,
+            # and the FSM hands over to it now.
+            self.release(cycle)
+            self.admit(cycle, issued.get(binary_to_int(self.pending_tid)),
+                       state)
+            self.pending_tid = None
+        elif state_str != self.last_state:
+            last = self.names.get(binary_to_int(self.last_state), "?")
+            admitted = issued.get(binary_to_int(last_ctrl_tid))
+            if last == "IDLE" and state != "IDLE":
+                self.admit(cycle, admitted, state)
+            elif last == self.admit_state and state != "IDLE":
+                self.release(cycle)
+                self.admit(cycle, admitted, state)
+            elif state == "IDLE":
+                self.release(cycle)
+                self.active = None
+            elif self.active is not None:
+                self.log_state(self.active, cycle, state)
+        self.last_state = state_str
+        if (pop_str == "1" and state == self.admit_state
+                and ctrl_tid is not None):
+            self.pending_tid = ctrl_tid
+
+
+class DcacheEventLog:
+    """The HPDcache miss handler's allocation, check and refill-response
+    pulses in cycle order, and the cycles its refill FSM was busy."""
+
+    def __init__(self):
+        self.events = []
+        self.refill_active_cycles = []
+
+    def on_edge(self, cycle, sample):
+        if sample.get("mshr_alloc_i") == "1":
+            prefetch = binary_to_int(sample.get("mshr_alloc_is_prefetch_i"))
+            self.events.append({
+                "cycle": cycle, "type": "alloc",
+                "sid": binary_to_int(sample.get("mshr_alloc_sid_i")),
+                "tid": binary_to_int(sample.get("mshr_alloc_tid_i")),
+                "is_prefetch": None if prefetch is None else prefetch == 1,
+                "nline": binary_to_int(sample.get("mshr_alloc_nline_i")),
+            })
+        # The check path carries no requester id, so a check is attributed
+        # to a record by its cycle alone.
+        if sample.get("mshr_check_i") == "1":
+            hit = sample.get("mshr_check_hit_o") == "1"
+            self.events.append({
+                "cycle": cycle, "type": "check_hit" if hit else "check_miss",
+                "nline": binary_to_int(sample.get("mshr_check_nline_i")),
+            })
+        if sample.get("refill_core_rsp_valid_o") == "1":
+            self.events.append({
+                "cycle": cycle, "type": "refill_rsp",
+                "tid": binary_to_int(sample.get("refill_core_rsp_o.tid")),
+            })
+        refill = binary_to_int(sample.get("refill_fsm_q"))
+        if refill is not None and refill != REFILL_FSM_IDLE:
+            self.refill_active_cycles.append(cycle)
+
+
+class MemWritebackLog:
+    """Dirty-line writeback handshakes in cycle order: flush_alloc hands a
+    line over, the flush channel's request writes it and its response
+    acknowledges it. finalise_mem_writebacks pairs them after the walk."""
+
+    def __init__(self):
+        self.allocs = []
+        self.sends = []
+        self.acks = []
+        self.mshr_allocs = []
+
+    def on_mem_wb_sample(self, cycle, sample):
+        if (sample.get("flush_alloc") == "1"
+                and sample.get("flush_alloc_ready") == "1"):
+            producer = ("evict" if sample.get("ctrl_flush_alloc") == "1"
+                        else "cmo")
+            self.allocs.append((
+                cycle, binary_to_hex(sample.get("flush_alloc_nline")),
+                binary_to_int(sample.get("flush_alloc_way")), producer))
+        if (sample.get("mem_req_write_flush_valid") == "1"
+                and sample.get("mem_req_write_flush_ready") == "1"):
+            self.sends.append((
                 cycle,
-                state.get(STATE_Q),
-                state.get(IC_VLD),
-                state.get(IC_VADDR),
-                state.get(IC_K2),
-            )
-
-        # 7b. Realigner sampling. starts counts unaligned runs, cycles counts
-        # the stall cycles unaligned_q was high. wraps_line correctness comes
-        # from the lo to hi I$ binding, not from these.
-        if SVU is not None:
-            curr_svu = state.get(SVU)
-            if curr_svu == "1":
-                tracker.n_realigner_unaligned_cycles += 1
-                if last_svu != "1":
-                    tracker.n_realigner_unaligned_starts += 1
-            last_svu = curr_svu
-
-        # 8. Sample LSU FSMs. Admissions come from IDL to non-IDL transitions
-        # via the previous lsu_ctrl.trans_id, and from pop_ld/pop_st in
-        # SEND_TAG or VALID_STORE for the admit-while-busy case.
-        if lsu_resolved:
-            tracker.on_lsu_fsm_sample(
+                binary_to_int(sample.get("mem_req_write_flush.mem_req_id")),
+                binary_to_hex(
+                    sample.get("mem_req_write_flush.mem_req_addr"))))
+        if (sample.get("mem_resp_write_flush_valid") == "1"
+                and sample.get("mem_resp_write_flush_ready") == "1"):
+            self.acks.append((
                 cycle,
-                state.get(LOAD_STATE),
-                state.get(STORE_STATE),
-                state.get(LSU_CTRL_TID) if LSU_CTRL_TID else None,
-                state.get(POP_LD) if POP_LD else None,
-                state.get(POP_ST) if POP_ST else None,
-            )
+                binary_to_int(
+                    sample.get("mem_resp_write_flush.mem_resp_w_id")),
+                binary_to_hex(sample.get("flush_ack_nline"))))
+        # Candidates for the eviction join, not evictions: the wback bit is
+        # the incoming line's policy, not a dirty victim
+        # (hpdcache_ctrl_pe.sv:582).
+        if (sample.get("mshr_alloc_i") == "1"
+                and sample.get("mshr_alloc_wback_i") == "1"):
+            self.mshr_allocs.append((
+                cycle, binary_to_hex(sample.get("mshr_alloc_nline_i")),
+                binary_to_int(sample.get("mshr_alloc_victim_way_i"))))
 
-        # 9. Sample HPDcache miss-handler signals, capturing alloc, check and
-        # refill_rsp pulses plus rFSM-active cycles into a log keyed by cycle.
-        # attribute_dc_events_to_records binds them after the scan.
-        if dcache_resolved:
-            tracker.on_dcache_sample(
-                cycle,
-                state.get(DC_MALLO),
-                state.get(DC_MTID),
-                state.get(DC_MSID),
-                state.get(DC_MPF),
-                state.get(DC_MNLINE),
-                state.get(DC_MCHK),
-                state.get(DC_MCHKN),
-                state.get(DC_MCHKH),
-                state.get(DC_RFSM),
-                state.get(DC_RRSP),
-                state.get(DC_RTID),
-            )
 
-        # 9b. Sample the flush/wback unit handshakes. Logged in
-        # cycle order. Pairing + AXI-write-latency aggregate computed in
-        # finalize_writebacks() after the walk.
-        if wback_resolved:
-            tracker.on_wback_sample(
-                cycle,
-                state.get(WB_ALLOC_V),
-                state.get(WB_ALLOC_R),
-                state.get(WB_ALLOC_NL),
-                state.get(WB_FWAY) if WB_FWAY else None,
-                state.get(WB_SEND_V),
-                state.get(WB_SEND_R),
-                state.get(WB_SEND_ID),
-                state.get(WB_SEND_AD),
-                state.get(WB_ACK_V),
-                state.get(WB_ACK_R),
-                state.get(WB_ACK_ID),
-                state.get(WB_ACK_NL),
-                state.get(WB_ALLOC_CTRL) if WB_ALLOC_CTRL else None,
-                state.get(WB_ALLOC_CMO) if WB_ALLOC_CMO else None,
-            )
+class Mechanisms:
+    """Every per-edge mechanism of one walk."""
 
-        # 9c. Log MSHR allocations carrying the write-back attribute. These
-        # are the join candidates for evict-producer writebacks in finalize.
-        if link_resolved:
-            tracker.on_mshr_alloc_sample(
-                cycle,
-                state.get(DC_MALLO),
-                state.get(EV_WBACK),
-                state.get(DC_MNLINE),
-                state.get(EV_VWAY),
-            )
+    def __init__(self, resolved, nr_sb_entries, nr_commit_ports,
+                 nr_wb_ports):
+        self.resolved = resolved
+        self.perf = PerfCounterSamples(resolved["icache"])
+        self.pipeline = PipelineTracker(nr_sb_entries, nr_commit_ports,
+                                        nr_wb_ports, resolved["forwarding"])
+        self.icache = ICacheTimeline()
+        self.load_fsm = LsuFsmTracker(LOAD_FSM_NAMES, LOAD_ADMIT_WHILE_BUSY)
+        self.store_fsm = LsuFsmTracker(STORE_FSM_NAMES,
+                                       STORE_ADMIT_WHILE_BUSY)
+        self.last_lsu_ctrl_tid = None
+        self.dcache = DcacheEventLog()
+        self.mem_wb = MemWritebackLog()
+        # Filled after the walk, by the passes of sections 8 and 9.
+        self.n_unknown_bit_reads = 0
+        self.mem_wb_stats = None
+        self.bubble_counts = None
 
-        # 10. Branch resolution. resolved_branch_o.valid goes high for one
-        # cycle at the branch's ex_cycle, or just after under contention, and
-        # on_branch_resolved binds it by PC, oldest in-flight on a tie.
-        if bp_resolved and state.get(RB_VLD) == "1":
-            tracker.on_branch_resolved(
-                cycle,
-                state.get(RB_PC),
-                state.get(RB_TGT),
-                state.get(RB_TKN),
-                state.get(RB_MISP),
-                state.get(RB_CFT),
-            )
+    def on_rising_edge(self, cycle, sample):
+        """One rising edge. Commit runs before issue, so a slot released on
+        this edge can be claimed on it, and writeback before issue, so a
+        same-cycle forward sees the bus. The flush runs before writeback and
+        issue, and the branch resolution runs last, once any flush on this
+        edge has removed its record."""
+        self.perf.on_edge(cycle, sample)
+        pipeline = self.pipeline
+        pipeline.on_commit_edge(cycle, sample)
+        pipeline.on_flush_edge(cycle, sample)
+        pipeline.on_writeback_edge(cycle, sample)
+        pipeline.on_issue_edge(cycle, sample)
+        pipeline.on_fetch_edge(cycle, sample)
+        if self.resolved["icache"]:
+            self.icache.on_edge(cycle, sample)
+        if self.resolved["lsu_fsm"]:
+            self.on_lsu_edge(cycle, sample)
+        if self.resolved["dcache"]:
+            self.dcache.on_edge(cycle, sample)
+        if self.resolved["mem_writeback"]:
+            self.mem_wb.on_mem_wb_sample(cycle, sample)
+        if self.resolved["bp_resolution"]:
+            pipeline.on_branch_resolved_edge(cycle, sample)
 
-    # The only mark a truncation leaves. Header, period and the
-    # cycle-to-timestamp relation all stay consistent across a cut.
+    def on_lsu_edge(self, cycle, sample):
+        ctrl_tid = sample.get("lsu_ctrl.trans_id")
+        issued = self.pipeline.issued
+        self.load_fsm.on_edge(
+            cycle, sample.get("load_unit.state_q"), self.last_lsu_ctrl_tid,
+            ctrl_tid, sample.get("lsu_bypass.pop_ld_i"), issued)
+        self.store_fsm.on_edge(
+            cycle, sample.get("store_unit.state_q"), self.last_lsu_ctrl_tid,
+            ctrl_tid, sample.get("lsu_bypass.pop_st_i"), issued)
+        if ctrl_tid is not None:
+            self.last_lsu_ctrl_tid = ctrl_tid
+
+
+def stream_and_extract(f, mechanisms, sample, run):
+    """Walk the VCD body once. A timestamp line closes the changes of the
+    timestamp before it, and a clock that went from 0 to 1 across them was a
+    rising edge, whose values are the post-edge ones Verilator dumps."""
+    state = sample.state
+    clk = sample.ids["clk_i"]
+    tracked = set(sample.ids.values())
+    progress = run.progress
+    completed = mechanisms.pipeline.completed
+    raw = f.buffer
+    cycle = -1
+    n_lines = n_changes = last_ts = 0
+    first_edge_ts = vcd_clock_period = None
+    first_ts_seen = False
     ends_cleanly = True
+    clk_at_ts_start = "0"
     for line in f:
         n_lines += 1
-        if _PROG is not None and (n_lines & 0x3FFF) == 0:
-            _PROG.update(n_lines, len(tracker.completed))
+        if not n_lines & PROGRESS_LINE_MASK:
+            progress.update(n_lines, len(completed), raw.tell())
+        # The only mark a cut leaves, since the header, the period and the
+        # cycle-to-timestamp relation all stay consistent across one.
         ends_cleanly = line.endswith("\n")
         line = line.rstrip()
         if not line:
             continue
-        c0 = line[0]
-
-        if c0 == "#":
+        first = line[0]
+        if first == "#":
             if first_ts_seen:
-                curr_clk = state.get(CLK, "0")
-                if clk_at_ts_start == "0" and curr_clk == "1":
-                    # Clock period from the first two rising edges. last_ts
-                    # is the timestamp before this edge took effect, which is
-                    # the exact rising-edge time.
-                    if first_re_ts is None:
-                        first_re_ts = last_ts
-                    elif clock_period_ts is None:
-                        clock_period_ts = last_ts - first_re_ts
-                    at_rising_edge()
+                if clk_at_ts_start == "0" and state.get(clk) == "1":
+                    # last_ts is the timestamp of this rising edge.
+                    cycle += 1
+                    if first_edge_ts is None:
+                        first_edge_ts = last_ts
+                    elif vcd_clock_period is None:
+                        vcd_clock_period = last_ts - first_edge_ts
+                    mechanisms.on_rising_edge(cycle, sample)
             else:
                 first_ts_seen = True
             try:
                 last_ts = int(line[1:])
             except ValueError:
                 pass
-            clk_at_ts_start = state.get(CLK) or "0"
-            # Snapshot decoded fields before this timestamp's changes apply.
-            # If the next `#` shows a rising edge happened here, at_rising_edge
-            # reads these pre-edge values for the handshake.
-            if DFU:
-                pre_dfu = state.get(DFU)
-            if DRS1:
-                pre_drs1 = state.get(DRS1)
-            if DRS2:
-                pre_drs2 = state.get(DRS2)
-            if DRD:
-                pre_drd = state.get(DRD)
-            # Pre-edge snapshot of decoded_instr_i[0].bp.
-            if DBP_CF:
-                pre_dbp_cf = state.get(DBP_CF)
-            if DBP_TGT:
-                pre_dbp_tgt = state.get(DBP_TGT)
-            # Pre-edge snapshot of the writeback bus. A 1-cycle FU's wb
-            # pulse is gone by the consumer's is_cycle, so only the pre-edge
-            # read lands on the cycle the wb override fired.
-            if WTV:
-                pre_wtv = state.get(WTV)
-            if TID_MAP:
-                pre_tids = {port: state.get(vid)
-                            for port, vid in TID_MAP.items()}
-
-            if n_lines - last_report >= 10_000_000:
-                elapsed = time.time() - start
-                stagelog(
-                    f"  ... {n_lines:>15,} lines | "
-                    f"{n_changes:>15,} changes | "
-                    f"cycle {cycle:>10,} | "
-                    f"fetched={tracker.next_id:>8,} "
-                    f"committed={tracker.n_committed:>8,} | "
-                    f"{elapsed:6.1f}s",
-                    file=sys.stderr,
-                )
-                last_report = n_lines
+            clk_at_ts_start = state.get(clk) or "0"
             continue
-
-        if c0 in "01xXzZ":
-            value = c0
-            vcd_id = line[1:]
-        elif c0 in "bBrR":
-            sp = line.find(" ")
-            if sp <= 0:
+        if first in "01xXzZ":
+            value, vcd_id = first, line[1:]
+        elif first in "bBrR":
+            space = line.find(" ")
+            if space <= 0:
                 continue
-            value = line[1:sp]
-            vcd_id = line[sp + 1:]
+            value, vcd_id = line[1:space], line[space + 1:]
         else:
             continue
         n_changes += 1
-
         if vcd_id in tracked:
             state[vcd_id] = value
+    # The last timestamp's changes have no timestamp line after them.
+    if first_ts_seen and clk_at_ts_start == "0" and state.get(clk) == "1":
+        cycle += 1
+        mechanisms.on_rising_edge(cycle, sample)
+    mechanisms.pipeline.finalise()
+    run.n_lines, run.n_changes, run.last_ts = n_lines, n_changes, last_ts
+    run.n_cycles = cycle + 1
+    run.first_edge_ts = first_edge_ts
+    run.vcd_clock_period = vcd_clock_period
+    run.ends_cleanly = ends_cleanly
 
-    # EOF: flush whatever the final timestamp contained.
-    if first_ts_seen:
-        curr_clk = state.get(CLK, "0")
-        if clk_at_ts_start == "0" and curr_clk == "1":
-            at_rising_edge()
 
-    tracker.finalize()
+# ============================================================================
+# 8. Record assembly
+# ============================================================================
 
-    # Bind I$ events onto records by 4-byte-aligned PC, giving each if1_lo,
-    # if2_lo and ic_miss for its first fetch, plus if1_hi and if2_hi when it
-    # wraps. No match leaves them None, usually a kill before delivery.
-    n_ic_events = len(tracker.icache_timeline.events)
-    n_ic_hits = sum(1 for ev in tracker.icache_timeline.events
-                    if not ev.ic_miss)
-    n_ic_misses = n_ic_events - n_ic_hits
-    _n_matched_firstpass, _n_unmatched_firstpass, n_wraps_with_hi, \
-        n_rebound, n_synth, n_rvc_paired = match_records_to_events(
-            tracker.completed, tracker.icache_timeline.events)
-    # Recounted from the final record state. The two counters the binding
-    # loop returns describe the state before the flushed-record fallback and
-    # the rebind and synthesis passes have run, so they answer neither
-    # "how many have timing" nor "how many were measured". These three
-    # partition the records that carry a PC, and the assert holds them to it.
-    n_matched = sum(1 for r in tracker.completed
-                    if r.if1_lo is not None and not r.if_synthesised)
-    n_synth_final = sum(1 for r in tracker.completed if r.if_synthesised)
-    n_unmatched = sum(1 for r in tracker.completed if r.if1_lo is None)
-    if n_matched + n_synth_final + n_unmatched != len(tracker.completed):
-        # Raised rather than asserted: an assert compiles out under python -O,
-        # and this is an invariant of the partition above, not a debug aid.
-        raise AssertionError(
-            "icache record partition does not cover every record: "
-            f"{n_matched} matched + {n_synth_final} synthesised + "
-            f"{n_unmatched} unmatched != {len(tracker.completed)} records")
-    extra = []
-    if n_rebound:
-        extra.append(f"{n_rebound} rebound")
-    if n_synth:
-        extra.append(f"{n_synth} synthesized (cached, no fresh event)")
-    if n_rvc_paired:
-        extra.append(f"{n_rvc_paired} inherited from an RVC pair partner")
-    extra_str = (", " + ", ".join(extra)) if extra else ""
-    stagelog(f"{n_ic_events} I$ events "
-             f"({n_ic_hits} hits, {n_ic_misses} misses). "
-             f"{n_matched} records matched, {n_unmatched} unmatched"
-             + extra_str,
-             file=sys.stderr)
-    # wraps_line summary. Compare PC-determinative count to
-    # the realigner-signal pulse counter for cross-validation. The two
-    # should agree up to flushed-mid-realignment edge cases.
-    n_wraps = sum(1 for r in tracker.completed if r.wraps_line)
-    n_wraps_committed = sum(1 for r in tracker.completed
-                            if r.wraps_line and not r.flushed)
-    if tracker.n_realigner_unaligned_starts:
-        records_per_run = (
-            f"records/run = "
-            f"{n_wraps / tracker.n_realigner_unaligned_starts:.2f}")
-    else:
-        records_per_run = "records/run = N/A"
-    stagelog(f"wraps_line records = {n_wraps} total "
-             f"({n_wraps_committed} committed, "
-             f"{n_wraps - n_wraps_committed} flushed). "
-             f"{n_wraps_with_hi} bound second fetch (if1_hi/if2_hi). "
-             f"Realigner: {tracker.n_realigner_unaligned_starts} runs "
-             f"(0->1 transitions), {tracker.n_realigner_unaligned_cycles} "
-             f"stall cycles. {records_per_run}.",
-             file=sys.stderr)
+def index_events(events):
+    """Deliveries per fetch-block address, sorted by fe2_cycle, with those
+    cycles beside them for binary search, since a hot loop puts a delivery
+    per iteration on one block."""
+    by_word = defaultdict(list)
+    for event in events:
+        by_word[event.vaddr_word].append(event)
+    fe2_keys = {}
+    for word, word_events in by_word.items():
+        word_events.sort(key=lambda event: event.fe2_cycle)
+        fe2_keys[word] = [event.fe2_cycle for event in word_events]
+    return by_word, fe2_keys
 
-    # Attribute bubbles to causer and recovery. Walks completed[] in id order
-    # for [non-flushed][flushed run][non-flushed], classifies the causer and
-    # tags both ends. A CSR that causes no flushed run is not tagged.
-    bubble_counts, bubble_diag = tag_branch_bubbles(tracker.completed)
-    n_bub_total = sum(bubble_counts.values())
-    n_bub_flushed_total = sum(r.bubble_caused_records or 0
-                              for r in tracker.completed
-                              if r.bubble_caused_records)
-    n_bub_cycles_total = sum(r.bubble_caused_cycles or 0
-                             for r in tracker.completed
-                             if r.bubble_caused_cycles)
-    stagelog(f"Branch bubbles. "
-             f"mispred={bubble_counts['mispred']}, "
-             f"unpred={bubble_counts['unpred']}, "
-             f"flush_other={bubble_counts['flush_other']}, "
-             f"pred_taken={bubble_counts['pred_taken']} "
-             f"({n_bub_total} causers, {n_bub_flushed_total} wrong-path "
-             f"records flushed, {n_bub_cycles_total} bubble cycles).",
-             file=sys.stderr)
-    # Diagnostic: how bp_mispredict breaks down against the bubble classes.
-    # total = flushed + classified + no_followers + end_of_trace + unaccounted,
-    # and unaccounted must be 0. A tripwire for records falling through.
-    classified = bubble_counts["mispred"] + bubble_counts["unpred"]
-    unaccounted = (bubble_diag["bp_mispredict_total"]
-                   - bubble_diag["bp_mispredict_flushed"]
-                   - classified
-                   - bubble_diag["bp_mispredict_no_followers"]
-                   - bubble_diag["bp_mispredict_end_of_trace"])
-    stagelog(f"Bubble diag: {bubble_diag['bp_mispredict_total']} records "
-             f"have bp_mispredict=True "
-             f"({bubble_diag['bp_mispredict_flushed']} flushed, "
-             f"{classified} tagged as causers, "
-             f"{bubble_diag['bp_mispredict_no_followers']} had no "
-             f"flushed followers, "
-             f"{bubble_diag['bp_mispredict_end_of_trace']} were end-of-trace, "
-             f"{unaccounted} unaccounted).",
-             file=sys.stderr)
 
-    # Count LOAD/STORE records that got an FSM trace, meaning at least one
-    # entry in lsu_state_history. A record whose FSM never moved while pending
-    # ends up untraced, which needs an immediate flush and is very rare.
-    n_load_traced = 0
-    n_load_untraced = 0
-    n_store_traced = 0
-    n_store_untraced = 0
-    for rec in tracker.completed:
+def find_event(index, word, floor, top, latest):
+    """The latest delivery for word with fe2_cycle at most top, or the
+    earliest when latest is false, and with fe2_cycle and fe1_cycle at least
+    floor when floor is not None."""
+    by_word, fe2_keys = index
+    events = by_word.get(word)
+    if not events:
+        return None
+    keys = fe2_keys[word]
+    stop = bisect.bisect_right(keys, top)
+    start = 0 if floor is None else bisect.bisect_left(keys, floor)
+    order = range(stop - 1, start - 1, -1) if latest else range(start, stop)
+    for i in order:
+        if floor is None or events[i].fe1_cycle >= floor:
+            return events[i]
+    return None
+
+
+def last_fetch_cycle(rec):
+    """The delivery of a record's last fetch, the high one on a wrap, since a
+    redirect cannot come before it and counting from the request would take
+    in the record's own I-cache stall."""
+    if rec.wraps_line and rec.fe2_hi_cycle is not None:
+        return rec.fe2_hi_cycle
+    return rec.fe2_lo_cycle
+
+
+def last_request_cycle(rec):
+    """The request of a record's last fetch, the high one on a wrap."""
+    if rec.wraps_line and rec.fe1_hi_cycle is not None:
+        return rec.fe1_hi_cycle
+    return rec.fe1_lo_cycle
+
+
+def set_low_fetch(rec, event):
+    rec.fe1_lo_cycle = event.fe1_cycle
+    rec.fe2_lo_cycle = event.fe2_cycle
+    rec.ic_miss_lo = event.is_miss
+
+
+def set_high_fetch(rec, event):
+    rec.fe1_hi_cycle = event.fe1_cycle
+    rec.fe2_hi_cycle = event.fe2_cycle
+    rec.ic_miss_hi = event.is_miss
+
+
+def match_records_to_events(records, index):
+    """Bind each record's low fetch to the latest delivery for its block at
+    or before fe_out_cycle, and a wrapping record's high fetch to the latest
+    delivery for the next block no older than the low request. A flushed
+    record killed before the I-cache answered gets synthesised cycles, others
+    stay null. Returns the number of high fetches bound."""
+    n_high_bound = 0
+    for rec in records:
+        pc = pc_value(rec)
+        if pc is None:
+            continue
+        low = find_event(index, pc & ~FETCH_OFFSET_MASK, None,
+                         rec.fe_out_cycle, latest=True)
+        if low is not None:
+            set_low_fetch(rec, low)
+        elif rec.flushed:
+            rec.fe1_lo_cycle = max(0, rec.fe_out_cycle - FETCH_SYNTH_DEPTH)
+            rec.fe2_lo_cycle = max(0, rec.fe_out_cycle - FETCH_SYNTH_DEPTH
+                                   + 1)
+            rec.synthesised_stages = ["fe1", "fe2"]
+            rec.ic_miss_lo = rec.ic_miss_hi = None
+        if rec.wraps_line:
+            # Without the floor a stale prefetch of the next block would win,
+            # the front end not blocking on the high fetch.
+            floor = rec.fe1_lo_cycle if rec.fe1_lo_cycle is not None else 0
+            high = find_event(index, (pc + 2) & ~FETCH_OFFSET_MASK, floor,
+                              rec.fe_out_cycle, latest=True)
+            if high is not None:
+                set_high_fetch(rec, high)
+                n_high_bound += 1
+    return n_high_bound
+
+
+def repair_fetch_order(records, index):
+    """Keep fe1_lo_cycle monotonic in fetch order. The binding can give a
+    loop iteration the previous iteration's delivery, so such a record is
+    rebound to a later delivery for its block, or, when the line stayed
+    cached and the I-cache never answered again, synthesised off the record
+    before it. Returns (rebound, synthesised)."""
+    last_fe1 = -1
+    last = None
+    n_rebound = n_synthesised = 0
+    for rec in records:
+        if rec.fe1_lo_cycle is None:
+            continue
+        if rec.fe1_lo_cycle >= last_fe1:
+            last_fe1, last = rec.fe1_lo_cycle, rec
+            continue
+        pc = pc_value(rec)
+        if pc is None:
+            continue
+        block = pc & ~FETCH_OFFSET_MASK
+        low = find_event(index, block, last_fe1, rec.fe_out_cycle,
+                         latest=False)
+        if low is not None:
+            set_low_fetch(rec, low)
+            # Measured again, so nothing on it is synthesised any more.
+            rec.synthesised_stages = []
+            n_rebound += 1
+            if rec.wraps_line:
+                high = find_event(index, (pc + 2) & ~FETCH_OFFSET_MASK,
+                                  low.fe1_cycle, rec.fe_out_cycle,
+                                  latest=False)
+                if high is not None:
+                    set_high_fetch(rec, high)
+                else:
+                    # The old high fetch predates the new low one, which a
+                    # wrap cannot do, so it is no longer observed.
+                    rec.fe1_hi_cycle = rec.fe2_hi_cycle = None
+                    rec.ic_miss_hi = None
+        else:
+            synthesise_fetch(rec, last, last_fe1, block)
+            n_synthesised += 1
+        last_fe1, last = rec.fe1_lo_cycle, rec
+    return n_rebound, n_synthesised
+
+
+def synthesise_fetch(rec, last, last_fe1, block):
+    """Sequential fetch cycles for a record no delivery fits: the last
+    record's fetch when they share a block, one cycle after its last fetch
+    otherwise, and never closer to fe_out_cycle than the front-end depth
+    unless that would break fetch order."""
+    depth = FETCH_SYNTH_DEPTH_WRAP if rec.wraps_line else FETCH_SYNTH_DEPTH
+    ceiling = rec.fe_out_cycle - depth
+    fe1 = None
+    last_pc = pc_value(last) if last is not None else None
+    if last_pc is not None:
+        last_block = last_pc & ~FETCH_OFFSET_MASK
+        if last_block == block:
+            fe1 = last.fe1_lo_cycle
+        elif (last.wraps_line and last_block + FETCH_BYTES == block
+              and last.fe1_hi_cycle is not None):
+            fe1 = last.fe1_hi_cycle
+        elif last.wraps_line and last.fe1_hi_cycle is not None:
+            fe1 = last.fe1_hi_cycle + 1
+        else:
+            fe1 = last.fe1_lo_cycle + 1
+    if fe1 is None:
+        # With no record before it, anchoring on fe_out_cycle alone would
+        # overstate the gap when issue stalled and the fetch sat queued.
+        fe1 = max(last_fe1, ceiling)
+    fe1 = max(fe1, last_fe1)
+    if fe1 > ceiling:
+        fe1 = max(last_fe1, ceiling)
+    rec.fe1_lo_cycle = fe1
+    rec.fe2_lo_cycle = fe1 + 1
+    if rec.wraps_line:
+        # The high request shares the low delivery's cycle, pipelined.
+        rec.fe1_hi_cycle = rec.fe2_lo_cycle
+        rec.fe2_hi_cycle = rec.fe1_hi_cycle + 1
+    rec.synthesised_stages = ["fe1", "fe2"]
+    rec.ic_miss_lo = rec.ic_miss_hi = None
+
+
+def pair_rvc_fetches(records):
+    """Two compressed instructions in one fetch block arrive in one delivery,
+    so the second takes the first's fetch cycles, which the binding of each
+    record alone can pick apart. Returns the number of records changed."""
+    n_paired = 0
+    for last, rec in zip(records, records[1:]):
+        if (not (last.is_compressed and rec.is_compressed)
+                or last.fe1_lo_cycle is None
+                or rec.fe1_lo_cycle == last.fe1_lo_cycle):
+            continue
+        last_pc, pc = pc_value(last), pc_value(rec)
+        if (last_pc is None or pc is None or pc != last_pc + 2
+                or (pc & ~FETCH_OFFSET_MASK)
+                != (last_pc & ~FETCH_OFFSET_MASK)):
+            continue
+        rec.fe1_lo_cycle = last.fe1_lo_cycle
+        rec.fe2_lo_cycle = last.fe2_lo_cycle
+        rec.ic_miss_lo = last.ic_miss_lo
+        # The timing is the first record's wholesale, so its provenance is.
+        rec.synthesised_stages = list(last.synthesised_stages)
+        n_paired += 1
+    return n_paired
+
+
+def attribute_dc_events(records, dc_log):
+    """Bind D-cache events to LOAD and STORE records by access window, from
+    admission to release plus the lookahead to the allocation. Each LSU FSM
+    serves one request at a time, so an event in a window belongs to that
+    access, and the first window to claim an event keeps it, which needs the
+    records in id order."""
+    events = dc_log.events
+    event_cycles = [event["cycle"] for event in events]
+    refill = dc_log.refill_active_cycles
+    claimed = {"LOAD": set(), "STORE": set(), "check_hit": set()}
+    miss_sid = {"LOAD": LOAD_UNIT_SID, "STORE": STORE_PORT_SID}
+    lookahead = {"LOAD": HPDCACHE_LOAD_LOOKAHEAD,
+                 "STORE": HPDCACHE_STORE_LOOKAHEAD}
+    for rec in records:
+        if rec.fu not in miss_sid:
+            continue
+        admit, release = rec.lsu_admit_cycle, rec.lsu_release_cycle
+        # Without an access window nothing was observed, so the verdicts stay
+        # null rather than read as a hit.
+        if admit is None or release is None:
+            continue
+        rec.dc_miss = rec.dc_coalesced = False
+        window_end = release + lookahead[rec.fu]
+        in_window = []
+        for i in range(bisect.bisect_left(event_cycles, admit), len(events)):
+            event = events[i]
+            if event["cycle"] > window_end:
+                break
+            in_window.append(event)
+            if (event["type"] == "alloc" and event["sid"] == miss_sid[rec.fu]
+                    and i not in claimed[rec.fu]):
+                claimed[rec.fu].add(i)
+                rec.dc_miss = True
+            # Stores raise no check, so only a load coalesces.
+            elif (event["type"] == "check_hit" and rec.fu == "LOAD"
+                  and i not in claimed["check_hit"]):
+                claimed["check_hit"].add(i)
+                rec.dc_coalesced = True
+        rec.dc_event_log = in_window
+        # Measured on loads only, so a store's stays null.
         if rec.fu == "LOAD":
-            if rec.lsu_state_history:
-                n_load_traced += 1
-            else:
-                n_load_untraced += 1
-        elif rec.fu == "STORE":
-            if rec.lsu_state_history:
-                n_store_traced += 1
-            else:
-                n_store_untraced += 1
-    stagelog(f"LSU FSM traces. "
-             f"loads {n_load_traced} traced / {n_load_untraced} untraced. "
-             f"stores {n_store_traced} traced / {n_store_untraced} untraced",
-             file=sys.stderr)
+            j = bisect.bisect_left(refill, admit)
+            rec.dc_refill_overlap = j < len(refill) and refill[j] <= release
 
-    # Attribute D$ events to records.
-    if dcache_resolved:
-        dc_stats = tracker.attribute_dc_events_to_records()
-        stagelog(
-            f"D$ events. {dc_stats['total_dc_events']} total "
-            f"alloc/check/refill_rsp pulses. "
-            f"{dc_stats['rfsm_active_cycles']} refill-active cycles. "
-            f"Per-record summary: "
-            f"{dc_stats['n_primary_miss_loads']} primary-miss-ld / "
-            f"{dc_stats['n_primary_miss_stores']} primary-miss-st / "
-            f"{dc_stats['n_coalesced_loads']} coalesced / "
-            f"{dc_stats['n_refill_overlap_loads']} refill-overlap "
-            f"(of {dc_stats['n_loads']} LOAD + "
-            f"{dc_stats['n_stores']} STORE)",
-            file=sys.stderr)
-        # Perf-counter miss breakdown, the total non-prefetch MSHR allocation
-        # count split by allocating adapter. The store adapter usually
-        # dominates, loads coalescing onto pending store misses.
-        stagelog(
-            f"D$ miss events (perf counter view). "
-            f"{dc_stats['n_dcache_miss_events_total']} total non-prefetch allocs "
-            f"({dc_stats['n_dcache_miss_events_loads']} from LOAD adapter, "
-            f"{dc_stats['n_dcache_miss_events_stores']} from STORE adapter, "
-            f"{dc_stats['n_dcache_miss_events_other']} from PTW/accel/CMO)",
-            file=sys.stderr)
-    else:
-        dc_stats = {}
 
-    # Branch prediction stats over the completed records. A branch is any
-    # record with fu=CTRL_FLOW, predicted means bp_predicted_cf is set and not
-    # 'NoCF', resolved means bp_resolution_cycle is set.
-    n_cf = 0
-    n_pred = 0
-    n_resolved = 0
-    n_misp = 0
-    n_pred_by_cf = {"Branch": 0, "Jump": 0, "JumpR": 0, "Return": 0}
-    n_misp_by_cf = {"Branch": 0, "Jump": 0, "JumpR": 0, "Return": 0, "NoCF": 0}
-    n_misp_flushed_before_resolve = 0
-    for r in tracker.completed:
-        if r.fu != "CTRL_FLOW":
+def pair_flush_channel(log):
+    """One writeback per flush-channel response, paired with its request by
+    slot for the AXI write time. Returns (writebacks, non-negative times,
+    responses without a request, requests without a response, negative
+    times)."""
+    sends_by_slot = defaultdict(deque)
+    for cycle, slot, addr in log.sends:
+        sends_by_slot[slot].append((cycle, addr))
+    writebacks, latencies = [], []
+    n_acks_without_send = n_negative = 0
+    for ack_cycle, slot, nline in log.acks:
+        if not sends_by_slot.get(slot):
+            n_acks_without_send += 1
             continue
-        n_cf += 1
-        if r.bp_predicted_cf and r.bp_predicted_cf != "NoCF":
-            n_pred += 1
-            n_pred_by_cf[r.bp_predicted_cf] = (
-                n_pred_by_cf.get(r.bp_predicted_cf, 0) + 1)
-        if r.bp_resolution_cycle is not None:
-            n_resolved += 1
-            if r.bp_mispredict:
-                n_misp += 1
-                key = r.bp_resolved_cf or "NoCF"
-                n_misp_by_cf[key] = n_misp_by_cf.get(key, 0) + 1
-        elif r.flush_reason == "flush_ex_branch_mispredict":
-            # The branch itself was flushed before our scan saw the
-            # resolution pulse. Rare but possible if the resolution
-            # cycle coincides with the flush handshake.
-            n_misp_flushed_before_resolve += 1
-    bp_hit_rate = (
-        100.0 * (n_resolved - n_misp) / n_resolved if n_resolved else 0.0)
-    stagelog(
-        f"Branches. {n_cf} CTRL_FLOW records. "
-        f"{n_pred} got a non-NoCF prediction "
-        f"({n_pred_by_cf}). "
-        f"{n_resolved} reached resolution. "
-        f"{n_misp} mispredicts ({n_misp_by_cf}). "
-        f"hit rate {bp_hit_rate:.1f}%"
-        + (f". {n_misp_flushed_before_resolve} flushed before resolve"
-           if n_misp_flushed_before_resolve else ""),
-        file=sys.stderr)
-    bp_stats = {
-        "n_ctrl_flow_records":  n_cf,
-        "n_predictions":        n_pred,
-        "n_resolutions":        n_resolved,
-        "n_mispredicts":        n_misp,
-        "n_predictions_by_cf":  n_pred_by_cf,
-        "n_mispredicts_by_cf":  n_misp_by_cf,
-        "hit_rate_pct":         round(bp_hit_rate, 2),
-        "n_flushed_before_resolve": n_misp_flushed_before_resolve,
-    }
+        send_cycle, addr = sends_by_slot[slot].popleft()
+        n_axi = ack_cycle - send_cycle
+        # A mispaired slot gives a negative time, counted apart so it cannot
+        # drag the aggregate.
+        if n_axi < 0:
+            n_negative += 1
+        else:
+            latencies.append(n_axi)
+        writebacks.append({
+            "alloc_cycle": None, "send_cycle": send_cycle,
+            "ack_cycle": ack_cycle, "evict_cycle": None, "flush_slot": slot,
+            "way": None, "nline": nline, "addr": addr,
+            "evict_incoming_nline": None, "producer": None,
+            "is_linked": False, "n_axi_write_cycles": n_axi,
+            "n_residency_cycles": None,
+        })
+    n_sends_without_ack = sum(len(queue) for queue in sends_by_slot.values())
+    return (writebacks, latencies, n_acks_without_send, n_sends_without_ack,
+            n_negative)
 
-    # Pair writeback send<->ack, build event list + latency agg.
-    if wback_resolved:
-        wb_stats = tracker.finalize_writebacks()
-        awl = wb_stats.get("axi_write_latency", {})
-        stagelog(
-            f"Writebacks. {wb_stats['n_allocs']} alloc / "
-            f"{wb_stats['n_sends']} send / {wb_stats['n_acks']} ack. "
-            f"{wb_stats['matched_pairs']} paired "
-            f"({wb_stats['acks_no_prior_send']} acks w/o send, "
-            f"{wb_stats['sends_never_acked']} sends unacked). "
-            f"AXI write latency: "
-            f"min={awl.get('min')} median={awl.get('median')} "
-            f"max={awl.get('max')} cyc",
-            file=sys.stderr)
-        stagelog(
-            f"writeback<->eviction linkage. "
-            f"{wb_stats.get('n_mshr_allocs_sampled', 0)} MSHR alloc "
-            f"samples. "
-            f"{wb_stats.get('n_linked', 0)} writebacks linked / "
-            f"{wb_stats.get('n_unlinked', 0)} unlinked",
-            file=sys.stderr)
-    else:
-        wb_stats = {}
 
-    # Forwarding summary across committed records.
-    n_fwd_any = 0
-    n_fwd_rs1 = n_fwd_rs2 = n_fwd_rs3 = 0
-    n_via_sb = n_via_wb = 0
-    for r in tracker.completed:
-        if r.flushed:
+def join_allocations(writebacks, allocs):
+    """Give each writeback the flush_alloc of its line, first in first out
+    per nline, for the residency, the victim way and the producer."""
+    allocs_by_nline = defaultdict(deque)
+    for cycle, nline, way, producer in allocs:
+        allocs_by_nline[nline].append((cycle, way, producer))
+    for wb in writebacks:
+        queue = allocs_by_nline.get(wb["nline"])
+        if queue:
+            cycle, way, producer = queue.popleft()
+            wb["alloc_cycle"] = cycle
+            wb["n_residency_cycles"] = wb["ack_cycle"] - cycle
+            wb["way"] = onehot_to_index(way)
+            wb["producer"] = producer
+
+
+def link_evictions(writebacks, mshr_allocs, dc_sets):
+    """Link each writeback to the miss allocation that evicted its line, by
+    (set, victim way) and nearest in time. Returns (evictions, CMO flushes,
+    linked)."""
+    set_mask = dc_sets - 1 if dc_sets else 0
+    candidates = defaultdict(list)
+    for cycle, nline, victim_way in mshr_allocs:
+        line_set = None if nline is None else int(nline, 16) & set_mask
+        candidates[(line_set, victim_way)].append((cycle, nline))
+    for joinable in candidates.values():
+        joinable.sort()
+    used = defaultdict(set)
+    n_evict = n_cmo = n_linked = 0
+    for wb in writebacks:
+        if wb["producer"] == "cmo":
+            # A CMO flush writes dirty lines back with no miss, so there is
+            # no eviction to join.
+            n_cmo += 1
             continue
-        used = False
-        for via in (r.fwd_rs1_via, r.fwd_rs2_via, r.fwd_rs3_via):
-            if via == "sb":
-                n_via_sb += 1
-                used = True
-            elif via == "wb":
-                n_via_wb += 1
-                used = True
-        if r.fwd_rs1_used:
-            n_fwd_rs1 += 1
-        if r.fwd_rs2_used:
-            n_fwd_rs2 += 1
-        if r.fwd_rs3_used:
-            n_fwd_rs3 += 1
-        if used:
-            n_fwd_any += 1
-    n_committed_seen = sum(1 for r in tracker.completed if not r.flushed)
-    fwd_stats = {
-        "n_committed_seen":   n_committed_seen,
-        "n_with_any_forward": n_fwd_any,
-        "n_rs1_forwarded":    n_fwd_rs1,
-        "n_rs2_forwarded":    n_fwd_rs2,
-        "n_rs3_forwarded":    n_fwd_rs3,
-        "n_via_sb":           n_via_sb,
-        "n_via_wb":           n_via_wb,
-        # How many real forwards had the producer slot on the wb bus in the
-        # same cycle, per source. Ground truth for whether via=wb should ever
-        # fire.
-        "n_issue_cycles":             tracker._diag_n_issue_cycles,
-        "n_issue_cycles_with_any_wb": tracker._diag_n_issue_with_any_wb,
-        "n_real_match_rs1":           tracker._diag_n_real_match_rs1,
-        "n_real_match_rs2":           tracker._diag_n_real_match_rs2,
-        "n_real_match_rs3":           tracker._diag_n_real_match_rs3,
-    }
-    if n_committed_seen:
-        pct = 100.0 * n_fwd_any / n_committed_seen
-        stagelog(
-            f"Forwarding - {n_fwd_any}/{n_committed_seen} "
-            f"committed records ({pct:.1f}%) used at least one forwarded "
-            f"operand. Rs1={n_fwd_rs1} rs2={n_fwd_rs2} rs3={n_fwd_rs3}. "
-            f"via sb/wb = {n_via_sb}/{n_via_wb}",
-            file=sys.stderr)
-        # Diagnostic: count real forwards (fwd_rsX_used=True) where the
-        # producer slot was also on the wb bus this same cycle. These
-        # are the cases where via=wb SHOULD fire.
-        n_real_match_total = (
-            tracker._diag_n_real_match_rs1
-            + tracker._diag_n_real_match_rs2
-            + tracker._diag_n_real_match_rs3)
-        stagelog(
-            f"Forwarding diag: {tracker._diag_n_issue_cycles} issue cycles, "
-            f"{tracker._diag_n_issue_with_any_wb} had any wt_valid_i bit set. "
-            f"Real forward AND producer on wb bus: "
-            f"rs1={tracker._diag_n_real_match_rs1} "
-            f"rs2={tracker._diag_n_real_match_rs2} "
-            f"rs3={tracker._diag_n_real_match_rs3} "
-            f"(total={n_real_match_total}).",
-            file=sys.stderr)
+        if wb["producer"] == "evict":
+            n_evict += 1
+        line_set = (None if wb["nline"] is None
+                    else int(wb["nline"], 16) & set_mask)
+        key = (line_set, None if wb["way"] is None else 1 << wb["way"])
+        anchor = (wb["alloc_cycle"] if wb["alloc_cycle"] is not None
+                  else wb["send_cycle"])
+        best = None
+        for i, (cycle, incoming) in enumerate(candidates.get(key, ())):
+            if i in used[key] or abs(cycle - anchor) > EVICTION_JOIN_WINDOW:
+                continue
+            if best is None or abs(cycle - anchor) < abs(best[1] - anchor):
+                best = (i, cycle, incoming)
+        if best is not None:
+            used[key].add(best[0])
+            wb["evict_cycle"], wb["evict_incoming_nline"] = best[1], best[2]
+            wb["is_linked"] = True
+            n_linked += 1
+    return n_evict, n_cmo, n_linked
 
-    # Mechanisms that did not resolve, so the affected fields are null or
-    # empty rather than measured. Carried into metadata because a stderr
-    # warning is unrecoverable once a multi-hour run has finished.
-    degraded = []
 
-    def _degrade(cond, key, detail):
-        if not cond:
-            degraded.append({"mechanism": key, "effect": detail})
-    _degrade(MEMQ_AVAILABLE, "memq_decode",
-             "fu, rs1, rs2 and rd keep the pre-edge snapshot, wrong on "
-             "back-to-back issue")
-    _degrade(MEMQ_BP_CF_AVAILABLE, "memq_bp_cf",
-             "bp_predicted_cf keeps the pre-edge snapshot, so most loop "
-             "branches read NoCF and the bubble taxonomy shifts category")
-    _degrade(MEMQ_BP_TGT_AVAILABLE, "memq_bp_tgt",
-             "bp_predicted_target keeps the pre-edge snapshot, so branches "
-             "recovered at writeback report a null target")
-    _degrade(BP_DECODE_AVAILABLE, "bp_decode",
-             "no decode-time prediction snapshot")
-    _degrade(bp_resolved, "bp_resolution",
-             "bp_resolved_* and bp_mispredict are null")
-    _degrade(FWD_AVAILABLE, "forwarding",
-             "fwd_rs*_used, _via and _from_tid are null")
-    _degrade(icache_resolved, "icache",
-             "if1/if2 cycles and ic_miss are unmatched or synthesised")
-    _degrade(lsu_resolved, "lsu_fsm",
-             "lsu_admit_cycle, lsu_complete_cycle and the D-cache "
-             "attribution that depends on them are absent")
-    _degrade(dcache_resolved, "dcache",
-             "dc_primary_miss, dc_coalesced and dc_refill_overlap are absent")
-    _degrade(wback_resolved, "writeback",
-             "the writebacks array is empty")
-    _degrade(link_resolved, "writeback_link",
-             "writebacks carry no eviction linkage")
-    _degrade(WB_ALLOC_CTRL is not None and WB_ALLOC_CMO is not None,
-             "writeback_producer",
-             "writebacks are untagged, so CMO flushes cannot be told from "
-             "miss-handler evictions and n_unlinked overstates the failures")
-    _degrade(csr_access_resolved, "csr_access",
-             "ic_access_cycles and dc_access_cycles are empty")
-    # Both of these warn through stagelog, which is silent without --stages,
-    # so without an entry here a degraded run says nothing a batch can read.
-    _degrade(FUI is not None, "flush_unissued_gate",
-             "phantom-decode gating is disabled, so a decode handshake the "
-             "scoreboard discarded still claims a slot and the +N slot drift "
-             "may return")
-    _degrade(IC_MISS_O is not None, "icache_miss_counter",
-             "icache_miss_cycles is empty, so the I-cache miss count that "
-             "tracks perf_counters.sv event 1 reads zero rather than absent")
-
-    # Every condition above is decided from the header, so a half dump
-    # degrades identically to a whole one. These four read the body.
-    _degrade(ends_cleanly, "truncated",
-             "the dump's last line has no newline, so the file was cut "
-             "mid-record: the trace stops early and every count in it is a "
-             "lower bound, not a measurement")
-    _degrade(cycle >= 0 and n_changes > 0, "no_value_changes",
-             "the VCD carried a header and no value changes, so nothing was "
-             "traced")
-    _degrade(cycle > 0, "no_rising_edges",
-             "the clock never rose in this dump, so every cycle number is 0 "
-             "and no stage was timed")
-    _degrade(tracker.n_committed > 0, "no_commits",
-             "no instruction committed, which a complete run of any program "
-             "cannot produce: the dump is most likely truncated")
-    # Catches a misidentified clock, where the edge count and the elapsed
-    # time disagree. Wide margin, so only the gross case trips.
-    _degrade(not (clock_period_ts and clock_period_ts > 0 and cycle > 0)
-             or abs(last_ts - cycle * clock_period_ts)
-             <= 2 * clock_period_ts,
-             "timestamp_implausible",
-             f"the final timestamp {last_ts:,} does not match "
-             f"{cycle:,} cycles at {clock_period_ts} timescale units each, "
-             f"so the dump is truncated or the clock was misidentified")
-
+def finalise_mem_writebacks(log, dc_sets):
+    """mem_writebacks in send order, and the mem_writeback statistics."""
+    (writebacks, latencies, n_acks_without_send, n_sends_without_ack,
+     n_negative) = pair_flush_channel(log)
+    join_allocations(writebacks, log.allocs)
+    writebacks.sort(key=lambda wb: wb["send_cycle"])
+    n_evict, n_cmo, n_linked = link_evictions(writebacks, log.mshr_allocs,
+                                              dc_sets)
+    ordered = sorted(latencies)
     stats = {
-        "degraded": degraded,
-        # Bit reads suppressed by x or z in the VCD. Non-zero means some
-        # commit or writeback strobes were unreadable and the records they
-        # would have produced are absent, not merely untimed.
-        "unknown_bit_reads": _GET_BIT_UNKNOWN[0],
-        "n_lines": n_lines,
-        "n_changes": n_changes,
-        "last_ts": last_ts,
-        "n_cycles": cycle + 1,
-        # Scoreboard depth from the mem_q[N].sbe.fu presence scan. Smaller
-        # than NR_SB_ENTRIES on a parameterised-down build. Consumers should
-        # prefer this over the compile-time default.
-        "detected_nr_sb_entries": NR_SB,
-        "icache_event_count": n_ic_events,
-        "icache_event_hits": n_ic_hits,
-        "icache_event_misses": n_ic_misses,
-        "icache_records_matched": n_matched,
-        "icache_records_unmatched": n_unmatched,
-        # Fetch timing that was invented rather than bound to an event.
-        # Counted here, not only on stderr, so a JSON can be audited long
-        # after the run. Records carry if_synthesised and no ic_miss.
-        "icache_records_synthesised": n_synth_final,
-        # The subset of the above produced by the monotonicity block alone.
-        # The rest come from the flushed-record fallback.
-        "icache_records_synthesised_monotonic": n_synth,
-        # Records whose fetch timing was inherited from the first half of a
-        # compressed pair sharing one fetch, rather than bound directly.
-        "icache_records_rvc_paired": n_rvc_paired,
-        "icache_records_rebound": n_rebound,
-        "lsu_load_records_traced": n_load_traced,
-        "lsu_load_records_untraced": n_load_untraced,
-        "lsu_store_records_traced": n_store_traced,
-        "lsu_store_records_untraced": n_store_untraced,
-        "dcache": dc_stats,
-        "branch_pred": bp_stats,
-        # Bubble taxonomy. mispred vs unpred and the pred_taken detection all
-        # read bp_predicted_cf, so the classification is only trustworthy
-        # when the mem_q correction was live. Without it most loop branches
-        # read NoCF and counts move wholesale between categories, which is
-        # invisible in the numbers themselves. Hence the flag beside them.
-        "bubbles": {
-            "mispred": bubble_counts["mispred"],
-            "unpred": bubble_counts["unpred"],
-            "flush_other": bubble_counts["flush_other"],
-            "pred_taken": bubble_counts["pred_taken"],
-            "total_squashed_records": n_bub_flushed_total,
-            "total_cycles": n_bub_cycles_total,
-            "taxonomy_reliable": MEMQ_BP_CF_AVAILABLE,
+        "n_allocs": len(log.allocs),
+        "n_sends": len(log.sends),
+        "n_acks": len(log.acks),
+        "n_matched_pairs": len(latencies),
+        "n_acks_without_send": n_acks_without_send,
+        "n_sends_without_ack": n_sends_without_ack,
+        "n_mshr_allocs_sampled": len(log.mshr_allocs),
+        "n_allocs_evict": n_evict,
+        "n_allocs_cmo": n_cmo,
+        "n_linked": n_linked,
+        "n_unlinked": len(writebacks) - n_cmo - n_linked,
+        "n_negative_latency": n_negative,
+        "axi_write": {
+            "n_samples": len(ordered),
+            "min_cycles": ordered[0] if ordered else None,
+            # The lower middle of an even count, a time some writeback took.
+            "median_cycles": (statistics.median_low(ordered) if ordered
+                              else None),
+            "max_cycles": ordered[-1] if ordered else None,
+            "histogram": {str(k): v
+                          for k, v in sorted(Counter(latencies).items())},
         },
-        "writeback": wb_stats,
-        "forwarding": fwd_stats,
-        # Clock period in VCD timescale units, picoseconds for the
-        # cva6_testharness sims. Derived from the first two rising edges, None
-        # if fewer than two were seen.
-        "clock_period_ts": clock_period_ts,
-        "first_rising_edge_ts": first_re_ts,
-        # CSR-equivalent access cycle lists, one entry per cycle the request
-        # signal was high. The viewer counts entries in [cMin, cMax] to match
-        # the hardware counters. Empty when the signals were not resolved.
-        "ic_access_cycles": ic_access_cycles,
-        "dc_access_cycles": dc_access_cycles,
-        # I$ miss pulse cycles. len() matches perf_counters.sv event 1, and
-        # the viewer windows it like the access lists for a figure that tracks
-        # the hardware counter, wrong-path fills included.
-        "icache_miss_cycles": icache_miss_cycles,
-        "icache_miss_pulses": len(icache_miss_cycles),
     }
-    return tracker, stats
-
-
-# ============================================================================
-# Disassembly listing
-# ============================================================================
-#
-# The disassembly pass binds a readable string onto each InstructionRecord
-# from an objdump -dS listing passed in with --disasm-list, which keeps any
-# toolchain dependency out of the tracer's own environment.
-#
-# The listing format we parse (from riscv64-unknown-elf-objdump -dS):
-#
-#     _start:                                       <- function label
-#     0000000080003000 <main>:                      <- address-tagged label
-#         80003000:<tab>715d                 <tab>addi<tab>sp,sp,-80
-#
-# The regex below requires leading whitespace on the PC line, so the 64-bit
-# address labels at column 0 never match. Source lines, labels, headers and
-# directives all start outside [0-9a-f], so they never match either.
-
-_DISASM_LINE_RE = re.compile(
-    r'^\s+([0-9a-fA-F]+):\s+([0-9a-fA-F]+)\s+(.+)$'
-)
+    return writebacks, stats
 
 
 def parse_disasm_list(path):
-    """Parse an objdump listing into a PC to string map, whitespace collapsed.
-    Anything that does not look like an instruction is ignored. Raises
-    FileNotFoundError when the path does not exist."""
+    """An objdump listing as a map from PC to its text, the mnemonic,
+    operands and objdump's symbol comment with whitespace collapsed so no tab
+    reaches the page. Lines that are not instructions are skipped."""
     disasm = {}
-    with open(path) as f:
+    with open(path, encoding="utf-8", errors="replace") as f:
         for line in f:
-            m = _DISASM_LINE_RE.match(line.rstrip('\n'))
-            if not m:
-                continue
-            pc = int(m.group(1), 16)
-            # m.group(3) is everything after the raw bytes: mnemonic +
-            # operands + any objdump-resolved symbolic comment. Collapse
-            # tabs/spaces into a single space and strip.
-            text = re.sub(r'\s+', ' ', m.group(3)).strip()
-            disasm[pc] = text
+            match = DISASM_LINE.match(line.rstrip("\n"))
+            if match:
+                disasm[int(match.group(1), 16)] = " ".join(
+                    match.group(3).split())
     return disasm
 
 
-def apply_disasm(records, disasm_map):
-    """Annotate each record's `disasm` by PC lookup. Returns (n_annotated,
-    n_no_pc, n_unmapped), the last counting PCs outside the listing such as
-    bootrom code that is not part of the user program."""
-    n_annotated = 0
-    n_no_pc = 0
-    n_unmapped = 0
+def apply_disasm(records, disasm):
+    """Fill each record's disasm by PC. Returns (annotated, without a PC,
+    unmapped), unmapped being PCs outside the listing such as the bootrom."""
+    n_annotated = n_no_pc = n_unmapped = 0
     for rec in records:
-        if rec.pc is None:
+        pc = pc_value(rec)
+        if pc is None:
             n_no_pc += 1
-            continue
-        try:
-            pc_int = int(rec.pc, 16)
-        except (TypeError, ValueError):
-            n_no_pc += 1
-            continue
-        text = disasm_map.get(pc_int)
-        if text is None:
-            n_unmapped += 1
-        else:
-            rec.disasm = text
+        elif pc in disasm:
+            rec.disasm = disasm[pc]
             n_annotated += 1
+        else:
+            n_unmapped += 1
     return n_annotated, n_no_pc, n_unmapped
 
 
 # ============================================================================
-# Output
+# 9. Whole-run derived fields
 # ============================================================================
 
-CV64A6_HPDC_WB_DEFAULTS = {
-    # Mirrors the module-level Config block, which is the single source of
-    # truth for the whitelist and lookups. Cache geometry stays literal, it
-    # only feeds the viewer's config panel and gates no tracer logic.
-    "SuperscalarEn":       SUPERSCALAR_EN,
-    "RVC":                 RVC_EN,
-    "CvxifEn":             True,
-    "NrIssuePorts":        NR_ISSUE_PORTS,
-    "NrCommitPorts":       NR_COMMIT_PORTS,
-    "NrWbPorts":           NR_WB_PORTS,
-    "NrScoreboardEntries": NR_SB_ENTRIES,
-    "TRANS_ID_BITS":       TRANS_ID_BITS,
-    "FETCH_WIDTH":         FETCH_WIDTH,
-    "INSTR_PER_FETCH":     INSTR_PER_FETCH,
-    # I-cache geometry. cv64a6_imafdc_sv39_hpdcache_wb canonical values:
-    # 16 KiB total, 4-way, 128-bit lines, 256 sets.
-    "ICACHE_LINE_WIDTH":   128,
-    "ICACHE_SET_ASSOC":    4,
-    "ICACHE_NUM_SETS":     256,
-    # D-cache geometry: 32 KiB, 8-way, 128-bit lines, 256 sets.
-    "DCACHE_LINE_WIDTH":   128,
-    "DCACHE_SET_ASSOC":    8,
-    "DCACHE_NUM_SETS":     256,
+def forwarding_producers(records):
+    """Turn each forwarded operand's scoreboard slot into the record that
+    produced it: the latest record with that trans_id written back at or
+    before the consumer's issue cycle, since slots are reused. Returns the
+    operands left without a producer."""
+    by_tid = defaultdict(list)
+    for rec in records:
+        if rec.trans_id is not None and rec.wb_cycle is not None:
+            by_tid[rec.trans_id].append(rec)
+    wb_keys = {}
+    for tid, producers in by_tid.items():
+        producers.sort(key=lambda rec: rec.wb_cycle)
+        wb_keys[tid] = [rec.wb_cycle for rec in producers]
+    n_unresolved = 0
+    for rec in records:
+        for n in (1, 2, 3):
+            if not getattr(rec, f"fwd_rs{n}_used"):
+                continue
+            tid = getattr(rec, f"fwd_rs{n}_tid")
+            i = bisect.bisect_right(wb_keys.get(tid, ()), rec.is_cycle) - 1
+            if i < 0:
+                n_unresolved += 1
+            else:
+                setattr(rec, f"fwd_rs{n}_producer_id", by_tid[tid][i].id)
+    return n_unresolved
+
+
+def branch_outcomes(records):
+    """bp_outcome and bp_decided_at of every resolved, committed CTRL_FLOW
+    record. A mispredict with no prediction made is unpred."""
+    for rec in records:
+        if (rec.fu != "CTRL_FLOW" or rec.flushed
+                or rec.bp_mispredict is None):
+            continue
+        if not rec.bp_mispredict:
+            rec.bp_outcome, rec.bp_decided_at = "correct", "fe2"
+        elif rec.bp_predicted_cf in (None, "NoCF"):
+            rec.bp_outcome, rec.bp_decided_at = "unpred", "ex"
+        else:
+            rec.bp_outcome, rec.bp_decided_at = "mispred", "ex"
+
+
+def mark_bubble(causer, recovery, kind, n_flushed, n_cycles, n_gap):
+    causer.caused_bubble_kind = kind
+    causer.caused_bubble_recovery_id = recovery.id
+    causer.n_caused_bubble_cycles = n_cycles
+    causer.n_caused_bubble_flushed = n_flushed
+    recovery.bubble_kind = kind
+    recovery.bubble_causer_id = causer.id
+    recovery.n_bubble_cycles = n_cycles
+    recovery.n_bubble_gap_cycles = n_gap
+
+
+def bubble_gap(causer, recovery):
+    """Idle cycles between the causer's last delivery and the recovery's
+    first request, exclusive at both ends, None when either is missing."""
+    end = last_fetch_cycle(causer)
+    if end is None or recovery.fe1_lo_cycle is None:
+        return None
+    return max(0, recovery.fe1_lo_cycle - end - 1)
+
+
+def flush_causer(ordered, i, j):
+    """The causer of a flush bubble between ordered[i] and the recovery
+    ordered[j], and the flushed records it leaves between them."""
+    causer = ordered[i]
+    n_flushed = j - i - 1
+    # A committing CSR write flushes itself, leaving a wb_cycle and no
+    # co_cycle, so the first such record in the run is the cause.
+    if causer.fu != "CSR":
+        for k in range(i + 1, j):
+            candidate = ordered[k]
+            if (candidate.fu == "CSR" and candidate.flushed
+                    and candidate.wb_cycle is not None):
+                return candidate, n_flushed - 1
+    return causer, n_flushed
+
+
+def tag_bubbles(records):
+    """Tag every bubble on its causer and its recovery. The first pass finds
+    [not flushed][flushed run][not flushed] in id order, the second a gap
+    after taken control flow with nothing flushed, and the recovery's bubble
+    is then copied to the records sharing its fetch. Returns the causer
+    counts by kind."""
+    counts = {"pred_taken": 0, "unpred": 0, "mispred": 0, "flush": 0}
+    ordered = sorted(records, key=lambda rec: rec.id)
+    n = len(ordered)
+    i = 0
+    while i < n:
+        while i < n and ordered[i].flushed:
+            i += 1
+        j = i + 1
+        while j < n and ordered[j].flushed:
+            j += 1
+        if j >= n:
+            break
+        if j == i + 1:
+            i = j
+            continue
+        causer, recovery = ordered[i], ordered[j]
+        n_flushed = j - i - 1
+        # The rule branch_outcomes uses, so bp_outcome and the bubble agree.
+        if causer.fu == "CTRL_FLOW" and causer.bp_mispredict:
+            kind = ("unpred" if causer.bp_predicted_cf in (None, "NoCF")
+                    else "mispred")
+        else:
+            kind = "flush"
+            causer, n_flushed = flush_causer(ordered, i, j)
+        gap = bubble_gap(causer, recovery)
+        # A bubble whose length cannot be measured is not tagged, since a
+        # null n_bubble_cycles means no bubble.
+        if gap is not None:
+            mark_bubble(causer, recovery, kind, n_flushed, gap, gap)
+            counts[kind] += 1
+        # The recovery may cause the next bubble in turn.
+        i = j
+
+    for i, causer in enumerate(ordered):
+        # fu == CTRL_FLOW too, since only control flow redirects, and taken
+        # means resolved taken, or a jump or return when no resolution was
+        # bound to the record.
+        if (causer.flushed or causer.fu != "CTRL_FLOW"
+                or causer.caused_bubble_kind is not None
+                or not (causer.bp_resolved_taken is True
+                        or causer.bp_predicted_cf in ("Jump", "Return"))):
+            continue
+        end = last_fetch_cycle(causer)
+        if causer.fe1_lo_cycle is None or end is None:
+            continue
+        recovery = None
+        for k in range(i + 1, n):
+            if not ordered[k].flushed and ordered[k].fe1_lo_cycle is not None:
+                recovery = ordered[k]
+                break
+        if recovery is None or recovery.bubble_causer_id is not None:
+            continue
+        gap = recovery.fe1_lo_cycle - end - 1
+        if gap < 1:
+            continue
+        if causer.bp_mispredict and causer.bp_predicted_cf in (None, "NoCF"):
+            kind, n_cycles = "unpred", gap
+        elif causer.bp_mispredict:
+            kind, n_cycles = "mispred", gap
+        else:
+            # The predecoder redirects in FE2, so a correct taken prediction
+            # costs one cycle and the rest is queue backpressure.
+            kind, n_cycles = "pred_taken", min(gap, 1)
+        mark_bubble(causer, recovery, kind, 0, n_cycles, gap)
+        counts[kind] += 1
+
+    for last, rec in zip(ordered, ordered[1:]):
+        if (rec.bubble_causer_id is not None or rec.fe1_lo_cycle is None
+                or rec.fe1_lo_cycle != last.fe1_lo_cycle
+                or last.bubble_causer_id is None
+                or not last.n_bubble_cycles):
+            continue
+        rec.bubble_kind = last.bubble_kind
+        rec.bubble_causer_id = last.bubble_causer_id
+        rec.n_bubble_cycles = last.n_bubble_cycles
+        rec.n_bubble_gap_cycles = last.n_bubble_gap_cycles
+        rec.bubble_shared_id = (last.bubble_shared_id
+                                if last.bubble_shared_id is not None
+                                else last.id)
+    return counts
+
+
+def pre_fetch_waits(records):
+    """n_pre_fetch_wait_cycles and pre_fetch_wait_shared_id: cycles between
+    the last non-flushed record's last request, the high one on a wrap, and
+    this one's request, less one, a record sharing the request sharing the
+    first one's wait, 0 on a flushed record. A wrap's own wait between its two
+    requests is its high-line wait, so counting it here would count it
+    twice."""
+    last = None
+    for rec in records:
+        if rec.fe1_lo_cycle is None:
+            if not rec.flushed:
+                last = rec
+            continue
+        if rec.flushed:
+            rec.n_pre_fetch_wait_cycles = 0
+            continue
+        if (last is not None and last.fe1_lo_cycle is not None
+                and rec.fe1_lo_cycle == last.fe1_lo_cycle):
+            rec.n_pre_fetch_wait_cycles = last.n_pre_fetch_wait_cycles or 0
+            rec.pre_fetch_wait_shared_id = (
+                last.pre_fetch_wait_shared_id
+                if last.pre_fetch_wait_shared_id is not None else last.id)
+        elif last is None or last.fe1_lo_cycle is None:
+            rec.n_pre_fetch_wait_cycles = 0
+        else:
+            rec.n_pre_fetch_wait_cycles = max(
+                0, rec.fe1_lo_cycle - last_request_cycle(last) - 1)
+        last = rec
+
+
+# ============================================================================
+# 10. Degradation census
+# ============================================================================
+
+# SHARED BEGIN py-degraded
+
+# Needs: sys, py-log
+
+DEGRADED_NAME_WIDTH = 22
+
+
+class DegradedCensus:
+    """The mechanisms a run could not resolve. They travel in the JSON
+    because stderr is gone once a long run has finished."""
+
+    def __init__(self):
+        self.entries = []
+
+    def require(self, present, mechanism, effect):
+        """Record mechanism as degraded unless present is true."""
+        if not present:
+            self.entries.append({"mechanism": mechanism, "effect": effect})
+
+
+def print_degraded(degraded):
+    """Printed last, so it is the final thing on screen after a long run."""
+    if not degraded:
+        log_info("All mechanisms resolved. metadata.degraded is empty.")
+        return
+    print(f"[DEGRADED] {len(degraded)} mechanism(s) did not resolve. The "
+          f"affected fields are null or empty, not measured.",
+          file=sys.stderr)
+    for entry in degraded:
+        print(f"           {entry['mechanism']:<{DEGRADED_NAME_WIDTH}} "
+              f"{entry['effect']}", file=sys.stderr)
+    print("           metadata.degraded in the JSON records the same list.",
+          file=sys.stderr)
+
+
+def exit_status(degraded, strict, input_noun):
+    """3 under --strict when anything is degraded, else 0."""
+    if degraded and strict:
+        log_error(f"--strict was given and the {input_noun} is degraded, "
+                  f"exiting with 3.")
+        return 3
+    return 0
+
+# SHARED END py-degraded
+
+
+# The mechanisms that may be absent, in the order metadata.degraded lists
+# them, with the keys each one leaves null or empty.
+MECHANISM_EFFECTS = {
+    "icache": "fe1_lo_cycle, fe1_hi_cycle, fe2_lo_cycle and fe2_hi_cycle are "
+              "null except on synthesised flushed records, ic_miss_lo and "
+              "ic_miss_hi are null, and ic_events.miss_cycles and "
+              "ic_events.deliveries are empty.",
+    "lsu_fsm": "lsu_admit_cycle and lsu_release_cycle are null, and so are "
+               "dc_miss, dc_coalesced and dc_refill_overlap, which need the "
+               "access window.",
+    "dcache": "dc_miss, dc_coalesced and dc_refill_overlap are null and "
+              "dc_events.allocs is empty.",
+    "mem_writeback": "mem_writebacks is empty.",
+    "bp_resolution": "bp_resolved_cf, bp_resolved_target, bp_resolved_taken, "
+                     "bp_mispredict, bp_resolve_cycle, bp_outcome and "
+                     "bp_decided_at are null.",
+    "forwarding": "fwd_rs1_used, fwd_rs2_used and fwd_rs3_used are false and "
+                  "every fwd_rs*_via and fwd_rs*_producer_id is null.",
 }
 
 
-# The CV64A6_HPDC_WB_DEFAULTS keys emitted to config_params. The rest are
-# tracer assumptions rather than measurements, and stay out so the panel
-# cannot contradict a sweep build that varied them.
-#
-# NrScoreboardEntries is auto-detected from the mem_q[N] enumeration and
-# TRANS_ID_BITS derived from it. The rest are verified by the trace working
-# at all, since a different value makes the whitelist fail.
-#
-# To add more verified fields: probe the VCD (Tier 1) or argue
-# structural verification (Tier 2), and add the key here.
-VERIFIED_CONFIG_FIELDS = frozenset({
-    # Tier 1, auto-detected from the VCD.
-    "NrScoreboardEntries",
-    "TRANS_ID_BITS",
-    # Auto-detected from the probed commit_pointer_q and trans_id_i indices,
-    # largest seen plus one. A smaller build leaves the high ports out of the
-    # dump, so these follow the build rather than the compile-time maxima.
-    "NrCommitPorts",
-    "NrWbPorts",
-    "FETCH_WIDTH",
-    "INSTR_PER_FETCH",
-})
+def build_degraded(resolved, run, pipeline):
+    """metadata.degraded: every mechanism that did not resolve, then what
+    the body of the VCD shows. The mechanisms are decided from the header,
+    so a cut VCD degrades like a whole one, and the last six read the body."""
+    census = DegradedCensus()
+    for mechanism, effect in MECHANISM_EFFECTS.items():
+        census.require(resolved[mechanism], mechanism, effect)
+    census.require(
+        run.ends_cleanly, "truncated",
+        "The VCD's last line has no newline, so the file was cut mid-record: "
+        "instructions stops early and every count in metadata.stats is a "
+        "lower bound.")
+    census.require(
+        run.n_changes > 0, "no_value_changes",
+        "The VCD holds a header and no value changes, so instructions and "
+        "every event array are empty.")
+    census.require(
+        run.n_cycles >= 1, "no_rising_edges",
+        "The clock never rose in the VCD, so instructions and every event "
+        "array are empty.")
+    census.require(
+        bool(pipeline.completed), "no_records",
+        "No instruction was recovered from the VCD, so instructions is "
+        "empty.")
+    census.require(
+        pipeline.n_committed > 0, "no_commits",
+        "No instruction committed, which a whole run of any program cannot "
+        "produce, so every co_cycle is null and the VCD is most likely cut.")
+    period = run.vcd_clock_period
+    first = run.first_edge_ts or 0
+    # A dump windowed with verilator_changes/custom_size_vcds starts part
+    # way through the run, which moves every timestamp but not the period.
+    census.require(
+        not period or period <= 0 or first <= 2 * period, "windowed",
+        f"The VCD's first rising edge is at timestamp {first:,}, so the dump "
+        f"starts part way through the run: cycle 1 is its first edge, not "
+        f"the core's, the instructions in flight there lack their earlier "
+        f"stages, and metadata.stats covers the window only.")
+    # A misidentified clock, where the edge count and the elapsed time
+    # disagree. The margin is wide, so only the gross case trips.
+    census.require(
+        not period or period <= 0 or run.n_cycles <= 1
+        or abs(run.last_ts - first - (run.n_cycles - 1) * period)
+        <= 2 * period,
+        "timestamp_implausible",
+        f"The final timestamp {run.last_ts:,} does not match "
+        f"{run.n_cycles:,} cycles of {period} VCD units from the first edge "
+        f"at {first:,}, so the clock was misidentified and every cycle "
+        f"number is suspect.")
+    return census.entries
 
 
-def write_output_json(output_path, args, stats, tracker):
-    metadata = {
-        # Lets the viewer refuse a JSON it cannot read instead of rendering
-        # nulls. Bump on any field added, removed or redefined.
-        "schema_version": CVA6FLOW_SCHEMA_VERSION,
-        # A label, not a reading: no VCD names its own build. A sweep must
-        # pass --config-name or every JSON it writes claims this one.
-        "config_name": args.config_name,
-        "disasm_list_path": stats.get("disasm_list_path"),
-        "vcd_path": str(args.vcd_path),
-        "vcd_scope_prefix": args.scope_prefix,
-        # Mechanisms whose signals did not resolve in this VCD. Empty means
-        # every mechanism was live. A non-empty list means the fields named
-        # in each entry are null or empty rather than measured.
-        "degraded": stats.get("degraded", []),
-        # Time base. clock_period_ts is the cycle duration in VCD timescale
-        # units and timescale_unit is the VCD's $timescale, '1ps' for the CVA6
-        # sims. Together they let the viewer convert cycles to real time.
-        "clock_period_ts": stats.get("clock_period_ts"),
-        "timescale_unit": stats.get("timescale_unit"),
-        "stats": {
-            "n_committed": tracker.n_committed,
-            "n_flushed_if": tracker.n_flushed_if,
-            "n_flushed_ex": tracker.n_flushed_ex,
-            # In flight when the trace ended, not squashed by the core.
-            # These carry flush_reason "eof" and no flush_cycle.
-            "n_drained_if": tracker.n_drained_if,
-            "n_drained_ex": tracker.n_drained_ex,
-            "n_unmatched_writebacks": tracker.n_unmatched_writebacks,
-            "n_unmatched_commits": tracker.n_unmatched_commits,
-            # Whitelist groups that matched no VCD signal. Non-zero does not
-            # always mean a lost mechanism, since some groups are optional,
-            # but it pairs with metadata.degraded for auditing a run.
-            "whitelist_groups_total": stats.get("whitelist_groups_total"),
-            "whitelist_groups_missing": stats.get("whitelist_groups_missing"),
-            "unknown_bit_reads": stats.get("unknown_bit_reads"),
-            # I$ event counts and record-match results.
-            "icache_event_count": stats.get("icache_event_count", 0),
-            "icache_event_hits": stats.get("icache_event_hits", 0),
-            "icache_event_misses": stats.get("icache_event_misses", 0),
-            # len(icache_miss_cycles) is miss_o high cycles, which is
-            # perf_counters.sv event 1. Unlike icache_event_misses it includes
-            # wrong-path fills squashed before delivery.
-            "icache_miss_pulses": stats.get("icache_miss_pulses", 0),
-            "icache_records_matched": stats.get(
-                "icache_records_matched", 0),
-            "icache_records_synthesised": stats.get(
-                "icache_records_synthesised", 0),
-            "icache_records_synthesised_monotonic": stats.get(
-                "icache_records_synthesised_monotonic", 0),
-            "icache_records_rvc_paired": stats.get(
-                "icache_records_rvc_paired", 0),
-            "icache_records_rebound": stats.get(
-                "icache_records_rebound", 0),
-            "icache_records_unmatched": stats.get(
-                "icache_records_unmatched", 0),
-            # Disassembly coverage.
-            "disasm_annotated": stats.get("disasm_annotated", 0),
-            "disasm_unmapped": stats.get("disasm_unmapped", 0),
-            "disasm_no_pc": stats.get("disasm_no_pc", 0),
-            # LSU FSM tracking coverage.
-            "lsu_load_records_traced": stats.get(
-                "lsu_load_records_traced", 0),
-            "lsu_store_records_traced": stats.get(
-                "lsu_store_records_traced", 0),
-            "lsu_load_records_untraced": stats.get(
-                "lsu_load_records_untraced", 0),
-            "lsu_store_records_untraced": stats.get(
-                "lsu_store_records_untraced", 0),
-            # D$ event attribution coverage.
-            "dcache": stats.get("dcache", {}),
-            # Branch prediction tracking coverage.
-            "branch_pred": stats.get("branch_pred", {}),
-            "bubbles": stats.get("bubbles", {}),
-            # Dirty victim writeback + AXI write latency.
-            "writeback": stats.get("writeback", {}),
-            # Forwarding aggregates.
-            "forwarding": stats.get("forwarding", {}),
+# ============================================================================
+# 11. Metadata and writer
+# ============================================================================
+
+def build_stats(records, mechanisms, table_size, n_missing, bindings,
+                disasm_counts):
+    """metadata.stats, one dict in the order the JSON writes it."""
+    pipeline = mechanisms.pipeline
+    deliveries = mechanisms.icache.events
+    n_rebound, n_synthesised, n_paired = bindings
+    n_annotated, n_no_pc, n_unmapped = disasm_counts
+    committed = [rec for rec in records if not rec.flushed]
+
+    def count(predicate, among=records):
+        return sum(1 for rec in among if predicate(rec))
+
+    loads = [rec for rec in records if rec.fu == "LOAD"]
+    stores = [rec for rec in records if rec.fu == "STORE"]
+    allocs = [event for event in mechanisms.dcache.events
+              if event["type"] == "alloc"]
+    misses = [event for event in allocs if event["is_prefetch"] is not True]
+
+    control = [rec for rec in records if rec.fu == "CTRL_FLOW"]
+    resolved = [rec for rec in control if rec.bp_resolve_cycle is not None]
+    predicted = Counter(rec.bp_predicted_cf for rec in control
+                        if rec.bp_predicted_cf not in (None, "NoCF"))
+    mispredicted = Counter(rec.bp_resolved_cf or "NoCF" for rec in resolved
+                           if rec.bp_mispredict)
+    n_mispredicts = sum(mispredicted.values())
+    # Nothing resolved measures no rate, so it stays null.
+    hit_rate = (round(100.0 * (len(resolved) - n_mispredicts)
+                      / len(resolved), 2) if resolved else None)
+
+    bubble_counts = mechanisms.bubble_counts
+    via = Counter(getattr(rec, f"fwd_rs{n}_via") for rec in committed
+                  for n in (1, 2, 3))
+    return {
+        "n_records": len(records),
+        "n_committed": pipeline.n_committed,
+        "n_flushed": (pipeline.n_flushed_fetched + pipeline.n_flushed_issued
+                      + pipeline.n_drained_fetched
+                      + pipeline.n_drained_issued),
+        "n_flushed_fetched": pipeline.n_flushed_fetched,
+        "n_flushed_issued": pipeline.n_flushed_issued,
+        "n_drained_fetched": pipeline.n_drained_fetched,
+        "n_drained_issued": pipeline.n_drained_issued,
+        "n_unmatched_writebacks": pipeline.n_unmatched_writebacks,
+        "n_discarded_writebacks": pipeline.n_discarded_writebacks,
+        "n_unmatched_commits": pipeline.n_unmatched_commits,
+        "n_unmatched_decodes": pipeline.n_unmatched_decodes,
+        "n_unmatched_resolutions": pipeline.n_unmatched_resolutions,
+        "n_signal_groups": table_size,
+        "n_signal_groups_missing": n_missing,
+        "n_unknown_bit_reads": mechanisms.n_unknown_bit_reads,
+        "n_ic_deliveries": len(deliveries),
+        "n_ic_delivery_hits": sum(1 for e in deliveries if not e.is_miss),
+        "n_ic_delivery_misses": sum(1 for e in deliveries if e.is_miss),
+        "n_ic_miss_pulses": len(mechanisms.perf.ic_miss_cycles),
+        "n_ic_records_matched": count(lambda rec: rec.fe1_lo_cycle is not None
+                                      and not rec.synthesised_stages),
+        "n_ic_records_synthesised": count(
+            lambda rec: bool(rec.synthesised_stages)),
+        "n_ic_records_synthesised_monotonic": n_synthesised,
+        "n_ic_records_rvc_paired": n_paired,
+        "n_ic_records_rebound": n_rebound,
+        "n_ic_records_unmatched": count(lambda rec: rec.fe1_lo_cycle is None),
+        "n_disasm_annotated": n_annotated,
+        "n_disasm_unmapped": n_unmapped,
+        "n_disasm_no_pc": n_no_pc,
+        "n_lsu_loads_tracked": count(lambda rec: bool(rec.lsu_state_history),
+                                     loads),
+        "n_lsu_stores_tracked": count(
+            lambda rec: bool(rec.lsu_state_history), stores),
+        "n_lsu_loads_untracked": count(
+            lambda rec: not rec.lsu_state_history, loads),
+        "n_lsu_stores_untracked": count(
+            lambda rec: not rec.lsu_state_history, stores),
+        "dc": {
+            "n_events": len(mechanisms.dcache.events),
+            "n_refill_active_cycles": len(
+                mechanisms.dcache.refill_active_cycles),
+            "n_loads": len(loads),
+            "n_stores": len(stores),
+            "n_miss_loads": count(lambda rec: rec.dc_miss is True, loads),
+            "n_miss_stores": count(lambda rec: rec.dc_miss is True, stores),
+            "n_coalesced_loads": count(lambda rec: rec.dc_coalesced is True,
+                                       loads),
+            "n_refill_overlap_loads": count(
+                lambda rec: rec.dc_refill_overlap is True, loads),
+            # evt_cache_read_miss_o counts every allocation but a prefetch
+            # (hpdcache_ctrl_pe.sv:368), split here by requester.
+            "n_miss_events": len(misses),
+            "n_miss_events_loads": sum(1 for e in misses
+                                       if e["sid"] == LOAD_UNIT_SID),
+            "n_miss_events_stores": sum(1 for e in misses
+                                        if e["sid"] == STORE_PORT_SID),
+            "n_miss_events_other": sum(
+                1 for e in misses
+                if e["sid"] not in (LOAD_UNIT_SID, STORE_PORT_SID)),
+        },
+        "bp": {
+            "n_control": len(control),
+            "n_predictions": sum(predicted.values()),
+            "n_resolutions": len(resolved),
+            "n_mispredicts": n_mispredicts,
+            "n_predictions_by_cf": {cf: predicted[cf] for cf in (
+                "Branch", "Jump", "JumpR", "Return")},
+            "n_mispredicts_by_cf": {cf: mispredicted[cf] for cf in (
+                "Branch", "Jump", "JumpR", "Return", "NoCF")},
+            "hit_rate_percent": hit_rate,
+            "n_flushed_before_resolve": count(
+                lambda rec: rec.flushed and rec.bp_resolve_cycle is None,
+                control),
+        },
+        "bubbles": {
+            "n_pred_taken": bubble_counts["pred_taken"],
+            "n_unpred": bubble_counts["unpred"],
+            "n_mispred": bubble_counts["mispred"],
+            "n_flush": bubble_counts["flush"],
+            "n_flushed": sum(rec.n_caused_bubble_flushed or 0
+                             for rec in records),
+            "n_cycles": sum(rec.n_caused_bubble_cycles or 0
+                            for rec in records),
+        },
+        "mem_writeback": mechanisms.mem_wb_stats,
+        "fwd": {
+            "n_with_any_forward": count(
+                lambda rec: rec.fwd_rs1_used or rec.fwd_rs2_used
+                or rec.fwd_rs3_used, committed),
+            "n_rs1_forwarded": count(lambda rec: rec.fwd_rs1_used, committed),
+            "n_rs2_forwarded": count(lambda rec: rec.fwd_rs2_used, committed),
+            "n_rs3_forwarded": count(lambda rec: rec.fwd_rs3_used, committed),
+            "n_via_sb": via["sb"],
+            "n_via_wb": via["wb"],
+            "n_issue_cycles": pipeline.n_issue_cycles,
+            "n_issue_cycles_with_any_wb": pipeline.n_issue_cycles_with_any_wb,
         },
     }
-    # Build config_params: start from the compile-time defaults, apply the
-    # runtime-detected overrides, then filter to VERIFIED_CONFIG_FIELDS so the
-    # panel cannot contradict the build.
-    config_params = dict(CV64A6_HPDC_WB_DEFAULTS)
-    detected_sb = stats.get("detected_nr_sb_entries")
-    if detected_sb is not None:
-        config_params["NrScoreboardEntries"] = detected_sb
-        config_params["TRANS_ID_BITS"] = (detected_sb - 1).bit_length()
-    detected_cp = stats.get("detected_nr_commit_ports")
-    if detected_cp is not None:
-        config_params["NrCommitPorts"] = detected_cp
-    detected_wb = stats.get("detected_nr_wb_ports")
-    if detected_wb is not None:
-        config_params["NrWbPorts"] = detected_wb
-    config_params = {k: v for k, v in config_params.items()
-                     if k in VERIFIED_CONFIG_FIELDS}
-    with output_path.open("w") as f:
-        f.write("{\n")
-        f.write(f'  "metadata": {json.dumps(metadata, indent=2)},\n')
-        f.write(f'  "config_params": {json.dumps(config_params, indent=2)},\n')
-        f.write('  "instructions": [\n')
-        recs = tracker.completed
-        emit_diag = getattr(args, "emit_diagnostics", False)
-        for i, rec in enumerate(recs):
-            d = asdict(rec)
-            for k in INTERNAL_ONLY_FIELDS:
-                d.pop(k, None)
-            if not emit_diag:
-                for k in DIAGNOSTIC_ONLY_FIELDS:
-                    d.pop(k, None)
-            comma = "," if i < len(recs) - 1 else ""
-            f.write(f"{json.dumps(d, separators=JSON_SEP)}{comma}\n")
-        f.write("  ],\n")
-        # Dirty victim writeback events (separate track, not
-        # per-instruction. A writeback is per-evicted-line, many stores
-        # coalesce into one line, decoupled in time from the stores).
-        wbs = tracker.writeback_events
-        f.write('  "writebacks": [\n')
-        for i, wb in enumerate(wbs):
-            comma = "," if i < len(wbs) - 1 else ""
-            f.write(f"{json.dumps(wb, separators=JSON_SEP)}{comma}\n")
-        f.write("  ],\n")
-        # Dcache MSHR allocations as (cycle, sid, pf), so the viewer can
-        # compute the perf-counter miss count for any window including PTW,
-        # accel and CMO. Only allocs count, check_hit and refill_rsp do not.
-        allocs = [ev for ev in tracker._dc_events if ev.get("type") == "alloc"]
-        f.write('  "dcache_alloc_events": [\n')
-        for i, ev in enumerate(allocs):
-            comma = "," if i < len(allocs) - 1 else ""
-            row = {"cycle": ev["cycle"], "sid": ev.get(
-                "sid"), "pf": ev.get("pf", 0)}
-            f.write(f"{json.dumps(row, separators=JSON_SEP)}{comma}\n")
-        f.write("  ],\n")
-        # Icache events as a flat (fe1, fe2, ic_miss) array, so the viewer can
-        # compute window-filtered access and miss counts from the FSM signal
-        # without any record-derived dedup ambiguity.
-        ic_events = tracker.icache_timeline.events
-        f.write('  "icache_events": [\n')
-        for i, ev in enumerate(ic_events):
-            comma = "," if i < len(ic_events) - 1 else ""
-            # word is the fetch-block address the event delivered. Without it
-            # the events cannot be tied back to any PC, so the record-to-event
-            # binding this list exists to support is unverifiable downstream
-            # and orphan events cannot be identified at all.
-            row = {"fe1": ev.fe1_cycle, "fe2": ev.fe2_cycle,
-                   "miss": ev.ic_miss,
-                   "word": f"0x{ev.vaddr_word:x}"}
-            f.write(f"{json.dumps(row, separators=JSON_SEP)}{comma}\n")
-        f.write("  ],\n")
-        # Cycles where each request signal was high: icache_dreq_o.req, and
-        # any of the three core ports' data_req. Filtering by window gives
-        # counts matching mhpmevent 16/17 (perf_counters.sv:126-128).
-        ic_acc = stats.get("ic_access_cycles") or []
-        dc_acc = stats.get("dc_access_cycles") or []
-        ic_miss_cyc = stats.get("icache_miss_cycles") or []
-        f.write('  "ic_access_cycles": ' + json.dumps(ic_acc) + ',\n')
-        f.write('  "dc_access_cycles": ' + json.dumps(dc_acc) + ',\n')
-        f.write('  "icache_miss_cycles": ' + json.dumps(ic_miss_cyc) + '\n')
-        f.write("}\n")
+
+
+def build_config_params(nr_sb_entries, nr_commit_ports, nr_wb_ports,
+                        dc_sets):
+    """The build parameters read from the VCD's own declarations, the two
+    the superscalar refusal fixes, and TRANS_ID_BITS derived from the slot
+    count, so a sweep build reports its size."""
+    params = {
+        "NrCommitPorts": nr_commit_ports,
+        "NrWbPorts": nr_wb_ports,
+        "NrScoreboardEntries": nr_sb_entries,
+        "TRANS_ID_BITS": (nr_sb_entries - 1).bit_length(),
+        "FETCH_WIDTH": FETCH_WIDTH,
+        "INSTR_PER_FETCH": INSTR_PER_FETCH,
+    }
+    if dc_sets is not None:
+        params["DCACHE_NUM_SETS"] = dc_sets
+    return params
+
+
+def build_metadata(args, run, timescale, dc_sets, disasm_list_path,
+                   degraded, stats):
+    metadata = {
+        "tool": TOOL,
+        "schema_version": SCHEMA_VERSION,
+        "vcd_path": args.vcd,
+        "vcd_scope_prefix": args.scope_prefix,
+        "disasm_list_path": disasm_list_path,
+        # A label, not a reading: no VCD names its build, so a sweep's VCDs
+        # need --config-name or every JSON claims the default.
+        "config_name": args.config_name,
+        "clock_period": ASSUMED_CLOCK_PERIOD_PS,
+        "time_unit": TIME_UNIT,
+        "clock_period_source": "assumed",
+        "vcd_clock_period": run.vcd_clock_period,
+        "vcd_timescale": timescale,
+        "dc_sets": dc_sets,
+        "record_fields": record_fields(args.emit_diagnostics),
+        "cycle_fields": list(CYCLE_FIELDS),
+        "cycle_list_fields": list(CYCLE_LIST_FIELDS),
+        "id_fields": list(ID_FIELDS),
+        "id_list_fields": list(ID_LIST_FIELDS),
+        "event_fields": EVENT_FIELDS,
+        "event_twin_fields": EVENT_TWIN_FIELDS,
+        "degraded": degraded,
+        "clipped": None,
+        "stats": stats,
+    }
+    if tuple(metadata) != METADATA_KEY_ORDER:
+        raise ValueError("build_metadata drifted from METADATA_KEY_ORDER")
+    return metadata
+
+
+def event_objects(mechanisms):
+    """ic_events and dc_events, in the order the JSON writes their keys."""
+    perf = mechanisms.perf
+    ic_events = {
+        "access_cycles": perf.ic_access_cycles,
+        "miss_cycles": perf.ic_miss_cycles,
+        "deliveries": [
+            {"fe1_cycle": event.fe1_cycle, "fe2_cycle": event.fe2_cycle,
+             "is_miss": event.is_miss, "vaddr": f"0x{event.vaddr_word:x}"}
+            for event in mechanisms.icache.events],
+    }
+    dc_events = {
+        "access_cycles": perf.dc_access_cycles,
+        "allocs": [
+            {"cycle": event["cycle"], "sid": event["sid"],
+             "is_prefetch": event["is_prefetch"]}
+            for event in mechanisms.dcache.events
+            if event["type"] == "alloc"],
+    }
+    return ic_events, dc_events
+
+
+def record_fields(emit_diagnostics):
+    """metadata.record_fields: the keys a record of this run can carry, in
+    written order, the diagnostic lists only when they are written."""
+    return [name for name in InstructionRecord.__dataclass_fields__
+            if name not in INTERNAL_ONLY_FIELDS
+            and (emit_diagnostics or name not in DIAGNOSTIC_ONLY_FIELDS)]
+
+
+def record_dicts(records, emit_diagnostics):
+    keys = record_fields(emit_diagnostics)
+    return [{key: getattr(rec, key) for key in keys} for rec in records]
+
+
+# SHARED BEGIN py-json-writer
+
+# Needs: json, os
+
+JSON_SEPARATORS = (",", ":")
+FIELD_LIST_SUFFIXES = {
+    "cycle_fields": "_cycle",
+    "cycle_list_fields": "_cycles",
+    "id_fields": "_id",
+    "id_list_fields": "_ids",
+}
+
+
+def check_field_lists(records, metadata, core_names=()):
+    """Raise unless metadata.record_fields names every key a record carries,
+    in the order records write them, and the other field lists agree with
+    it, since the pages and scripts trust the lists. A record may leave out
+    any key, which reads as null. core_names are keys copied from a core
+    whose suffix means nothing."""
+    fields = metadata["record_fields"]
+    position = {key: at for at, key in enumerate(fields)}
+    if len(position) != len(fields):
+        raise ValueError("metadata.record_fields names a key twice")
+    for rec in records:
+        last = -1
+        for key in rec:
+            if key not in position:
+                raise ValueError(f"record {rec.get('id')} carries {key}, "
+                                 f"missing from metadata.record_fields")
+            if position[key] < last:
+                raise ValueError(f"record {rec.get('id')} writes {key} out "
+                                 f"of the order of metadata.record_fields")
+            last = position[key]
+    for list_name, suffix in FIELD_LIST_SUFFIXES.items():
+        listed = metadata[list_name]
+        stray = [key for key in listed
+                 if key not in position or not key.endswith(suffix)]
+        if stray:
+            raise ValueError(f"metadata.{list_name} names {stray}, which "
+                             f"record_fields lacks or which lack {suffix}")
+        # n_ keys are counts, whatever their suffix says.
+        unlisted = [key for key in fields if key.endswith(suffix)
+                    and not key.startswith("n_") and key not in listed
+                    and key not in core_names]
+        if unlisted:
+            raise ValueError(f"metadata.record_fields names {unlisted}, "
+                             f"missing from metadata.{list_name}")
+    events = metadata["event_fields"]
+    orphans = [twin for twin, base in metadata["event_twin_fields"].items()
+               if base not in events]
+    if orphans:
+        raise ValueError(f"metadata.event_twin_fields pairs {orphans} with "
+                         f"an array event_fields does not name")
+
+
+def row_paths(data):
+    """The arrays of objects that leave out their null keys: the records,
+    and every event array of objects. metadata keeps its nulls."""
+    events = data["metadata"]["event_fields"]
+    return {"instructions"} | {
+        path for path, where in events.items()
+        if isinstance(where, list) and where and isinstance(where[0], str)}
+
+
+def fits_one_line(values):
+    """Scalars, or short tuples of scalars such as spans and depth pairs."""
+    return not any(isinstance(value, dict) or (
+        isinstance(value, list)
+        and any(isinstance(item, (dict, list)) for item in value))
+        for value in values)
+
+
+def _write_value(out, value, path, depth, rows):
+    pad = "  " * depth
+    if isinstance(value, dict) and value:
+        out.write("{\n")
+        last = len(value) - 1
+        for i, (key, member) in enumerate(value.items()):
+            child = f"{path}.{key}" if path else key
+            out.write(f"{pad}  {json.dumps(key)}: ")
+            _write_value(out, member, child, depth + 1, rows)
+            out.write(",\n" if i < last else "\n")
+        out.write(pad + "}")
+    elif isinstance(value, list) and value and (
+            path in rows or not fits_one_line(value)):
+        out.write("[\n")
+        last = len(value) - 1
+        for i, element in enumerate(value):
+            if path in rows:
+                element = {key: item for key, item in element.items()
+                           if item is not None}
+            out.write(pad + "  ")
+            out.write(json.dumps(element, separators=JSON_SEPARATORS))
+            out.write(",\n" if i < last else "\n")
+        out.write(pad + "]")
+    else:
+        out.write(json.dumps(value, separators=JSON_SEPARATORS))
+
+
+def write_json(path, data):
+    """Write data with its keys in order, through a temporary file, so an
+    interrupted run never leaves a half JSON under the final name. Objects
+    are indented by 2, a record or an event object takes one line, and an
+    array of scalars or of short tuples takes one line."""
+    rows = row_paths(data)
+    partial = path + ".partial"
+    try:
+        with open(partial, "w") as out:
+            _write_value(out, data, "", 0, rows)
+            out.write("\n")
+        os.replace(partial, path)
+    finally:
+        if os.path.exists(partial):
+            os.remove(partial)
+
+# SHARED END py-json-writer
 
 
 # ============================================================================
-# Diagnostics
+# 12. Command line
 # ============================================================================
 
-def report_missing(matches, path_to_id):
-    missing = [m for m in matches if not m["vcd_ids"]]
-    if not missing:
-        return []
-    print(file=sys.stderr)
-    print("Missing whitelist entries:", file=sys.stderr)
-    # One wrong scope prefix misses every entry, and the full list buries
-    # the diagnosis under about 1,500 lines.
-    shown = missing[:MAX_MISSING_REPORTED]
-    for m in shown:
-        last_seg = m["whitelist_path"].rsplit(".", 1)[-1]
-        # drop array index suffix for search
-        last_seg = last_seg.split("[")[0]
-        print(f"  - {m['whitelist_path']}", file=sys.stderr)
-        cands = [p for p in path_to_id if last_seg in p]
-        for c in cands[:5]:
-            print(f"      candidate: {c}", file=sys.stderr)
-        if len(cands) > 5:
-            print(f"      ... And {len(cands) - 5} more", file=sys.stderr)
-        if not cands:
-            print(
-                f"      (no VCD path contains '{last_seg}')", file=sys.stderr)
-    if len(missing) > len(shown):
-        print(f"  ... and {len(missing) - len(shown):,} more missing entries, "
-              f"not listed. This many usually means the scope prefix is wrong "
-              f"rather than the signals being absent: check --scope-prefix.",
-              file=sys.stderr)
-    return [m["whitelist_path"] for m in missing]
-
-
-# ============================================================================
-# Main
-# ============================================================================
-
-def main():
-    global _SHOW_STAGES, _PROG
+def build_parser():
     parser = argparse.ArgumentParser(
-        description="Extracts per-instruction pipeline data from a CVA6 "
-                    "Verilator VCD and emits JSON for the CVA6Flow viewer.",
-    )
-    parser.add_argument("vcd_path", help="Path to the .vcd file.")
+        description="Read a Verilator VCD of CVA6 and write the CVA6Flow JSON "
+                    "the viewer loads.")
     parser.add_argument(
-        "--scope-prefix",
-        default="TOP.ariane_testharness.i_ariane.i_cva6",
-        help="Hierarchical prefix to prepend to each whitelist entry.",
-    )
+        "vcd", help="The Verilator VCD of a CVA6 simulation (.vcd)")
     parser.add_argument(
-        "--output", "-o",
-        default=None,
-        help="Output JSON path. Defaults to <vcd_basename>.json.",
-    )
-    parser.add_argument(
-        "--disasm-list",
-        default=None,
-        help="Path to an objdump -dS listing of the test ELF, the .list "
-             "run_CVA6.py leaves in run_results/. Each record's `disasm` "
-             "field is filled in by PC lookup, and records whose PC falls "
-             "outside the listing (the bootrom, say) keep disasm=None. "
-             "Defaults to <vcd basename>.list beside the VCD when that "
-             "exists. The viewer needs it: without a listing the instruction "
-             "column is blank and Main Code cannot find the region.",
-    )
-    parser.add_argument(
-        "--no-disasm-list", action="store_true",
-        help="Do not look for a listing, and do not warn about its absence.",
-    )
-    parser.add_argument(
-        "--stages", action="store_true",
-        help="Show the per-stage resolution diagnostics on stderr (verbose).",
-    )
+        "-o", "--out", metavar="PATH",
+        help="Where to write the JSON. Defaults to the VCD path with its .vcd "
+             "extension replaced by .json")
     parser.add_argument(
         "--quiet", action="store_true",
-        help="Suppress the streaming progress indicator.",
-    )
-    parser.add_argument(
-        "--emit-diagnostics", action="store_true",
-        help="Include the per-record diagnostic fields the viewer does not "
-             "read (lsu_state_history, dc_events, fetch_port). Off by "
-             "default, which is about 15%% smaller on a large trace.",
-    )
-    parser.add_argument(
-        "--config-name", default=DEFAULT_CONFIG_NAME, metavar="NAME",
-        help="The CVA6 configuration the VCD was captured on, recorded in "
-             "metadata.config_name and shown by the viewer. Nothing in a VCD "
-             "names its own configuration, so this is a label, not a "
-             f"measurement. Defaults to {DEFAULT_CONFIG_NAME}, the one this "
-             "tracer's constants are written for. A sweep should pass the "
-             "build it is running, or every JSON it writes claims the same "
-             "name.",
-    )
+        help="Leave out the progress line")
     parser.add_argument(
         "--strict", action="store_true",
-        help="Exit non-zero if any mechanism failed to resolve or the dump "
-             "is unusable: cut mid-record, no value changes, no rising "
-             "edge, no commit, or a final timestamp that disagrees with the "
-             "cycle count. The JSON is still written. A cut landing exactly "
-             "on a line boundary leaves no mark and can still pass.",
-    )
-    args = parser.parse_args()
-    _SHOW_STAGES = args.stages
+        help="Exit with 3 when metadata.degraded is not empty: a mechanism "
+             "did not resolve, or the VCD was cut, holds no value changes, "
+             "no rising edge, no instruction or no commit, starts part way "
+             "through the run, or ends at a timestamp that disagrees with "
+             "its cycle count. The JSON is "
+             "still written. A cut exactly at a line boundary leaves no mark "
+             "and can still pass. Use this in batch runs so a degraded VCD "
+             "is not mistaken for a complete one")
+    parser.add_argument(
+        "--scope-prefix", default=DEFAULT_SCOPE_PREFIX, metavar="SCOPE",
+        help=f"The hierarchy the signal table is looked up under. Defaults "
+             f"to {DEFAULT_SCOPE_PREFIX}")
+    parser.add_argument(
+        "--disasm-list", metavar="PATH",
+        help="An objdump -d -S -l listing of the test, the .list run_CVA6.py "
+             "leaves in results/run/. Each record's disasm is filled by PC, "
+             "and stays null outside the listing, the bootrom for one. "
+             "Defaults to the VCD's path with .list when that file exists. "
+             "The viewer refuses a JSON written without one")
+    parser.add_argument(
+        "--no-disasm-list", action="store_true",
+        help="Do not look for a listing, and do not warn that there is none")
+    parser.add_argument(
+        "--config-name", default=DEFAULT_CONFIG_NAME, metavar="NAME",
+        help=f"The CVA6 configuration the VCD was captured on, written to "
+             f"metadata.config_name. Nothing in a VCD names its "
+             f"configuration, so this is a label, not a measurement. "
+             f"Defaults to {DEFAULT_CONFIG_NAME}, the one this tracer's "
+             f"constants are written for, so name the configuration when "
+             f"converting a sweep's VCDs")
+    parser.add_argument(
+        "--emit-diagnostics", action="store_true",
+        help="Also write lsu_state_history and dc_event_log on every record, "
+             "which no page reads. Off by default, which keeps a large JSON "
+             "about 15%% smaller")
+    parser.add_argument(
+        "--verbose", action="store_true",
+        help="Print how each mechanism bound its events to the records, on "
+             "stderr")
+    return parser
 
-    vcd_path = Path(args.vcd_path)
-    if not vcd_path.exists():
-        sys.exit(f"VCD file not found: {vcd_path}")
-    args.vcd_path = vcd_path
 
-    out_path = Path(
-        args.output) if args.output else vcd_path.with_suffix(".json")
+def default_out_path(vcd):
+    """The VCD path with its .vcd extension replaced by .json."""
+    return os.path.splitext(vcd)[0] + ".json"
 
-    n_wb_ports = CV64A6_HPDC_WB_DEFAULTS["NrWbPorts"]
-    n_commit_ports = CV64A6_HPDC_WB_DEFAULTS["NrCommitPorts"]
 
-    file_size = vcd_path.stat().st_size
-    print(
-        f"[INFO] Reading {vcd_path} ({file_size / (1024 ** 3):.3f} GB)",
-        file=sys.stderr)
-    start = time.time()
-
-    with vcd_path.open("r", errors="replace") as f:
-        path_to_id, _id_to_path, timescale = parse_var_block(f)
-        print(
-            f"[INFO] Header: {len(path_to_id):,} signals, timescale={timescale}", file=sys.stderr)
-
-        # Refuse a VCD whose scoreboard is larger than the compile-time max.
-        # The smaller case is auto-handled by shrinking NR_SB, but the
-        # whitelist only enumerates slots 0..NR_SB_ENTRIES-1.
-        max_sb_slot = probe_max_scoreboard_slot(path_to_id)
-        if max_sb_slot >= NR_SB_ENTRIES:
-            actual_depth = max_sb_slot + 1
-            # NrScoreboardEntries is enforced to be a power of 2 by
-            # scoreboard.sv:323, but round up defensively.
-            next_pow2 = 1 << (
-                actual_depth - 1).bit_length() if actual_depth > 1 else 1
-            print(file=sys.stderr)
-            print(f"ERROR: VCD contains mem_q[{max_sb_slot}].sbe.fu, implying "
-                  f"the build has NrScoreboardEntries >= {actual_depth}, but "
-                  f"this tracer was compiled with NR_SB_ENTRIES="
-                  f"{NR_SB_ENTRIES}. The whitelist only enumerates slots "
-                  f"0..{NR_SB_ENTRIES-1}, so transactions assigned to slots "
-                  f"{NR_SB_ENTRIES}..{actual_depth-1} would silently go "
-                  f"untracked. The output JSON would have missing writebacks, "
-                  f"displaced FU types, and incorrect branch prediction.",
-                  file=sys.stderr)
-            print(f"To fix: edit NR_SB_ENTRIES near the top of this file "
-                  f"(currently {NR_SB_ENTRIES}) to at least {next_pow2}, then "
-                  f"rerun. Must be a power of 2.",
-                  file=sys.stderr)
-            print("Aborting.", file=sys.stderr)
-            return 2
-
-        # Refuse superscalar builds. The handshake, IPTR tracking and
-        # allocation all assume one instruction per cycle, and wraps_line
-        # would use FETCH_BYTES=4 against 8-byte blocks.
-        if probe_superscalar(path_to_id):
-            print(file=sys.stderr)
-            print("ERROR: VCD contains decoded_instr_i[1].fu, implying the "
-                  "build has SuperscalarEn=1 (NrIssuePorts > 1). This tracer "
-                  "is hardcoded for single-issue and would silently produce "
-                  "wrong output (port-1 instructions dropped, fetched/decoded "
-                  "queues drifting, wraps_line predicate using FETCH_BYTES=4 "
-                  "against 8-byte fetch blocks).",
-                  file=sys.stderr)
-            print("To fix: superscalar support is non-trivial. Required "
-                  "changes include iterating decoded_instr_i[0..NrIssuePorts-1]"
-                  " in the WHITELIST and decode+issue handler, reading "
-                  "multiple trans_ids per cycle, and updating FETCH_WIDTH + "
-                  "the wraps_line predicate for 64-bit fetches.",
-                  file=sys.stderr)
-            print("Aborting.", file=sys.stderr)
-            return 2
-
-        # Refuse builds with more commit ports than the whitelist enumerates.
-        # Commits on the high ports would fall off the radar, leaving records
-        # that never commit. Smaller builds are fine.
-        max_cp = probe_max_commit_port(path_to_id)
-        if max_cp >= NR_COMMIT_PORTS:
-            actual = max_cp + 1
-            print(file=sys.stderr)
-            print(f"ERROR: VCD contains commit_pointer_q[{max_cp}], implying "
-                  f"the build has NrCommitPorts >= {actual}, but this tracer "
-                  f"was compiled with NR_COMMIT_PORTS={NR_COMMIT_PORTS}. The "
-                  f"whitelist only enumerates ports 0..{NR_COMMIT_PORTS-1}, "
-                  f"so commits on ports {NR_COMMIT_PORTS}..{actual-1} would "
-                  f"silently go untracked.",
-                  file=sys.stderr)
-            print(f"To fix: edit NR_COMMIT_PORTS near the top of this file "
-                  f"(currently {NR_COMMIT_PORTS}) to {actual} and rerun.",
-                  file=sys.stderr)
-            print("Aborting.", file=sys.stderr)
-            return 2
-
-        # Pre-flight: refuse builds with more writeback ports than the
-        # tracer enumerates. Same logic as the commit-port check, applied
-        # to trans_id_i[0..NR_WB_PORTS-1]. Smaller builds work transparently.
-        max_wb = probe_max_wb_port(path_to_id)
-        if max_wb >= NR_WB_PORTS:
-            actual = max_wb + 1
-            print(file=sys.stderr)
-            print(f"ERROR: VCD contains trans_id_i[{max_wb}], implying the "
-                  f"build has NrWbPorts >= {actual}, but this tracer was "
-                  f"compiled with NR_WB_PORTS={NR_WB_PORTS}. The whitelist "
-                  f"only enumerates ports 0..{NR_WB_PORTS-1}, so writebacks "
-                  f"on ports {NR_WB_PORTS}..{actual-1} would silently go "
-                  f"untracked, leaving records orphaned in flight.",
-                  file=sys.stderr)
-            print(f"To fix: edit NR_WB_PORTS near the top of this file "
-                  f"(currently {NR_WB_PORTS}) to {actual} and rerun.",
-                  file=sys.stderr)
-            print("Aborting.", file=sys.stderr)
-            return 2
-
-        matches = match_whitelist(WHITELIST, path_to_id, args.scope_prefix)
-        missing_paths = report_missing(matches, path_to_id)
-
-        found = {m["whitelist_path"] for m in matches if m["vcd_ids"]}
-        missing_required = REQUIRED_SIGNALS - found
-        if missing_required:
-            print()
-            for s in sorted(missing_required):
-                print(
-                    f"ERROR: required signal '{s}' not found.", file=sys.stderr)
-            print("Aborting, the trace cannot be walked.", file=sys.stderr)
-            return 2
-
-        tracked = sum(len(m["vcd_ids"]) for m in matches)
-        print(f"[INFO] Tracking {tracked} signal IDs across "
-              f"{len(matches) - len(missing_paths)}/{len(matches)} whitelist groups", file=sys.stderr)
-        print("[parse] streaming VCD body\u2026", file=sys.stderr)
-        _PROG = Progress('parse', enabled=not args.quiet)
-        tracker, stats = stream_and_extract(
-            f, matches, args, n_wb_ports, n_commit_ports)
-        # Make the parsed timescale available downstream for the
-        # output writer (which builds metadata outside this `with`
-        # block and doesn't otherwise see timescale).
-        stats["timescale_unit"] = timescale
-        stats["whitelist_groups_total"] = len(matches)
-        stats["whitelist_groups_missing"] = len(missing_paths)
-        # Report the probed commit and writeback port counts rather than the
-        # compile-time maxima, since a smaller build leaves the high ports out
-        # of the VCD. Probe returns -1 when absent, leaving the default.
-        if max_cp >= 0:
-            stats["detected_nr_commit_ports"] = max_cp + 1
-        if max_wb >= 0:
-            stats["detected_nr_wb_ports"] = max_wb + 1
-
-    if _PROG is not None:
-        _PROG.done()
-    elapsed = time.time() - start
-    # The derived clock period, for sanity-checking the time base. Detection
-    # uses the first two rising edges and can catch a reset artifact, so the
-    # pretty-print is gated on plausibility. The viewer hardcodes 50 MHz.
-    cp_ts = stats.get("clock_period_ts")
-    if cp_ts is not None and cp_ts >= 1000:  # >= 1 ns, plausible cycle
-        ts_unit = stats.get("timescale_unit", "1ps")
-        # Best-effort conversion of the parsed timescale string into
-        # picoseconds for human-readable output. Anything we don't
-        # recognize prints as raw timescale units.
-        unit_to_ps = {"1fs": 1e-3, "1ps": 1, "1ns": 1e3,
-                      "1us": 1e6, "1ms": 1e9, "1s": 1e12}
-        ps = cp_ts * unit_to_ps.get(ts_unit.strip(), 1)
-        if ps >= 1e6:
-            period_disp = f"{ps/1e6:.3f} us"
-        elif ps >= 1e3:
-            period_disp = f"{ps/1e3:.3f} ns"
-        else:
-            period_disp = f"{ps:.0f} ps"
-        freq_disp = (f"{1e6/ps:.3f} MHz" if ps > 0 else "?")
-        print(f"[INFO] clock period {period_disp} ({freq_disp}), "
-              f"timescale {ts_unit}", file=sys.stderr)
-    elif cp_ts is not None:
-        # Implausibly short, almost certainly first-edge detection tripping on
-        # a reset-time sub-cycle event. Do not print the bogus frequency, just
-        # note that the viewer falls back to its hardcoded clock.
-        print(f"[INFO] clock period: detected {cp_ts} VCD ticks (implausibly "
-              f"short. First-edge detection tripped on a sub-cycle "
-              f"artifact). Viewer will use its hardcoded 50 MHz.",
+def check_build(path_to_id, path_width, scope_prefix):
+    """(exit status, sizes): 2 and None when the VCD's build is one this
+    tracer would track wrongly, else 0 and (scoreboard entries, commit ports,
+    writeback ports, D-cache sets or None)."""
+    if probe_max_index(path_to_id, DECODED_PORT_PROBE) >= NR_ISSUE_PORTS:
+        log_error("The VCD has decoded_instr_i[1], so the build is "
+                  "superscalar, and this tracer follows one instruction per "
+                  "issue port and a 32-bit fetch. The second port's "
+                  "instructions would be lost and wraps_line would be wrong.")
+        print("        Superscalar builds are not supported.",
               file=sys.stderr)
-    else:
-        print("[INFO] clock period: could not determine "
-              "(need at least 2 rising edges)", file=sys.stderr)
-
-    # CSR-equivalent access totals over the whole trace, which should match
-    # mhpmevent 16 and 17 exactly. Empty when the underlying signals were not
-    # dumped.
-    ic_acc_total = len(stats.get("ic_access_cycles") or [])
-    dc_acc_total = len(stats.get("dc_access_cycles") or [])
-    if ic_acc_total or dc_acc_total:
-        print(f"[INFO] CSR-equivalent accesses (whole trace): "
-              f"I-cache={ic_acc_total:,}  D-cache={dc_acc_total:,}",
+        return 2, None
+    max_slot = probe_max_index(path_to_id, MEM_Q_SLOT_PROBE)
+    if max_slot >= NR_SB_ENTRIES:
+        # scoreboard.sv:323 requires a power of two.
+        return refuse("mem_q slots", max_slot, NR_SB_ENTRIES,
+                      "NR_SB_ENTRIES", 1 << max_slot.bit_length()), None
+    max_commit = probe_max_index(path_to_id, COMMIT_PORT_PROBE)
+    if max_commit >= NR_COMMIT_PORTS:
+        return refuse("commit_pointer_q ports", max_commit, NR_COMMIT_PORTS,
+                      "NR_COMMIT_PORTS", max_commit + 1), None
+    max_wb = probe_max_index(path_to_id, WB_PORT_PROBE)
+    if max_wb >= NR_WB_PORTS:
+        return refuse("trans_id_i ports", max_wb, NR_WB_PORTS, "NR_WB_PORTS",
+                      max_wb + 1), None
+    # A probe that finds nothing would size its rows to zero, and the signals
+    # the walk needs would silently become optional.
+    absent = [family for family, largest in (
+        ("mem_q[n].sbe.fu", max_slot), ("commit_pointer_q[n]", max_commit),
+        ("trans_id_i[n]", max_wb)) if largest < 0]
+    if absent:
+        log_error(f"The VCD declares no {', '.join(absent)}, so the "
+                  f"scoreboard cannot be followed and the JSON would be "
+                  f"silently wrong.")
+        print("        Dump the whole design, as run_CVA6.py does, and rerun.",
               file=sys.stderr)
-    ic_miss_total = len(stats.get("icache_miss_cycles") or [])
-    if ic_miss_total:
-        print(f"[INFO] RTL-counter I-cache misses (miss_o pulses, whole "
-              f"trace): {ic_miss_total:,}", file=sys.stderr)
+        return 2, None
+    dc_sets = probe_dcache_sets(path_width, scope_prefix)
+    hpdcache = f"{scope_prefix}.{HPDCACHE_SCOPE}"
+    if dc_sets is None and any(path.startswith(hpdcache)
+                               for path in path_to_id):
+        log_error(f"The VCD has an HPDcache but no {DCACHE_SET_SIGNAL}, so "
+                  f"the D-cache set count that joins a writeback to its "
+                  f"eviction is unknown.")
+        print("        Dump the whole design, as run_CVA6.py does, and rerun.",
+              file=sys.stderr)
+        return 2, None
+    # A largest index N means N + 1 slots or ports, NrCommitPorts included.
+    return 0, (max_slot + 1, max_commit + 1, max_wb + 1, dc_sets)
 
-    # Annotate records with disassembly text. Done after the walk, so exactly
-    # the records that will be serialized are annotated. Nominally optional,
-    # effectively required: without a listing every disasm is None and the
-    # viewer shows a blank instruction column.
-    if not args.disasm_list and not args.no_disasm_list:
-        guess = vcd_path.with_suffix(".list")
-        if guess.exists():
-            print(f"[INFO] Using {guess.name} for the disassembly. "
-                  f"--disasm-list picks another, --no-disasm-list skips it.",
-                  file=sys.stderr)
-            args.disasm_list = str(guess)
-        else:
-            print(f"[WARN] No --disasm-list given and no {guess.name} beside "
-                  f"the VCD, so every record's 'disasm' will be null: the "
-                  f"viewer shows a blank instruction column and Main Code "
-                  f"cannot find the region. run_CVA6.py leaves the listing in "
-                  f"run_results/.", file=sys.stderr)
 
+def find_disasm_list(args):
+    """The listing to read, or None, saying which and why."""
+    if args.no_disasm_list:
+        return None
     if args.disasm_list:
-        disasm_path = Path(args.disasm_list)
-        if not disasm_path.exists():
-            print(f"WARNING: --disasm-list {disasm_path} not found. "
-                  "skipping disasm annotation.", file=sys.stderr)
-            stats["disasm_annotated"] = 0
-            stats["disasm_unmapped"] = 0
-            stats["disasm_no_pc"] = 0
-            stats["disasm_list_path"] = None
+        if os.path.isfile(args.disasm_list):
+            return args.disasm_list
+        log_warn(f"--disasm-list {args.disasm_list} does not exist, so every "
+                 f"record's disasm is null and the viewer refuses the JSON.")
+        return None
+    guess = os.path.splitext(args.vcd)[0] + ".list"
+    if os.path.isfile(guess):
+        log_info(f"Using {os.path.basename(guess)} for the disassembly. "
+                 f"--disasm-list picks another, --no-disasm-list skips it.")
+        return guess
+    log_warn(f"No --disasm-list and no {os.path.basename(guess)} beside the "
+             f"VCD, so every record's disasm is null and the viewer refuses "
+             f"the JSON. run_CVA6.py leaves the listing in results/run/.")
+    return None
+
+
+def describe_vcd_clock(run, timescale):
+    """The clock period the VCD itself implies, for checking the time base.
+    The JSON assumes 50 MHz whatever this says."""
+    period = run.vcd_clock_period
+    unit_ps = timescale_ps(timescale)
+    if period is None:
+        log_info("VCD clock period: fewer than two rising edges.")
+    elif unit_ps is None:
+        log_info(f"VCD clock period: {period} units of a timescale that does "
+                 f"not parse, {timescale!r}.")
+    elif period * unit_ps < MIN_PLAUSIBLE_CLOCK_PS:
+        log_info(f"VCD clock period: {period} units of {timescale}, too short "
+                 f"for a clock, since Verilator advances its time two units a "
+                 f"cycle. The JSON assumes 50 MHz.")
+    else:
+        period_ps = period * unit_ps
+        log_info(f"VCD clock period: {period_ps / 1000:.3f} ns "
+                 f"({1e6 / period_ps:.3f} MHz). The JSON assumes 50 MHz.")
+
+
+def mispredict_census(records):
+    """Where each bp_mispredict record went, once each: flushed, the causer
+    of a bubble, resumed by the next record with no bubble, or cut by the end
+    of the VCD. Anything left over fell through tag_bubbles."""
+    ordered = sorted(records, key=lambda rec: rec.id)
+    last_unflushed = max((i for i, rec in enumerate(ordered)
+                          if not rec.flushed), default=-1)
+    census = Counter()
+    for i, rec in enumerate(ordered):
+        if rec.bp_mispredict is not True:
+            continue
+        census["total"] += 1
+        if rec.flushed:
+            census["flushed"] += 1
+        elif rec.caused_bubble_kind is not None:
+            census["caused a bubble"] += 1
+        elif i >= last_unflushed:
+            census["ended with the VCD"] += 1
+        elif not ordered[i + 1].flushed:
+            census["resumed at once"] += 1
         else:
-            disasm_map = parse_disasm_list(disasm_path)
-            n_ann, n_no_pc, n_unmapped = apply_disasm(
-                tracker.completed, disasm_map)
-            stagelog(f"Parsed {len(disasm_map):,} disasm entries from "
-                     f"{disasm_path.name}. Annotated {n_ann:,} records "
-                     f"({n_unmapped:,} unmapped, {n_no_pc:,} without PC)",
-                     file=sys.stderr)
-            stats["disasm_annotated"] = n_ann
-            stats["disasm_unmapped"] = n_unmapped
-            stats["disasm_no_pc"] = n_no_pc
-            stats["disasm_list_path"] = str(disasm_path)
-    else:
-        stats["disasm_annotated"] = 0
-        stats["disasm_unmapped"] = 0
-        stats["disasm_no_pc"] = 0
-        stats["disasm_list_path"] = None
+            census["unaccounted"] += 1
+    return census
 
-    if len(tracker.completed) == 0:
-        print("[WARNING] No CVA6 instructions were parsed from this VCD. It may "
-              "not be a valid CVA6 Verilator VCD, or the expected pipeline and "
-              "commit signals were not found in it. Check that the VCD was "
-              "generated from a CVA6 simulation with the RVFI and scoreboard "
-              "signals dumped.", file=sys.stderr)
 
-    print(f"[write] writing JSON to {out_path}\u2026", file=sys.stderr)
-    write_output_json(out_path, args, stats, tracker)
+def print_verbose(run, mechanisms, records, n_high_bound, bindings,
+                  n_unresolved_producers, table, ids):
+    """The per-mechanism diagnostics --verbose asks for."""
+    if not run.verbose:
+        return
+    pipeline = mechanisms.pipeline
+    perf = mechanisms.perf
+    for mechanism, resolved in mechanisms.resolved.items():
+        state = "resolved" if resolved else "not resolved"
+        log_info(f"Mechanism {mechanism}: {state}.")
+    log_info(f"Signal table: {len(ids)} of {len(table)} rows found.")
+    deliveries = mechanisms.icache.events
+    n_rebound, n_synthesised, n_paired = bindings
+    log_info(f"I-cache: {len(deliveries):,} deliveries "
+             f"({sum(1 for e in deliveries if e.is_miss):,} misses), "
+             f"{n_rebound:,} records rebound, {n_synthesised:,} synthesised "
+             f"by the order repair, {n_paired:,} taken from a compressed "
+             f"partner.")
+    n_wraps = sum(1 for rec in records if rec.wraps_line)
+    log_info(f"wraps_line: {n_wraps:,} records, {n_high_bound:,} with a "
+             f"bound high fetch. The realigner served "
+             f"{perf.n_unaligned_runs:,} unaligned runs over "
+             f"{perf.n_unaligned_cycles:,} cycles.")
+    counts = mechanisms.bubble_counts
+    log_info("Bubbles. " + ", ".join(f"{kind} {n:,}"
+                                     for kind, n in counts.items()) + ".")
+    census = mispredict_census(records)
+    log_info("Mispredicted records: " + ", ".join(
+        f"{what} {n:,}" for what, n in census.items()) + ". Unaccounted "
+        "must be absent.")
+    loads = [rec for rec in records if rec.fu == "LOAD"]
+    stores = [rec for rec in records if rec.fu == "STORE"]
+    log_info(f"LSU FSMs: "
+             f"{sum(1 for rec in loads if rec.lsu_state_history):,} of "
+             f"{len(loads):,} loads and "
+             f"{sum(1 for rec in stores if rec.lsu_state_history):,} of "
+             f"{len(stores):,} stores tracked.")
+    log_info(f"D-cache: {len(mechanisms.dcache.events):,} allocation, check "
+             f"and refill response pulses, "
+             f"{len(mechanisms.dcache.refill_active_cycles):,} "
+             f"refill-active cycles.")
+    wb_stats = mechanisms.mem_wb_stats
+    log_info(f"Memory writebacks: {wb_stats['n_allocs']:,} allocations, "
+             f"{wb_stats['n_matched_pairs']:,} request and response pairs, "
+             f"{wb_stats['n_linked']:,} linked to their eviction.")
+    # Committed records only, as metadata.stats.fwd counts them.
+    via = Counter(getattr(rec, f"fwd_rs{n}_via") for rec in records
+                  if not rec.flushed for n in (1, 2, 3))
+    log_info(f"Forwarding: {pipeline.n_issue_cycles:,} issues, "
+             f"{via['wb']:,} committed operands off the writeback bus, "
+             f"{via['sb']:,} from the scoreboard, {n_unresolved_producers:,} "
+             f"operands without a producer record.")
+    log_info(f"Perf-counter access cycles: I-cache "
+             f"{len(perf.ic_access_cycles):,}, D-cache "
+             f"{len(perf.dc_access_cycles):,}. I-cache miss pulses "
+             f"{len(perf.ic_miss_cycles):,}.")
 
-    mb = file_size / (1024 ** 2)
-    speed = mb / elapsed if elapsed > 0 else 0.0
 
-    print()
-    print("=" * 78)
-    print(" CVA6 Tracer. Summary")
-    print("=" * 78)
-    print(f" Input                 : {vcd_path}")
-    print(f" Output                : {out_path}")
-    print(
-        f" File size             : {file_size:>15,} bytes ({file_size / (1024**3):.3f} GB)")
-    print(f" Lines processed       : {stats['n_lines']:>15,}")
-    print(f" Value changes seen    : {stats['n_changes']:>15,}")
-    print(f" Cycles seen (rising)  : {stats['n_cycles']:>15,}")
-    print(f" Final timestamp       : {stats['last_ts']:>15,}")
-    print(f" Elapsed               : {elapsed:>14.1f}s ({speed:.1f} MB/s)")
-    print()
-    n_total = len(tracker.completed)
-    n_compr = sum(1 for r in tracker.completed if r.is_compressed)
-    n_flushed = sum(1 for r in tracker.completed if r.flushed)
-    print(f" Records total         : {n_total:>15,}")
-    print(f"   committed           : {tracker.n_committed:>15,}")
-    print(f"   flushed             : {n_flushed:>15,}  "
-          f"(IF={tracker.n_flushed_if}, EX={tracker.n_flushed_ex})")
-    n_drained = tracker.n_drained_if + tracker.n_drained_ex
-    if n_drained:
-        print(f"   drained at EOF      : {n_drained:>15,}  "
-              f"(IF={tracker.n_drained_if}, EX={tracker.n_drained_ex})")
-    print(f"   compressed (RVC)    : {n_compr:>15,}")
-    print()
-    if tracker.n_unmatched_writebacks:
-        print(f" UNMATCHED writebacks  : {tracker.n_unmatched_writebacks}  "
-              f"(possible signal/timing issue)")
-    if tracker.n_unmatched_commits:
-        print(f" UNMATCHED commits     : {tracker.n_unmatched_commits}  "
-              f"(possible signal/timing issue)")
+def print_warnings(mechanisms, records):
+    pipeline = mechanisms.pipeline
+    if mechanisms.n_unknown_bit_reads:
+        log_warn(f"{mechanisms.n_unknown_bit_reads:,} bit reads hit x or z "
+                 f"in the VCD. The commit or writeback strobes they carried "
+                 f"were unreadable, so the records behind them are missing.")
+    for count, what in (
+            (pipeline.n_unmatched_writebacks,
+             "writeback(s) named a trans_id no in-flight record held"),
+            (pipeline.n_unmatched_commits,
+             "commit(s) named a trans_id no in-flight record held"),
+            (pipeline.n_unmatched_decodes,
+             "decode handshake(s) found no fetched record to issue"),
+            (pipeline.n_unmatched_resolutions,
+             "branch resolution(s) found no unresolved record with their "
+             "PC")):
+        if count:
+            log_warn(f"{count:,} {what}. metadata.stats counts them.")
+    if not records:
+        log_warn("No CVA6 instruction was recovered, so the fetch handshake "
+                 "never fired in the VCD. Check that the simulation ran past "
+                 "reset.")
 
-    # Disasm coverage summary.
-    if args.disasm_list:
-        print()
-        print(f" Disassembly listing   : {args.disasm_list}")
-        print(
-            f"   annotated records   : {stats.get('disasm_annotated', 0):>15,}")
-        print(
-            f"   unmapped (no entry) : {stats.get('disasm_unmapped', 0):>15,}")
-        if stats.get('disasm_no_pc', 0):
-            print(f"   without PC          : {stats['disasm_no_pc']:>15,}")
 
-    if n_total:
-        first_user = next(iter(tracker.completed), None)
-        if first_user:
-            print()
-            print(" First record:")
-            print(f"   id={first_user.id}, pc={first_user.pc}, "
-                  f"instr={first_user.instr_word}, compressed={first_user.is_compressed}")
-            if first_user.disasm:
-                print(f"   disasm={first_user.disasm}")
-            print(f"   fu={first_user.fu}, fu_category={first_user.fu_category}, "
-                  f"rs1=x{first_user.rs1}, rs2=x{first_user.rs2}, rd=x{first_user.rd}")
-            print(f"   fe={first_user.fe_cycle}  id={first_user.id_cycle}  "
-                  f"is={first_user.is_cycle}  ex={first_user.ex_cycle}  "
-                  f"wb={first_user.wb_cycle}  co={first_user.co_cycle}")
-            print(
-                f"   trans_id={first_user.trans_id}, flushed={first_user.flushed}")
+# SHARED BEGIN py-summary
 
-        # FU / FU-category distribution over committed records.
-        cat_user = Counter()
-        fu_user = Counter()
-        for r in tracker.completed:
-            if r.flushed or r.fu_category is None:
-                continue
-            cat_user[r.fu_category] += 1
-            fu_user[r.fu] += 1
-        print()
-        print(" FU category. Committed records")
-        for c in sorted(cat_user):
-            print(f"   {c:<10} {cat_user[c]:>8}")
-        if fu_user:
-            print()
-            print(" FU breakdown. Committed records")
-            for fu, n in fu_user.most_common():
-                print(f"   {fu:<12} {n:>5}")
-    # Degradation report. Printed last so it is the final thing on screen
-    # after a long run, and mirrored into metadata["degraded"] so a JSON can
-    # be audited long after the stderr has gone.
-    degraded = stats.get("degraded", [])
-    print()
-    if degraded:
-        print(f" DEGRADED: {len(degraded)} mechanism(s) did not resolve. "
-              f"The affected fields are null or empty, not measured.")
-        for d in degraded:
-            print(f"   {d['mechanism']:<16} {d['effect']}")
-        print(" This is recorded in metadata.degraded in the output JSON.")
-    else:
-        print(" All mechanisms resolved. metadata.degraded is empty.")
-    ubr = stats.get("unknown_bit_reads") or 0
-    if ubr:
-        print(f" WARNING: {ubr:,} bit reads hit x or z in the VCD. The commit "
-              f"or writeback strobes they carried were unreadable, so the "
-              f"records behind them are missing from this trace.")
-    print()
-    if degraded and args.strict:
-        print("Exiting non-zero: --strict was given and the trace is "
-              "degraded.", file=sys.stderr)
-        return 3
-    return 0
+# Needs: re, sys
+
+TIME_UNIT_SECONDS = {"fs": 1e-15, "ps": 1e-12, "ns": 1e-9, "us": 1e-6,
+                     "ms": 1e-3, "s": 1.0}
+
+
+def clock_text(metadata):
+    """The Clock period row, from the three keys both JSONs share."""
+    period, unit = metadata["clock_period"], metadata["time_unit"]
+    text = f"{period:,} units of {unit}"
+    match = re.fullmatch(r"(\d+)(fs|ps|ns|us|ms|s)", unit or "")
+    if match and period:
+        seconds = (period * int(match.group(1))
+                   * TIME_UNIT_SECONDS[match.group(2)])
+        text += f" ({1 / seconds / 1e6:g} MHz)"
+    return f"{text}, {metadata['clock_period_source']}"
+
+
+def elapsed_text(seconds, input_bytes):
+    """The Elapsed row, with the rate the input was read at."""
+    rate = input_bytes / (1 << 20) / max(seconds, 1e-9)
+    return f"{seconds:.1f}s ({rate:.1f} MiB/s)"
+
+
+def print_summary_rows(title, rows):
+    """The closing summary as aligned label : value rows on stdout, flushed
+    so a log capturing both streams keeps it above the degraded report."""
+    width = max(len(label) for label, _ in rows)
+    print(title)
+    for label, value in rows:
+        print(f"  {label:<{width}} : {value}")
+    sys.stdout.flush()
+
+# SHARED END py-summary
+
+
+def print_summary(args, out, run, records, mechanisms, metadata,
+                  disasm_list_path, disasm_counts, elapsed):
+    """The closing summary, on stdout so a batch log can keep it apart."""
+    pipeline = mechanisms.pipeline
+    size = os.path.getsize(args.vcd)
+    n_drained = pipeline.n_drained_fetched + pipeline.n_drained_issued
+    rows = [
+        ("Input", args.vcd),
+        ("Output", out),
+        ("Records", f"{len(records):,}"),
+        ("Committed", f"{pipeline.n_committed:,}"),
+        ("Flushed", f"{sum(1 for rec in records if rec.flushed):,} (fetched "
+                    f"{pipeline.n_flushed_fetched:,}, issued "
+                    f"{pipeline.n_flushed_issued:,}, drained at the end "
+                    f"{n_drained:,})"),
+        ("Clock period", clock_text(metadata)),
+        ("Compressed", f"{sum(1 for rec in records if rec.is_compressed):,}"),
+        ("VCD size", human(size)),
+        ("VCD lines", f"{run.n_lines:,}"),
+        ("Value changes", f"{run.n_changes:,}"),
+        ("Cycles", f"{run.n_cycles:,}"),
+        ("Final timestamp", f"{run.last_ts:,}"),
+    ]
+    if disasm_list_path:
+        n_annotated, n_no_pc, n_unmapped = disasm_counts
+        rows += [("Disassembly listing", disasm_list_path),
+                 ("Annotated records", f"{n_annotated:,}"),
+                 ("Unmapped records", f"{n_unmapped:,}")]
+        if n_no_pc:
+            rows.append(("Records without a PC", f"{n_no_pc:,}"))
+    if records:
+        first = records[0]
+
+        def reg(value):
+            return "-" if value is None else f"x{value}"
+
+        rows.append(("First record", (
+            f"id {first.id}, pc {first.pc}, word {first.instr_word}, "
+            f"{first.fu or '-'}, rd {reg(first.rd)}, rs1 {reg(first.rs1)}, "
+            f"rs2 {reg(first.rs2)}")))
+        if first.disasm:
+            rows.append(("First record text", first.disasm))
+        rows.append(("First record cycles", (
+            f"fe out {first.fe_out_cycle}, dec {first.dec_cycle}, ex "
+            f"{first.ex_cycle}, wb {first.wb_cycle}, co {first.co_cycle}")))
+        committed = [rec for rec in records if not rec.flushed and rec.fu]
+        categories = Counter(rec.fu_category for rec in committed)
+        units = Counter(rec.fu for rec in committed)
+        rows.append(("Committed by category", ", ".join(
+            f"{name} {n:,}" for name, n in sorted(categories.items()))))
+        rows.append(("Committed by FU", ", ".join(
+            f"{name} {n:,}" for name, n in units.most_common())))
+    rows.append(("Elapsed", elapsed_text(elapsed, size)))
+    print_summary_rows("CVA6Flow tracer summary", rows)
+
+
+def main(argv=None):
+    args = build_parser().parse_args(argv)
+    if not os.path.isfile(args.vcd):
+        log_error(f"VCD not found: {args.vcd}")
+        print("        Check the path and try again.", file=sys.stderr)
+        return 1
+    out = args.out or default_out_path(args.vcd)
+    size = os.path.getsize(args.vcd)
+    log_info(f"Reading {args.vcd} ({human(size)})")
+    started = time.time()
+    run = Run(verbose=args.verbose,
+              progress=Progress("INFO", size, args.quiet))
+
+    with open(args.vcd, "r", encoding="ascii", errors="replace") as f:
+        path_to_id, path_width, timescale = parse_var_block(f)
+        log_info(f"Header: {len(path_to_id):,} signals, timescale "
+                 f"{timescale}")
+        status, sizes = check_build(path_to_id, path_width, args.scope_prefix)
+        if status:
+            return status
+        nr_sb_entries, nr_commit_ports, nr_wb_ports, dc_sets = sizes
+        table = signal_table(nr_sb_entries, nr_commit_ports, nr_wb_ports)
+        ids, missing = match_signal_table(table, path_to_id,
+                                          args.scope_prefix)
+        report_missing(table, missing, path_to_id)
+        missing_core = [name for name in missing if "core" in table[name][1]]
+        if missing_core:
+            log_error(f"{len(missing_core)} required signal(s) are not in "
+                      f"the VCD, so it cannot be walked: "
+                      f"{', '.join(missing_core[:MAX_MISSING_REPORTED])}.")
+            return 2
+        resolved = resolved_mechanisms(table, ids)
+        del resolved["core"]
+        mechanisms = Mechanisms(resolved, nr_sb_entries, nr_commit_ports,
+                                nr_wb_ports)
+        sample = EdgeSample({}, ids)
+        stream_and_extract(f, mechanisms, sample, run)
+    run.progress.done()
+    mechanisms.n_unknown_bit_reads = sample.n_unknown_bit_reads
+    describe_vcd_clock(run, timescale)
+
+    records = mechanisms.pipeline.completed
+    index = index_events(mechanisms.icache.events)
+    n_high_bound = match_records_to_events(records, index)
+    n_rebound, n_synthesised = repair_fetch_order(records, index)
+    bindings = (n_rebound, n_synthesised, pair_rvc_fetches(records))
+    if resolved["lsu_fsm"] and resolved["dcache"]:
+        attribute_dc_events(records, mechanisms.dcache)
+    mem_writebacks, mechanisms.mem_wb_stats = finalise_mem_writebacks(
+        mechanisms.mem_wb, dc_sets)
+    disasm_list_path = find_disasm_list(args)
+    disasm = parse_disasm_list(disasm_list_path) if disasm_list_path else {}
+    disasm_counts = apply_disasm(records, disasm)
+    n_unresolved_producers = forwarding_producers(records)
+    branch_outcomes(records)
+    mechanisms.bubble_counts = tag_bubbles(records)
+    pre_fetch_waits(records)
+
+    stats = build_stats(records, mechanisms, len(table), len(missing),
+                        bindings, disasm_counts)
+    degraded = build_degraded(resolved, run, mechanisms.pipeline)
+    ic_events, dc_events = event_objects(mechanisms)
+    try:
+        data = {
+            "metadata": build_metadata(args, run, timescale, dc_sets,
+                                       disasm_list_path, degraded, stats),
+            "config_params": build_config_params(
+                nr_sb_entries, nr_commit_ports, nr_wb_ports, dc_sets),
+            "instructions": record_dicts(records, args.emit_diagnostics),
+            "ic_events": ic_events,
+            "dc_events": dc_events,
+            "mem_writebacks": mem_writebacks,
+        }
+        if tuple(data) != TOP_LEVEL_ORDER:
+            raise ValueError("main drifted from TOP_LEVEL_ORDER")
+        check_field_lists(data["instructions"], data["metadata"], CORE_NAMES)
+    except ValueError as err:
+        log_error(f"The JSON was not written: {err}.")
+        return 1
+    log_info(f"Writing {out}")
+    write_json(out, data)
+
+    print_verbose(run, mechanisms, records, n_high_bound, bindings,
+                  n_unresolved_producers, table, ids)
+    print_warnings(mechanisms, records)
+    print_summary(args, out, run, records, mechanisms, data["metadata"],
+                  disasm_list_path, disasm_counts, time.time() - started)
+    print_degraded(degraded)
+    return exit_status(degraded, args.strict, "VCD")
 
 
 if __name__ == "__main__":
