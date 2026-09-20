@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 64 64" role="img" aria-label="CVA6Flow">
+<title>CVA6Flow</title>
+  <rect x="0.5" y="0.5" width="63" height="63" rx="14" fill="#18181a" stroke="rgba(255,255,255,0.12)" stroke-width="0.75"/>
+  <path d="M8 19.4 L10.6 19.4 L10.6 14.6 L13.2 14.6 L13.2 19.4 L15.8 19.4 L15.8 14.6 L18.4 14.6" fill="none" stroke="#7a8aa6" stroke-width="1.1" stroke-linejoin="round"/>
+  <rect x="20.4" y="13.5" width="3.2" height="7" rx="1" fill="#6cbbe4"/>
+  <rect x="24.4" y="13.5" width="3.2" height="7" rx="1" fill="#2f7fb5"/>
+  <rect x="28.4" y="13.5" width="3.2" height="7" rx="1" fill="#23828f"/>
+  <rect x="32.4" y="13.5" width="3.2" height="7" rx="1" fill="#7b4fc4"/>
+  <rect x="36.4" y="13.5" width="3.2" height="7" rx="1" fill="#2a9a66"/>
+  <rect x="40.4" y="13.5" width="3.2" height="7" rx="1" fill="#3ecf9a"/>
+  <polygon points="8,27 9.2,24.6 12.8,24.6 14,27 12.8,29.4 9.2,29.4" fill="none" stroke="#7a8aa6" stroke-width="1.1" stroke-linejoin="round"/>
+  <polygon points="14,27 15.2,24.6 21.2,24.6 22.4,27 21.2,29.4 15.2,29.4" fill="none" stroke="#7a8aa6" stroke-width="1.1" stroke-linejoin="round"/>
+  <rect x="24.4" y="23.5" width="3.2" height="7" rx="1" fill="#6cbbe4"/>
+  <rect x="28.4" y="23.5" width="3.2" height="7" rx="1" fill="#2f7fb5"/>
+  <rect x="32.4" y="23.5" width="3.2" height="7" rx="1" fill="#23828f"/>
+  <rect x="36.4" y="23.5" width="3.2" height="7" rx="1" fill="#7b4fc4"/>
+  <rect x="40.4" y="23.5" width="3.2" height="7" rx="1" fill="#2a9a66"/>
+  <rect x="44.4" y="23.5" width="3.2" height="7" rx="1" fill="#3ecf9a"/>
+  <path d="M8 39.4 L12.5 39.4 L12.5 34.6 L19 34.6 L19 39.4 L23.5 39.4 L23.5 34.6 L26.4 34.6" fill="none" stroke="#7a8aa6" stroke-width="1.1" stroke-linejoin="round"/>
+  <rect x="28.4" y="33.5" width="3.2" height="7" rx="1" fill="#6cbbe4"/>
+  <rect x="32.4" y="33.5" width="3.2" height="7" rx="1" fill="#2f7fb5"/>
+  <rect x="36.4" y="33.5" width="3.2" height="7" rx="1" fill="#23828f"/>
+  <rect x="40.4" y="33.5" width="3.2" height="7" rx="1" fill="#7b4fc4"/>
+  <rect x="44.4" y="33.5" width="3.2" height="7" rx="1" fill="#2a9a66"/>
+  <rect x="48.4" y="33.5" width="3.2" height="7" rx="1" fill="#3ecf9a"/>
+  <polygon points="8,47 9.2,44.6 11.8,44.6 13,47 11.8,49.4 9.2,49.4" fill="none" stroke="#7a8aa6" stroke-width="1.1" stroke-linejoin="round"/>
+  <polygon points="13,47 14.2,44.6 20.3,44.6 21.5,47 20.3,49.4 14.2,49.4" fill="none" stroke="#7a8aa6" stroke-width="1.1" stroke-linejoin="round"/>
+  <polygon points="21.5,47 22.7,44.6 29.2,44.6 30.4,47 29.2,49.4 22.7,49.4" fill="none" stroke="#7a8aa6" stroke-width="1.1" stroke-linejoin="round"/>
+  <rect x="32.4" y="43.5" width="3.2" height="7" rx="1" fill="#6cbbe4"/>
+  <rect x="36.4" y="43.5" width="3.2" height="7" rx="1" fill="#2f7fb5"/>
+  <rect x="40.4" y="43.5" width="3.2" height="7" rx="1" fill="#23828f"/>
+  <rect x="44.4" y="43.5" width="3.2" height="7" rx="1" fill="#7b4fc4"/>
+  <rect x="48.4" y="43.5" width="3.2" height="7" rx="1" fill="#2a9a66"/>
+  <rect x="52.4" y="43.5" width="3.2" height="7" rx="1" fill="#3ecf9a"/>
+  <line x1="42" y1="24.8" x2="42" y2="31" stroke="#18181a" stroke-width="3.7" stroke-linecap="round"/>
+  <polygon points="42,35.2 39.69,31 44.31,31" fill="#18181a" stroke="#18181a" stroke-width="2" stroke-linejoin="round"/>
+  <line x1="42" y1="24.8" x2="42" y2="31" stroke="#cc72dc" stroke-width="1.7" stroke-linecap="round"/>
+  <polygon points="42,35.2 39.69,31 44.31,31" fill="#cc72dc"/>
+</svg>
