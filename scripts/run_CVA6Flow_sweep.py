@@ -1,38 +1,47 @@
 #!/usr/bin/env python3
 """Run the CVA6Flow configuration sweep. Each variant of the swept config
 package runs against the workloads it was cut for, outputs carry a .config<N>
-tag, and every metrics table is gathered into one metrics.txt.
+tag, and every metrics table is gathered into one metrics file:
+
+    python3 scripts/run_CVA6Flow_sweep.py --configs 1,4-6 --dry-run
 """
 import argparse
-import datetime
+import glob
+import importlib.util
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import time
 
-# ==============================================================================
+# =============================================================================
 # CONFIGURATION
-# ==============================================================================
-CVA6_ROOT = "/CVA6"
+# =============================================================================
+# The CVA6 root run_CVA6.py picks without --cva6-root, when it exists.
+IMAGE_CVA6_ROOT = "/CVA6"
 
-# The package the build actually reads.
-LIVE_CONFIG_PKG = os.path.join(
-    CVA6_ROOT, "core/include/cv64a6_imafdc_sv39_hpdcache_wb_config_pkg.sv")
+# The package the build actually reads, relative to the CVA6 root.
+LIVE_CONFIG_PKG = "core/include/cv64a6_imafdc_sv39_hpdcache_wb_config_pkg.sv"
+# Beside the live package while a sweep runs, the copy it restores from.
+BACKUP_SUFFIX = ".sweep_backup"
 
 # The swept package, carrying the table and the CVA6_CONFIG_SEL selector.
-# The unmodified production package sits beside it under the live name.
+# The unmodified upstream package sits beside it under the live name.
 SOURCE_CONFIG_PKG = "cv64a6_imafdc_sv39_hpdcache_wb_config_CVA6Flow_pkg.sv"
 
 DEFAULT_TARGET = "cv64a6_imafdc_sv39_hpdcache_wb"
-DEFAULT_TESTS_DIR = os.path.join(CVA6_ROOT, "benchmarks/viewer")
+# Relative to the CVA6 root, where the Docker image puts the viewer's set.
+# Outside the image this repository's own benchmarks/ stands in for it.
+DEFAULT_TESTS_DIR = os.path.join("benchmarks", "viewer")
 DEFAULT_OUT_DIR = os.path.join("results", "sweep_CVA6Flow")
 
 RUNNER_NAME = "run_CVA6.py"
 
-# Extensions tried when turning a workload name into a file, in this order.
-EXT_PRIORITY = [".c", ".S", ".s", ".asm", ".sx"]
+# Extensions tried when turning a workload name into a file, in this order,
+# so a tuple where the batch's unordered SOURCE_EXTS is a set.
+EXT_PRIORITY = (".c", ".S", ".s", ".asm", ".sx")
 
 # 'localparam int CFG_BHT_64 = 4;   // BHTEntries 128 -> 64 : bht_alias_test'
 ROW_RE = re.compile(
@@ -49,25 +58,237 @@ SEP = "=" * 70
 METRICS_MARKER = "RESULTS TABLE"
 
 
+# SHARED BEGIN py-run-helpers
+
+# Needs: os, re, METRICS_MARKER, SEP
+
+
+def slug(text, limit=40):
+    """Turn a value into something safe for a file name: ASCII letters and
+    digits kept, each run of anything else one dash, trimmed of dashes at both
+    ends and cut to limit characters."""
+    out = re.sub(r"[^A-Za-z0-9]+", "-", str(text)).strip("-")
+    return out[:limit].strip("-")
+
+
+def format_duration(seconds):
+    # Rounded to the one decimal it prints, before the split, so 59.99 reads
+    # 1m00s and never 60.0s.
+    seconds = round(seconds, 1)
+    minutes, secs = divmod(int(seconds), 60)
+    if minutes:
+        return f"{minutes}m{secs:02d}s"
+    return f"{seconds:.1f}s"
+
+
+def extract_metrics(report_path):
+    """The metrics section of a _report.txt, or None if it holds none. The
+    file is the measured disassembly then the metrics table, so everything from
+    the rule above the table's title to the end is what is wanted."""
+    try:
+        with open(report_path) as f:
+            lines = f.read().splitlines()
+    except OSError as e:
+        print(f"[WARN] Could not read {report_path}: {e}")
+        return None
+
+    for i, line in enumerate(lines):
+        if line.startswith(METRICS_MARKER):
+            # Take the rule above the title too, so the block arrives boxed.
+            start = i - 1 if i and set(lines[i - 1]) == {"="} else i
+            return "\n".join(lines[start:]).rstrip()
+
+    return None
+
+
+def metrics_filename(parts):
+    """The gathered metrics file, named after the run that produced it."""
+    tags = [slug(p) for p in parts if p]
+    return "metrics" + ("_" if tags else "") + "_".join(tags) + ".txt"
+
+
+def write_metrics_file(out_dir, entries, info, filename):
+    """Gather every run's metrics table into one file, named filename.
+    entries is [(label, report file)] in the order of the summary, so the
+    file reads like it. A run with no table is named, not skipped."""
+    blocks, missing = [], []
+    for label, report_path in entries:
+        block = extract_metrics(report_path)
+        if block is None:
+            missing.append(label)
+            continue
+        blocks.append(f">>> {label}\n{block}")
+
+    if missing:
+        print(f"[WARN] No metrics table for: {', '.join(missing)}")
+    if not blocks:
+        print(f"[WARN] No metrics tables found, so no {filename} written")
+        return None
+
+    path = os.path.join(out_dir, filename)
+    try:
+        with open(path, "w") as f:
+            f.write(f"{SEP}\nALL METRICS\n{SEP}\n")
+            for line in info:
+                f.write(line + "\n")
+            f.write(f"{SEP}\n\n")
+            f.write("\n\n".join(blocks) + "\n")
+    except OSError as e:
+        print(f"[WARN] Could not write {path}: {e}")
+        return None
+
+    print(f"[INFO] {len(blocks)} metrics table(s) gathered in {path}")
+    return path
+
+# SHARED END py-run-helpers
+
+
+# SHARED BEGIN py-cva6-run-dirs
+
+# Needs: glob, importlib.util, os, shutil, sys, DEFAULT_TESTS_DIR,
+# IMAGE_CVA6_ROOT, RUNNER_NAME
+
+
 def find_runner():
-    """Locate run_CVA6.py next to this script, then in the cwd."""
+    """Locate run_CVA6.py next to this script, then in the cwd, or None."""
     here = os.path.dirname(os.path.abspath(__file__))
     for candidate in (os.path.join(here, RUNNER_NAME),
                       os.path.abspath(RUNNER_NAME)):
         if os.path.isfile(candidate):
             return candidate
     print(f"[ERROR] {RUNNER_NAME} not found next to this script or in the "
-          f"current directory.")
-    sys.exit(2)
+          f"current directory.", file=sys.stderr)
+    return None
 
 
-def find_source_pkg(explicit):
-    """Locate the swept config package."""
+def load_runner(path):
+    """run_CVA6.py as a module, so its tables decide what --suite accepts."""
+    spec = importlib.util.spec_from_file_location("run_CVA6", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def default_cva6_root(runner):
+    """The CVA6 root run_CVA6.py picks without --cva6-root: /CVA6 when it
+    exists, otherwise the nearest folder above the runner holding
+    verif/sim."""
+    if os.path.isdir(IMAGE_CVA6_ROOT):
+        return IMAGE_CVA6_ROOT
+    here = os.path.dirname(os.path.abspath(runner))
+    path = here
+    while True:
+        if os.path.isdir(os.path.join(path, "verif", "sim")):
+            return path
+        parent = os.path.dirname(path)
+        if parent == path:
+            return here
+        path = parent
+
+
+def default_tests_dir(root):
+    """DEFAULT_TESTS_DIR under the CVA6 root, where the image puts the
+    viewer's set, else this repository's own benchmarks/ beside scripts/."""
+    folder = os.path.join(root, DEFAULT_TESTS_DIR)
+    if os.path.isdir(folder):
+        return folder
+    here = os.path.dirname(os.path.abspath(__file__))
+    own = os.path.join(os.path.dirname(here), "benchmarks")
+    return own if os.path.isdir(own) else folder
+
+
+def driver_results_dir(root):
+    """The results/run/ folder run_CVA6.py copies its keepers into, under the
+    CVA6 root rather than beside the driver."""
+    return os.path.join(root, "results", "run")
+
+
+def run_output_dirs(root, test_name):
+    """The out_<date>/ folders holding any of this test's files. run_CVA6.py
+    and cva6.py each name theirs from the date they started, so a run that
+    crosses midnight can leave files in two of them."""
+    found = []
+    for folder in sorted(glob.glob(os.path.join(root, "verif", "sim",
+                                                "out_*"))):
+        if any(os.path.isfile(path)
+               for path in sim_run_files(folder, test_name, "*")):
+            found.append(folder)
+    return found
+
+
+def output_paths(results_dir, test_name):
+    """The three files run_CVA6.py leaves in results/run/ for this test."""
+    return {
+        "vcd": os.path.join(results_dir, f"{test_name}.vcd"),
+        "list": os.path.join(results_dir, f"{test_name}.list"),
+        "report": os.path.join(results_dir, f"{test_name}_report.txt"),
+    }
+
+
+def sim_run_files(folder, test_name, target):
+    """This test's files inside one out_<date>/ folder. A target of * stands
+    for any, which only a glob match honours."""
+    log_dir = os.path.join(folder, "veri-testharness_sim")
+    bin_dir = os.path.join(folder, "directed_tests")
+    paths = [
+        os.path.join(log_dir, f"{test_name}.{target}.vcd"),
+        os.path.join(log_dir, f"{test_name}.{target}.log"),
+        # run_CVA6.py's own capture of the build and the simulation.
+        os.path.join(folder, f"{test_name}_run.log"),
+        os.path.join(bin_dir, f"{test_name}.o"),
+        os.path.join(bin_dir, f"{test_name}.list"),
+        os.path.join(bin_dir, f"{test_name}_report.txt"),
+    ]
+    if target == "*":
+        return [match for path in paths for match in glob.glob(path)]
+    return paths
+
+
+def discard_run(root, results_dir, test_name, target):
+    """Delete what this run left behind once it has been collected, since a
+    VCD runs to hundreds of MiB per test. Only this test's files go, in
+    results/run/ and in every dated folder it wrote to, so a failed test's
+    output and anything else left there survive the rest of the runs."""
+    folders = run_output_dirs(root, test_name)
+    for path in list(output_paths(results_dir, test_name).values()) + [
+            path for folder in folders
+            for path in sim_run_files(folder, test_name, target)]:
+        if os.path.isfile(path):
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+    return folders
+
+
+def discard_sim_trees(folders):
+    """Remove the dated simulation folders the runs used, once nothing in
+    them is worth keeping."""
+    for folder in sorted(folders):
+        if os.path.isdir(folder):
+            shutil.rmtree(folder, ignore_errors=True)
+
+
+def clear_stale_outputs(results_dir, test_name):
+    """Remove the previous run's files so nothing stale gets collected."""
+    for path in output_paths(results_dir, test_name).values():
+        if os.path.isfile(path):
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
+# SHARED END py-cva6-run-dirs
+
+
+def find_source_pkg(explicit, root):
+    """Locate the swept config package, or None after saying why."""
     if explicit:
         if os.path.isfile(explicit):
             return os.path.abspath(explicit)
-        print(f"[ERROR] Config package not found: {explicit}")
-        sys.exit(2)
+        print(f"[ERROR] Config package not found: {explicit}",
+              file=sys.stderr)
+        return None
 
     here = os.path.dirname(os.path.abspath(__file__))
     for candidate in (os.path.join(here, SOURCE_CONFIG_PKG),
@@ -75,27 +296,25 @@ def find_source_pkg(explicit):
                       # In the repository the swept package lives in the
                       # viewer's configs/, beside this scripts/ folder.
                       os.path.join(here, "..", "configs", SOURCE_CONFIG_PKG),
-                      # In the container every configuration is in configs/,
-                      # which is the copy to sweep. LIVE is what it replaces.
-                      os.path.join(CVA6_ROOT, "CVA6_configs",
-                                   SOURCE_CONFIG_PKG),
-                      LIVE_CONFIG_PKG):
+                      # In the container every configuration is in
+                      # CVA6_configs/, which is the copy to sweep.
+                      os.path.join(root, "CVA6_configs", SOURCE_CONFIG_PKG)):
         if os.path.isfile(candidate):
             return os.path.abspath(candidate)
     print(f"[ERROR] {SOURCE_CONFIG_PKG} not found next to this script, in "
-          f"the current directory, in ../configs/, in "
-          f"{CVA6_ROOT}/CVA6_configs/, or at {LIVE_CONFIG_PKG}. "
-          f"Pass --config-pkg.")
-    sys.exit(2)
+          f"the current directory, in ../configs/ or in "
+          f"{root}/CVA6_configs/. Pass --config-pkg.", file=sys.stderr)
+    return None
 
 
 def workloads_from_comment(comment):
-    """Pull the workload list out of a table comment's trailing ': ...' part."""
+    """Pull the workload list out of a table comment's trailing ': ...'
+    part."""
     if ":" not in comment:
         return []
     tail = comment.rsplit(":", 1)[1]
-    # Drop parentheticals such as '(TLB bypassed in M-mode, expect null)',
-    # which would otherwise look like extra comma-separated workloads.
+    # Drop parentheticals such as '(M-mode, no TLB)', which would otherwise
+    # look like extra comma-separated workloads.
     tail = re.sub(r"\(.*?\)", "", tail)
     return [w.strip() for w in tail.split(",") if w.strip()]
 
@@ -106,8 +325,8 @@ def parse_table(text):
     table = {}
     for cfg_name, number, comment in ROW_RE.findall(text):
         comment = comment.strip()
-        description = comment.rsplit(":", 1)[0].strip() if ":" in comment \
-            else comment
+        description = (comment.rsplit(":", 1)[0].strip() if ":" in comment
+                       else comment)
         table[int(number)] = (cfg_name, description,
                               workloads_from_comment(comment))
     return table
@@ -167,7 +386,8 @@ def resolve_test_file(name, tests_dir):
 
 
 def parse_config_selection(spec, table):
-    """Parse '1,4-6' into a sorted list of configuration ids."""
+    """Parse '1,4-6' into a sorted list of configuration ids, or None after
+    saying why."""
     if not spec:
         return sorted(table)
 
@@ -181,21 +401,23 @@ def parse_config_selection(spec, table):
             try:
                 selected.update(range(int(low), int(high) + 1))
             except ValueError:
-                print(f"[ERROR] Bad configuration range: '{chunk}'")
-                sys.exit(2)
+                print(f"[ERROR] Bad configuration range: '{chunk}'",
+                      file=sys.stderr)
+                return None
         else:
             try:
                 selected.add(int(chunk))
             except ValueError:
-                print(f"[ERROR] Bad configuration id: '{chunk}'")
-                sys.exit(2)
+                print(f"[ERROR] Bad configuration id: '{chunk}'",
+                      file=sys.stderr)
+                return None
 
     unknown = sorted(selected - set(table))
     if unknown:
         print(f"[ERROR] No such configuration(s): "
               f"{', '.join(str(u) for u in unknown)}. "
-              f"The table has {min(table)}-{max(table)}.")
-        sys.exit(2)
+              f"The table has {min(table)}-{max(table)}.", file=sys.stderr)
+        return None
     return sorted(selected)
 
 
@@ -245,35 +467,10 @@ def build_plan(table, config_ids, tests_dir, override_tests):
 
 def install_config(source_text, cfg_name, live_path):
     """Write the swept package to the live path with the selector set."""
-    text, count = SELECTOR_RE.subn(
-        lambda m: m.group(1) + cfg_name + m.group(3), source_text, count=1)
-    if count != 1:
-        print("[ERROR] CVA6_CONFIG_SEL not found in the config package, so "
-              "the configuration cannot be selected.")
-        sys.exit(2)
+    text = SELECTOR_RE.sub(lambda m: m.group(1) + cfg_name + m.group(3),
+                           source_text, count=1)
     with open(live_path, "w") as f:
         f.write(text)
-
-
-def driver_results_dir():
-    """The results/run/ folder run_CVA6.py copies its keepers into, under the
-    CVA6 root rather than beside the driver."""
-    return os.path.join(CVA6_ROOT, "results", "run")
-
-
-def sim_output_dir():
-    """The simulation tree run_CVA6.py writes: logs, VCD, binaries."""
-    today = datetime.date.today().strftime("%Y-%m-%d")
-    return os.path.join(CVA6_ROOT, "verif/sim", f"out_{today}")
-
-
-def output_paths(results_dir, test_name):
-    """The three files run_CVA6.py leaves in results/run/ for this test."""
-    return {
-        "vcd": os.path.join(results_dir, f"{test_name}.vcd"),
-        "list": os.path.join(results_dir, f"{test_name}.list"),
-        "report": os.path.join(results_dir, f"{test_name}_report.txt"),
-    }
 
 
 def collect(results_dir, test_name, config_id, out_dir, want_vcd):
@@ -304,128 +501,9 @@ def collect(results_dir, test_name, config_id, out_dir, want_vcd):
     return collected
 
 
-def sim_run_files(test_name, target):
-    """This test's files inside the simulation tree."""
-    log_dir = os.path.join(sim_output_dir(), "veri-testharness_sim")
-    bin_dir = os.path.join(sim_output_dir(), "directed_tests")
-    return [
-        os.path.join(log_dir, f"{test_name}.{target}.vcd"),
-        os.path.join(log_dir, f"{test_name}.{target}.log"),
-        # run_CVA6.py's own capture of the build and the simulation.
-        os.path.join(sim_output_dir(), f"{test_name}_run.log"),
-        os.path.join(bin_dir, f"{test_name}.o"),
-        os.path.join(bin_dir, f"{test_name}.list"),
-        os.path.join(bin_dir, f"{test_name}_report.txt"),
-    ]
-
-
-def discard_run(results_dir, test_name, target):
-    """Delete what this run left behind once it has been collected. A VCD runs
-    to hundreds of megabytes per run. Only this test's files go, so a failed
-    run's output survives the rest of the sweep."""
-    if os.path.isdir(results_dir):
-        shutil.rmtree(results_dir, ignore_errors=True)
-    for path in sim_run_files(test_name, target):
-        if os.path.isfile(path):
-            try:
-                os.remove(path)
-            except OSError:
-                pass
-
-
-def discard_sim_tree():
-    """Remove the simulation tree, once nothing in it is worth keeping."""
-    if os.path.isdir(sim_output_dir()):
-        shutil.rmtree(sim_output_dir(), ignore_errors=True)
-
-
-def clear_stale_outputs(results_dir, test_name):
-    """Remove the previous run's files so nothing stale gets collected."""
-    for path in output_paths(results_dir, test_name).values():
-        if os.path.isfile(path):
-            try:
-                os.remove(path)
-            except OSError:
-                pass
-
-
-def extract_metrics(report_path):
-    """The metrics section of a _report.txt, or None if it holds none. The
-    file is the measured disassembly then the metrics table, so everything from
-    the rule above the table's title to the end is what is wanted."""
-    try:
-        with open(report_path) as f:
-            lines = f.read().splitlines()
-    except OSError as e:
-        print(f"[WARN] Could not read {report_path}: {e}")
-        return None
-
-    for i, line in enumerate(lines):
-        if line.startswith(METRICS_MARKER):
-            # Take the rule above the title too, so the block arrives boxed.
-            start = i - 1 if i and set(lines[i - 1]) == {"="} else i
-            return "\n".join(lines[start:]).rstrip()
-
-    return None
-
-
-def slug(text, limit=40):
-    """Turn a value into something safe for a file name: word characters and
-    single dashes, trimmed."""
-    out = re.sub(r"[^A-Za-z0-9]+", "-", str(text)).strip("-")
-    return out[:limit].strip("-")
-
-
-def metrics_filename(parts):
-    """The gathered metrics file, named after the run that produced it."""
-    tags = [slug(p) for p in parts if p]
-    return "metrics" + ("_" if tags else "") + "_".join(tags) + ".txt"
-
-
-def write_metrics_file(out_dir, entries, info, filename):
-    """Gather every run's metrics table into one metrics.txt. entries is
-    [(label, report file)] in plan order, so the file reads like the summary
-    above it. A run with no table is named, not skipped."""
-    blocks, missing = [], []
-    for label, report_path in entries:
-        block = extract_metrics(report_path)
-        if block is None:
-            missing.append(label)
-            continue
-        blocks.append(f">>> {label}\n{block}")
-
-    if missing:
-        print(f"[WARN] No metrics table for: {', '.join(missing)}")
-    if not blocks:
-        print(f"[WARN] No metrics tables found, so no {filename} written")
-        return None
-
-    path = os.path.join(out_dir, filename)
-    try:
-        with open(path, "w") as f:
-            f.write(f"{SEP}\nALL METRICS\n{SEP}\n")
-            for line in info:
-                f.write(line + "\n")
-            f.write(f"{SEP}\n\n")
-            f.write("\n\n".join(blocks) + "\n")
-    except OSError as e:
-        print(f"[WARN] Could not write {path}: {e}")
-        return None
-
-    print(f"[INFO] {len(blocks)} metrics table(s) gathered in {path}")
-    return path
-
-
-def format_duration(seconds):
-    minutes, secs = divmod(int(seconds), 60)
-    if minutes:
-        return f"{minutes}m{secs:02d}s"
-    return f"{seconds:.1f}s"
-
-
-def print_plan(plan, table, all_tests):
+def print_plan(plan, all_tests):
     print(f"[INFO] 'all' resolves to {len(all_tests)} workload(s): " +
-          ", ".join(all_tests) + "\n")
+          (", ".join(all_tests) if all_tests else "nothing") + "\n")
     total = 0
     for config_id, cfg_name, description, paths in plan:
         names = [os.path.basename(p) for p in paths]
@@ -464,6 +542,11 @@ def print_summary(results, total_elapsed):
 
 
 def main():
+    runner = find_runner()
+    if runner is None:
+        return 2
+    driver = load_runner(runner)
+
     parser = argparse.ArgumentParser(
         description="Run the CVA6Flow configuration sweep: each configuration "
                     "in the config package, with the workloads it was cut "
@@ -478,9 +561,10 @@ def main():
     parser.add_argument("--configs", default="",
                         help="Which configurations to run, e.g. '1,4-6'. "
                              "Defaults to all of them")
-    parser.add_argument("--tests-dir", default=DEFAULT_TESTS_DIR,
+    parser.add_argument("--tests-dir", default=None,
                         help=f"Folder holding the workloads. Defaults to "
-                             f"{DEFAULT_TESTS_DIR}")
+                             f"{DEFAULT_TESTS_DIR} under the CVA6 root, else "
+                             f"this repository's benchmarks/")
     parser.add_argument("--tests", default="",
                         help="Comma-separated workloads to run for every "
                              "configuration, instead of the ones the table "
@@ -490,23 +574,31 @@ def main():
                         help=f"Where to collect the results. Defaults to "
                              f"{DEFAULT_OUT_DIR}/")
     parser.add_argument("--config-pkg", default="",
-                        help=f"The swept config package. Defaults to "
-                             f"{SOURCE_CONFIG_PKG} next to this script")
-    parser.add_argument("--live-config-pkg", default=LIVE_CONFIG_PKG,
+                        help=f"The swept config package. Defaults to the "
+                             f"first {SOURCE_CONFIG_PKG} found next to this "
+                             f"script, in the working directory, in "
+                             f"../configs/ or in CVA6_configs/ under the "
+                             f"CVA6 root")
+    parser.add_argument("--live-config-pkg", default=None,
                         help=f"The package the build reads, overwritten per "
                              f"configuration and restored at the end. "
-                             f"Defaults to {LIVE_CONFIG_PKG}")
-    parser.add_argument("--suite", choices=["config", "viewer"], default=None,
+                             f"Defaults to {LIVE_CONFIG_PKG} under the CVA6 "
+                             f"root")
+    parser.add_argument("--suite", choices=sorted(driver.OVERHEAD_SUITES),
+                        default=None,
                         help="Forwarded to run_CVA6.py: which overhead table "
-                             "to subtract. Defaults to the one run_CVA6.py "
-                             "picks from where it sits, 'viewer' here")
+                             "to subtract. Defaults to the .overhead_suite "
+                             "beside each workload, and run_CVA6.py stops "
+                             "without one")
     parser.add_argument("--cva6-root", default=None, metavar="DIR",
-                        help="Forwarded to run_CVA6.py: the CVA6 checkout to "
-                             "run")
+                        help="The CVA6 checkout to run and collect from, "
+                             "forwarded to run_CVA6.py. Defaults to the one "
+                             "run_CVA6.py picks: /CVA6 when it exists, "
+                             "otherwise the checkout above the runner")
     parser.add_argument("--no-vcd", action="store_true",
                         help="Forwarded to run_CVA6.py: no VCD, "
                              "metrics only")
-    parser.add_argument("--list", action="store_true",
+    parser.add_argument("--dry-run", action="store_true",
                         help="Print the plan and exit, touching nothing")
     args = parser.parse_args()
 
@@ -514,7 +606,14 @@ def main():
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(line_buffering=True)
 
-    source_pkg = find_source_pkg(args.config_pkg)
+    root = os.path.abspath(args.cva6_root or default_cva6_root(runner))
+    if args.tests_dir is None:
+        args.tests_dir = default_tests_dir(root)
+    if args.live_config_pkg is None:
+        args.live_config_pkg = os.path.join(root, LIVE_CONFIG_PKG)
+    source_pkg = find_source_pkg(args.config_pkg, root)
+    if source_pkg is None:
+        return 2
     with open(source_pkg) as f:
         source_text = f.read()
 
@@ -522,53 +621,73 @@ def main():
     if not table:
         print(f"[ERROR] No configuration table found in {source_pkg}. "
               f"Expected lines like "
-              f"'localparam int CFG_X = 1; // description : workload'.")
-        sys.exit(2)
+              f"'localparam int CFG_X = 1; // description : workload'.",
+              file=sys.stderr)
+        return 2
+    if not SELECTOR_RE.search(source_text):
+        print(f"[ERROR] CVA6_CONFIG_SEL not found in {source_pkg}, so no "
+              f"configuration can be selected.", file=sys.stderr)
+        return 2
 
     config_ids = parse_config_selection(args.configs, table)
+    if config_ids is None:
+        return 2
     override_tests = [t.strip() for t in args.tests.split(",") if t.strip()]
     all_tests = override_tests if override_tests else resolve_all(table)
 
     print(SEP)
     print("CVA6FLOW SWEEP")
     print(SEP)
-    print(f"Config pkg : {source_pkg}")
-    print(f"Live pkg   : {args.live_config_pkg}")
-    print(f"Target     : {args.target}")
-    print(f"Tests dir  : {args.tests_dir}")
-    print(f"Out dir    : {os.path.abspath(args.out_dir)}")
-    print(
-        f"Tracing    : {'disabled (--no-vcd)' if args.no_vcd else 'enabled'}")
+    print(f"CVA6 root : {root}")
+    print(f"Swept pkg : {source_pkg}")
+    print(f"Live pkg  : {args.live_config_pkg}")
+    print(f"Target    : {args.target}")
+    print(f"Tests dir : {args.tests_dir}")
+    print(f"Out dir   : {os.path.abspath(args.out_dir)}")
+    vcd = "disabled (--no-vcd)" if args.no_vcd else "enabled"
+    print(f"VCD       : {vcd}")
     print(SEP + "\n")
 
     if not os.path.isdir(args.tests_dir):
-        print(f"[ERROR] The tests folder {args.tests_dir} does not exist")
-        sys.exit(2)
+        print(f"[ERROR] Folder not found: {args.tests_dir}", file=sys.stderr)
+        return 2
 
     plan = build_plan(table, config_ids, args.tests_dir, override_tests)
-    total_runs = print_plan(plan, table, all_tests)
+    total_runs = print_plan(plan, all_tests)
 
-    if args.list:
-        print("[INFO] Listing only, nothing run.")
+    if args.dry_run:
+        print("[INFO] Dry run, nothing executed.")
         return 0
     if not total_runs:
-        print("[ERROR] Nothing to run.")
-        sys.exit(2)
+        print("[ERROR] Nothing to run.", file=sys.stderr)
+        return 2
 
-    runner = find_runner()
-    results_dir = driver_results_dir()
+    results_dir = driver_results_dir(root)
     live_pkg = args.live_config_pkg
     if not os.path.isfile(live_pkg):
-        print(f"[ERROR] The live config package {live_pkg} does not exist")
-        sys.exit(2)
+        print(f"[ERROR] The live config package {live_pkg} does not exist",
+              file=sys.stderr)
+        return 2
     os.makedirs(args.out_dir, exist_ok=True)
 
+    # A copy on disk as well as in memory, so a sweep killed before it can
+    # restore leaves the production package for the next sweep to put back.
+    backup = live_pkg + BACKUP_SUFFIX
+    if os.path.isfile(backup):
+        shutil.copyfile(backup, live_pkg)
+        print(f"[WARN] {backup} was left by a sweep that was killed, so "
+              f"{live_pkg} has been put back from it first.")
     with open(live_pkg) as f:
         original_live = f.read()
+    shutil.copyfile(live_pkg, backup)
     print(f"\n[INFO] Backed up {live_pkg}, restored when the sweep ends.")
+    # A plain kill runs the restore too. Only SIGKILL skips it.
+    signal.signal(signal.SIGTERM, lambda signum, frame: sys.exit(128 + signum))
 
     results = []
+    used_folders = set()
     sweep_start = time.time()
+    test_name = None
 
     try:
         for config_id, cfg_name, description, paths in plan:
@@ -592,13 +711,12 @@ def main():
                 clear_stale_outputs(results_dir, test_name)
 
                 # The sweep discards the simulation tree itself, so the
-                # driver must not carry it off to results/ first.
+                # driver must not carry it off to results/ first. The root is
+                # always passed, so the driver writes where this collects.
                 cmd = [sys.executable, runner, args.target, path,
-                       "--no-keep-sim-output"]
+                       "--no-keep-sim-output", "--cva6-root", root]
                 if args.suite:
                     cmd.extend(["--suite", args.suite])
-                if args.cva6_root:
-                    cmd.extend(["--cva6-root", args.cva6_root])
                 if args.no_vcd:
                     cmd.append("--no-vcd")
                 # The RTL changed with the configuration, so the first test
@@ -607,28 +725,38 @@ def main():
                     cmd.append("--keep-build")
 
                 start = time.time()
-                code = subprocess.run(cmd).returncode
+                try:
+                    code = subprocess.run(cmd).returncode
+                except KeyboardInterrupt:
+                    # A failure with the shell's code for an interrupt, so its
+                    # output and the dated folders are kept, as in the batch.
+                    results.append((config_id, test_name, 130,
+                                    time.time() - start))
+                    raise
                 elapsed = time.time() - start
 
                 if code != 0:
                     # Leave the outputs in place: they are what there is to
                     # debug with.
+                    where = run_output_dirs(root, test_name)
                     print(f"\n[WARN] '{test_name}' failed with exit code "
-                          f"{code}. Its output is left in place, including "
-                          f"{os.path.join(sim_output_dir(), test_name + '_run.log')}"
-                          f". Continuing with the rest.")
+                          f"{code}. Its output is left in place, in "
+                          f"{', '.join(where) or 'verif/sim'}. Continuing "
+                          f"with the rest.")
                 else:
                     collect(results_dir, test_name, config_id, args.out_dir,
                             not args.no_vcd)
-                    discard_run(results_dir, test_name,
-                                args.target)
+                    used_folders.update(discard_run(
+                        root, results_dir, test_name, args.target))
                 results.append((config_id, test_name, code, elapsed))
 
     except KeyboardInterrupt:
-        print("\n[WARN] Interrupted. Stopping the sweep.")
+        during = f" during '{test_name}'" if test_name else ""
+        print(f"\n[WARN] Interrupted{during}. Stopping the sweep.")
     finally:
         with open(live_pkg, "w") as f:
             f.write(original_live)
+        os.remove(backup)
         print(f"\n[INFO] Restored {live_pkg}")
 
     failed = print_summary(results, time.time() - sweep_start)
@@ -641,7 +769,7 @@ def main():
           os.path.join(out_dir, f"{name}_report.config{cid}.txt"))
          for cid, name, code, _ in results if code == 0],
         [f"Target    : {args.target}",
-         f"CVA6 root : {args.cva6_root or '(run_CVA6.py default)'}",
+         f"CVA6 root : {root}",
          f"Suite     : {args.suite or '(run_CVA6.py default)'}",
          f"Tests dir : {os.path.abspath(args.tests_dir)}",
          f"Runs      : {len(results)}, {len(results) - failed} passed"],
@@ -650,10 +778,10 @@ def main():
     print(f"[INFO] Results in {out_dir}")
     if failed:
         print(f"[INFO] The failed run(s) left their output under "
-              f"{sim_output_dir()}")
+              f"{os.path.join(root, 'verif', 'sim')}")
     else:
-        # Nothing in there is worth keeping now, so take the tree with it.
-        discard_sim_tree()
+        # Nothing in those is worth keeping now, so take the trees with it.
+        discard_sim_trees(used_folders)
     return 1 if failed else 0
 
 
