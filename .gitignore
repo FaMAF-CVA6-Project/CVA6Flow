@@ -5,9 +5,14 @@
 # Python
 __pycache__
 
-# Testing: VCDs, listings, JSONs and samples are generated, never committed
-tests/*
-!tests/README.md
+# Testing: VCDs and listings are never committed
+*.vcd
+*.fst
+*.list
+
+# A tracer JSON in tests/ is what a sample is made from, not content: the
+# samples themselves, the .sample.js files and samples.js, are committed.
+tests/*.json
 
 # make_CVA6Flow_oversized.py output, with the side files of a write it
 # did not finish
