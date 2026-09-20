@@ -4,6 +4,8 @@ Tracer JSONs, and the sample JSONs the viewer's Load sample button offers.
 
 Only this file is committed, and it is kept so the folder exists in a fresh clone. VCDs run to gigabytes and their JSONs to hundreds of megabytes, so everything else here is generated, samples included.
 
+The FaMAF CVA6 Project, which this viewer was written for, fills this folder while it builds its CVA6 image: a full sample of every program in `benchmarks/` whose run fits the 500,000 records the page renders at once, written with `-n 0` so each one is a whole run. In a clone the folder is empty until the samples are made, and the Load sample button appears only once `samples.js` lists one.
+
 ## What lands here
 
 | File                                                   | Made by                                                                                                                                                                                       |
