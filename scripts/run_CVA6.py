@@ -1,83 +1,91 @@
 #!/usr/bin/env python3
+"""Run a CVA6 Verilator simulation and consolidate the metrics.
+
+Accepts both C (.c) and assembly (.S/.s/.asm/.sx) tests. The input type is
+detected from the extension and can be forced with --lang. The overhead
+table subtracted comes from the .overhead_suite beside the test, or --suite:
+
+    python3 scripts/run_CVA6.py benchmarks/daxpy.S
 """
-Run a CVA6 Verilator simulation and extract the metrics.
-Accepts both C (.c) and assembly (.S/.s/.asm) tests. The input type is
-detected from the extension and can be forced with --lang.
-"""
+import argparse
+import ast
+import datetime
+import glob
+import operator
 import os
 import re
-import ast
-import sys
-import glob
 import shlex
 import shutil
-import operator
-import argparse
-import datetime
 import subprocess
+import sys
 
 # The target the overhead tables below were measured on, and the one the
 # calibration runs against.
 DEFAULT_TARGET = "cv64a6_imafdc_sv39_hpdcache_wb"
 
-# ==============================================================================
+# =============================================================================
 # OVERHEAD PROFILES (DEFAULT_TARGET)
-# ==============================================================================
-# Scaffolding around the measured region, subtracted to get NET. Indexed by
-# suite and language. 'config' is the set in benchmarks/CVA6/, 'viewer' the
-# viewer's own set: different templates, so they are not interchangeable.
+# =============================================================================
+# Scaffolding around the measured region, subtracted to get NET. 'config' is
+# the fork's gem5_config_CVA6/CVA6/benchmarks/, 'viewer' this repository's
+# benchmarks/. Their templates differ, so the tables are not interchangeable.
 OVERHEAD_SUITES = {
     "config": {
         "c": {
             'x18': 180,  # Cycles
             'x19': 33,   # Instructions
-            'x20': 9,    # I-Cache misses
-            'x21': 8,    # D-Cache misses
-            'x22': 62,   # I-Cache accesses
-            'x23': 32,   # D-Cache accesses
+            'x20': 9,    # I-cache misses
+            'x21': 8,    # D-cache misses
+            'x22': 62,   # I-cache accesses
+            'x23': 32,   # D-cache accesses
             'x24': 1,    # Branches
-            'x25': 0,    # Branch mispredicts + unpredicted
+            'x25': 0,    # Mispredicts + unpredicted
         },
         "asm": {
             'x18': 40,   # Cycles
             'x19': 18,   # Instructions
-            'x20': 4,    # I-Cache misses
-            'x21': 0,    # D-Cache misses
-            'x22': 40,   # I-Cache accesses
-            'x23': 9,    # D-Cache accesses
+            'x20': 4,    # I-cache misses
+            'x21': 0,    # D-cache misses
+            'x22': 40,   # I-cache accesses
+            'x23': 9,    # D-cache accesses
             'x24': 1,    # Branches
-            'x25': 0,    # Branch mispredicts + unpredicted
+            'x25': 0,    # Mispredicts + unpredicted
         },
     },
     "viewer": {
         "c": {
             'x18': 183,  # Cycles
             'x19': 32,   # Instructions
-            'x20': 8,    # I-Cache misses
-            'x21': 8,    # D-Cache misses
-            'x22': 56,   # I-Cache accesses
-            'x23': 32,   # D-Cache accesses
+            'x20': 8,    # I-cache misses
+            'x21': 8,    # D-cache misses
+            'x22': 56,   # I-cache accesses
+            'x23': 32,   # D-cache accesses
             'x24': 0,    # Branches
-            'x25': 0,    # Branch mispredicts + unpredicted
+            'x25': 0,    # Mispredicts + unpredicted
         },
         "asm": {
             'x18': 40,   # Cycles
             'x19': 17,   # Instructions
-            'x20': 3,    # I-Cache misses
-            'x21': 0,    # D-Cache misses
-            'x22': 34,   # I-Cache accesses
-            'x23': 9,    # D-Cache accesses
+            'x20': 3,    # I-cache misses
+            'x21': 0,    # D-cache misses
+            'x22': 34,   # I-cache accesses
+            'x23': 9,    # D-cache accesses
             'x24': 0,    # Branches
-            'x25': 0,    # Branch mispredicts + unpredicted
+            'x25': 0,    # Mispredicts + unpredicted
         },
     },
 }
 
 
 # A one-line file in a benchmark directory naming the overhead suite its
-# programs belong to, so the suite travels with them into the Docker images
-# rather than being guessed. The gem5 driver uses the same marker and rules.
+# programs belong to, so the suite travels with them into the Docker images.
+# The gem5 driver uses the same marker and rules.
 SUITE_MARKER = ".overhead_suite"
+
+
+# SHARED BEGIN py-suite-marker
+
+# Needs: os, SUITE_MARKER, OVERHEAD_SUITES
 
 
 def read_suite_marker(src_file):
@@ -107,51 +115,35 @@ def read_suite_marker(src_file):
         d = parent
     return None
 
+# SHARED END py-suite-marker
 
-def default_suite(src_file=None):
-    """Which overhead table to subtract, decided by where the test came from.
 
-    The suite decides which fixed instrumentation overhead is subtracted from
-    every reported cycle count, so getting it wrong moves every number in the
-    table. The path heuristics below are the fallback for a tree with no
-    marker."""
+def default_suite(src_file):
+    """The suite the .overhead_suite beside the test names, or None after
+    saying why. The suite decides what is subtracted from every reported
+    cycle count, so it is never guessed from a path."""
     named = read_suite_marker(src_file)
-    if named:
-        return named
-    guess = None
-    if src_file:
-        parts = os.path.abspath(src_file).split(os.sep)
-        if "gem5_config_CVA6" in parts:
-            guess = "config"
-        elif "CVA6Flow" in parts:
-            guess = "viewer"
-    if guess is None:
-        here = os.path.dirname(os.path.abspath(__file__))
-        for base in (here, os.path.dirname(here)):
-            if os.path.isfile(os.path.join(base, "CVA6Flow.html")):
-                guess = "viewer"
-                break
-    if guess is None:
-        guess = "config"
-    print(f"[WARN] No {SUITE_MARKER} beside the test, so the overhead table "
-          f"was inferred as '{guess}' from the path. This decides what is "
-          f"subtracted from every cycle count: pass --suite to say which one, "
-          f"or drop a {SUITE_MARKER} file naming it beside the benchmarks.")
-    return guess
+    if named is None:
+        choices = " or --suite ".join(sorted(OVERHEAD_SUITES))
+        print(f"[ERROR] No {SUITE_MARKER} beside {src_file} or in the two "
+              f"folders above it, so the overhead table to subtract is "
+              f"unknown. Pass --suite {choices}, or add a {SUITE_MARKER} "
+              f"file naming one beside the benchmarks.", file=sys.stderr)
+    return named
 
 
-# ==============================================================================
+# =============================================================================
 # CONFIGURATION
-# ==============================================================================
+# =============================================================================
 METRICS_MAP = {
     'x18': 'Cycles',                # s2
     'x19': 'Instructions',          # s3
-    'x20': 'I-Cache Misses',        # s4
-    'x21': 'D-Cache Misses',        # s5
-    'x22': 'I-Cache Accesses',      # s6
-    'x23': 'D-Cache Accesses',      # s7
+    'x20': 'I-cache misses',        # s4
+    'x21': 'D-cache misses',        # s5
+    'x22': 'I-cache accesses',      # s6
+    'x23': 'D-cache accesses',      # s7
     'x24': 'Branches',              # s8
-    'x25': 'Branch Miss + Unpred',  # s9
+    'x25': 'Mispredicts + unpredicted',  # s9
     'x26': 'Time (us)'              # s10
 }
 
@@ -185,7 +177,6 @@ ASM_EXTS = {".s", ".asm", ".sx"}
 # The _report.txt holds two sections: the measured region of the disassembly,
 # then the metrics table.
 RULE = "=" * 70
-METRICS_MARKER = "RESULTS TABLE"
 CODE_BANNER = [RULE, "DISASSEMBLED CODE", RULE]
 CODE_END_BANNER = [RULE, "END OF DISASSEMBLED CODE", RULE]
 
@@ -206,20 +197,21 @@ def print_log_tail(path, lines=ERROR_TAIL_LINES):
     if not content:
         print("[ERROR] The simulation produced no output at all, so it "
               "failed before it started. Check the target and the "
-              "environment.")
+              "environment.", file=sys.stderr)
         return
 
     shown = content[-lines:]
     if len(content) > len(shown):
-        print(f"[ERROR] --- last {len(shown)} of {len(content)} log lines ---")
+        print(f"[ERROR] --- last {len(shown)} of {len(content)} log lines ---",
+              file=sys.stderr)
     else:
-        print(f"[ERROR] --- log ({len(content)} line(s)) ---")
+        print(f"[ERROR] --- log ({len(content)} line(s)) ---", file=sys.stderr)
     for line in shown:
-        print(f"  {line}")
+        print(f"  {line}", file=sys.stderr)
 
 
 def format_cache_size(value):
-    """Render a cache size as KiB/MiB from a byte count."""
+    """Render a cache size as KiB or MiB, from a byte count."""
     text = str(value).strip()
     if not text.isdigit():
         return text or "?"
@@ -244,7 +236,7 @@ def read_cpu_freq(src_path):
             text = f.read()
     except OSError as e:
         print(f"[WARN] Could not read {src_path}: {e}. The time is reported "
-              f"as the counter left it")
+              f"as the counter left it.")
         return None
 
     for pattern in FREQ_PATTERNS:
@@ -253,7 +245,7 @@ def read_cpu_freq(src_path):
             return int(match.group(1))
 
     print(f"[WARN] No CPU_FREQ in {os.path.basename(src_path)}. The time is "
-          f"reported as the counter left it")
+          f"reported as the counter left it.")
     return None
 
 
@@ -450,7 +442,7 @@ def build_table_header(engine, core, program, geometry, build=""):
     long enough to push a single title past the width of the table.
     """
     parts = [f"RESULTS TABLE {engine} {program}"]
-    for name, label in (("icache", "ICache"), ("dcache", "DCache")):
+    for name, label in (("icache", "I-cache"), ("dcache", "D-cache")):
         cache = geometry.get(name) or {}
         size = format_cache_size(cache.get("size") or "")
         assoc = cache.get("assoc") or "?"
@@ -521,115 +513,104 @@ def find_objdump():
     return None
 
 
-def generate_and_show_codelist(binary_path, codelist):
-    """
-    Generate the .list file with objdump and print the filtered CODE section.
-    Returns the path of the report file for later writing.
-    """
-    if not os.path.exists(binary_path):
-        print(f"[ERROR] Binary to disassemble not found: {binary_path}")
-        return None
-
-    list_path = os.path.splitext(binary_path)[0] + ".list"
-    report_path = os.path.splitext(binary_path)[0] + "_report.txt"
-
+def write_listing(binary_path, list_path):
+    """objdump -d -S -l of the binary into list_path. True on success."""
     objdump = find_objdump()
     if objdump is None:
-        print("[ERROR] No RISC-V objdump found. Tried: "
-              + ", ".join(OBJDUMPS))
-        return None
-    cmd = f"{objdump} -d -S -l {binary_path}"
-
+        print("[ERROR] No RISC-V objdump found. Tried: " + ", ".join(OBJDUMPS),
+              file=sys.stderr)
+        return False
     print(f"\n[INFO] Generating disassembled code in: {list_path}")
     try:
         with open(list_path, "w") as f:
-            subprocess.run(shlex.split(cmd), stdout=f, check=True)
+            subprocess.run([objdump, "-d", "-S", "-l", binary_path],
+                           stdout=f, check=True)
     except subprocess.CalledProcessError as e:
-        print(f"[ERROR] {e}")
-        return None
-    except FileNotFoundError:
-        print(f"[ERROR] '{objdump}' not found")
-        return None
+        print(f"[ERROR] {e}", file=sys.stderr)
+        return False
+    except OSError as e:
+        print(f"[ERROR] Could not run {objdump}: {e}", file=sys.stderr)
+        return False
+    return True
 
-    # Filtered view, written to the report rather than echoed.
 
-    def core_phrase(marker):
-        return re.sub(r'\s+', ' ', marker.lstrip('#/ \t').strip())
+def marker_phrases(markers):
+    """The words of each marker comment, without its comment characters."""
+    if not isinstance(markers, (list, tuple)):
+        markers = [markers]
+    return [re.sub(r"\s+", " ", m.lstrip("#/ \t").strip()) for m in markers]
 
-    def as_list(v):
-        return v if isinstance(v, (list, tuple)) else [v]
 
-    start_cores = [core_phrase(m) for m in as_list(codelist["start"])]
-    end_cores = [core_phrase(m) for m in as_list(codelist["end"])]
+def first_hit(line, phrases):
+    norm = re.sub(r"\s+", " ", line).strip()
+    for phrase in phrases:
+        if phrase and phrase in norm:
+            return phrase
+    return None
 
-    def first_hit(line, phrases):
-        norm = re.sub(r'\s+', ' ', line).strip()
-        for p in phrases:
-            if p and p in norm:
-                return p
-        return None
 
-    printing = False
-    found_start = False
-    end_line_no = None
-    kept = 0
-
-    try:
-        with open(list_path, "r") as f:
-            lines = f.readlines()
-
-        with open(report_path, "w") as f_report:
-            f_report.write("\n".join(CODE_BANNER) + "\n")
-            written = "\n"
-            for idx, line in enumerate(lines, 1):
-                if printing:
-                    eh = first_hit(line, end_cores)
-                    if eh:
-                        end_line_no = idx
-                        printing = False
-                        break
-
-                if not found_start:
-                    sh = first_hit(line, start_cores)
-                    if sh and not first_hit(line, end_cores):
-                        printing = True
-                        found_start = True
-                        continue
-
-                if printing:
-                    if codelist["strip_dash_rule"] and re.search(r'#\s*-{5,}', line):
-                        continue
-
-                    if line.strip().startswith('/'):
-                        if codelist["keep_discriminator"] and "(discriminator" in line:
-                            f_report.write(line)
-                            written = line
-                            kept += 1
-                            continue
-                        else:
-                            continue
-
-                    f_report.write(line)
-                    written = line
-                    kept += 1
-
-            if not written.endswith("\n"):
-                f_report.write("\n")
-            f_report.write("\n".join(CODE_END_BANNER) + "\n")
-
+def region_lines(lines, codelist):
+    """The listing lines between the start and end markers, as the report
+    keeps them, and whether each marker was found."""
+    start_phrases = marker_phrases(codelist["start"])
+    end_phrases = marker_phrases(codelist["end"])
+    kept = []
+    printing = found_start = found_end = False
+    for line in lines:
+        if printing and first_hit(line, end_phrases):
+            found_end = True
+            break
         if not found_start:
-            print(f"[WARN] No start marker found (searched {start_cores!r}), "
-                  f"so no program body was extracted. Check that the source "
-                  f"uses one of these as a comment line.")
-        elif end_line_no is None:
-            print(f"[WARN] No end marker found after the start (searched "
-                  f"{end_cores!r}). Written through end of file.")
+            if (first_hit(line, start_phrases)
+                    and not first_hit(line, end_phrases)):
+                printing = found_start = True
+            continue
+        if (codelist["strip_dash_rule"]
+                and re.search(r"#\s*-{5,}", line)):
+            continue
+        # Source lines objdump -S interleaves start with a path. A C test
+        # keeps the discriminator lines, which say which loop a block is.
+        if line.strip().startswith("/") and not (
+                codelist["keep_discriminator"] and "(discriminator" in line):
+            continue
+        kept.append(line)
+    return kept, found_start, found_end
 
-    except Exception as e:
-        print(f"[ERROR] {e}")
+
+def generate_codelist(binary_path, codelist):
+    """Write the .list with objdump and the measured region of it to the
+    _report.txt. Returns the report path, or None on failure."""
+    if not os.path.exists(binary_path):
+        print(f"[ERROR] Binary to disassemble not found: {binary_path}",
+              file=sys.stderr)
         return None
-
-    print(f"[INFO] Disassembly ({kept} lines) saved in: {report_path}")
+    list_path = os.path.splitext(binary_path)[0] + ".list"
+    report_path = os.path.splitext(binary_path)[0] + "_report.txt"
+    if not write_listing(binary_path, list_path):
+        return None
+    try:
+        with open(list_path) as f:
+            kept, found_start, found_end = region_lines(f.readlines(),
+                                                        codelist)
+        with open(report_path, "w") as report:
+            report.write("\n".join(CODE_BANNER) + "\n")
+            report.writelines(kept)
+            if kept and not kept[-1].endswith("\n"):
+                report.write("\n")
+            report.write("\n".join(CODE_END_BANNER) + "\n")
+    except OSError as e:
+        print(f"[ERROR] {e}", file=sys.stderr)
+        return None
+    if not found_start:
+        print(f"[WARN] No start marker found (searched "
+              f"{marker_phrases(codelist['start'])!r}), so no program body "
+              f"was extracted. Check that the source uses one of these as a "
+              f"comment line.")
+    elif not found_end:
+        print(f"[WARN] No end marker found after the start (searched "
+              f"{marker_phrases(codelist['end'])!r}). Written through the end "
+              f"of the file.")
+    print(f"[INFO] Disassembly ({len(kept)} lines) saved in: {report_path}")
     return report_path
 
 
@@ -663,9 +644,10 @@ def keep_sim_output(sim_dir, out_name, base):
 
 
 def collect_results(test_name, vcd_path, list_path, report_path, base):
-    """Copy the three files worth keeping into results/run/. The VCD is what
-    the viewer renders, the .list the listing its tracer needs, and the
-    _report.txt the measured region plus the metrics table."""
+    """Gather the three files worth keeping in results/run/. The VCD is what
+    the tracer reads, the .list the listing it needs, and the _report.txt
+    the measured region plus the metrics table. The VCD is moved, not copied,
+    since it can run to tens of GiB and a copy would need that much again."""
     results_dir = os.path.join(base, RESULTS_DIR)
     try:
         os.makedirs(results_dir, exist_ok=True)
@@ -673,26 +655,33 @@ def collect_results(test_name, vcd_path, list_path, report_path, base):
         print(f"[WARN] Could not create {results_dir}: {e}")
         return
 
-    copied = []
-    for source, name in ((vcd_path, f"{test_name}.vcd"),
-                         (list_path, f"{test_name}.list"),
-                         (report_path, f"{test_name}_report.txt")):
-        # With --no-vcd there is no VCD to copy, so a missing source here is
+    moved, copied = [], []
+    for source, name, move in ((vcd_path, f"{test_name}.vcd", True),
+                               (list_path, f"{test_name}.list", False),
+                               (report_path, f"{test_name}_report.txt",
+                                False)):
+        # With --no-vcd there is no VCD to gather, so a missing source here is
         # expected rather than a problem.
         if not source or not os.path.isfile(source):
             continue
+        target = os.path.join(results_dir, name)
         try:
-            shutil.copy2(source, os.path.join(results_dir, name))
-            copied.append(name)
+            if move:
+                shutil.move(source, target)
+                moved.append(name)
+            else:
+                shutil.copy2(source, target)
+                copied.append(name)
         except OSError as e:
-            print(f"[WARN] Could not copy {source}: {e}")
+            print(f"[WARN] Could not gather {source}: {e}")
 
+    if moved:
+        print(f"[INFO] Moved to {results_dir}: {', '.join(moved)}")
     if copied:
         print(f"[INFO] Copied to {results_dir}: {', '.join(copied)}")
 
 
-def main():
-    # Parse arguments
+def build_parser():
     parser = argparse.ArgumentParser(
         description="Run a CVA6 test (C or assembly) and extract metrics.")
     parser.add_argument("target", nargs="?", default=DEFAULT_TARGET,
@@ -700,8 +689,8 @@ def main():
                              f"{DEFAULT_TARGET}, the one the overhead tables "
                              f"were measured on")
     parser.add_argument("src_file",
-                        help="Path to the test: C (.c) or assembly (.S/.s/.asm), "
-                             "relative or absolute")
+                        help="Path to the test: C (.c) or assembly "
+                             "(.S/.s/.asm/.sx), relative or absolute")
     parser.add_argument("--cva6-root", default=None, metavar="DIR",
                         help="The CVA6 checkout to run: the one holding "
                              "verif/sim. Defaults to /CVA6 inside the "
@@ -709,49 +698,39 @@ def main():
                              "in when that does not exist")
     parser.add_argument("--suite", choices=sorted(OVERHEAD_SUITES),
                         default=None,
-                        help="Which overhead table to subtract. 'config' is "
-                             "the calibration benchmarks, 'viewer' the "
-                             "CVA6Flow development set. Defaults to "
-                             "the folder the test came from")
-    parser.add_argument("--lang", choices=["c", "asm"], default="auto",
-                        help="Force the input type and overhead/filter profile. "
-                             "Defaults to detection by extension.")
+                        help=f"Which overhead table to subtract. 'config' is "
+                             f"the calibration benchmarks, 'viewer' the "
+                             f"CVA6Flow development set. Defaults to the "
+                             f"{SUITE_MARKER} file beside the test or up to "
+                             f"two folders above it, and the run stops "
+                             f"without either")
+    parser.add_argument("--lang", choices=["auto", "c", "asm"],
+                        default="auto",
+                        help="Force the input type, which selects both the "
+                             "overhead profile and the disassembly markers. "
+                             "Defaults to auto, detection by extension")
     parser.add_argument("--no-keep-sim-output", action="store_true",
                         help="Leave out_<date>/ in verif/sim instead of "
                              "moving it under results/verif/ at the end. The "
                              "batch and the sweep pass this, since they "
                              "discard the tree themselves")
     parser.add_argument("--no-vcd", action="store_true",
-                        help="Do not generate the VCD")
+                        help="Do not write the VCD, and report metrics only")
     parser.add_argument("--keep-build", action="store_true",
                         help="Reuse the existing work-ver Verilator build "
                              "instead of deleting it first. The model does "
                              "not depend on the test, so this saves a full "
                              "rebuild per run. Use it only when the target "
                              "and the VCD setting are unchanged since the "
-                             "build was made.")
-    args = parser.parse_args()
-    # Resolved here rather than as an argparse default: it
-    # reads the test's path, which is not known until now.
-    if args.suite is None:
-        args.suite = default_suite(args.src_file)
+                             "build was made")
+    return parser
 
-    # Directory configuration.
-    cva6_root = args.cva6_root or ("/CVA6" if os.path.isdir("/CVA6")
-                                   else repo_checkout())
-    if not os.path.isdir(os.path.join(cva6_root, "verif", "sim")):
-        print(f"[ERROR] '{cva6_root}' does not look like a CVA6 checkout: no "
-              f"verif/sim inside it. Point --cva6-root at one.")
-        sys.exit(1)
-    print(f"[INFO] CVA6 root: {cva6_root}")
-    sim_dir = os.path.join(cva6_root, "verif/sim")
-    setup_script = os.path.join(sim_dir, "setup-env.sh")
 
-    # Verilator build folder. It is removed to force a full recompilation,
-    # unless the caller asked to reuse it
+def prepare_build(cva6_root, keep_build):
+    """Delete the Verilator build folder, forcing a full recompilation,
+    unless the caller asked to reuse it."""
     work_ver_path = os.path.join(cva6_root, "work-ver")
-
-    if args.keep_build:
+    if keep_build:
         if os.path.isdir(work_ver_path):
             print(f"[INFO] Reusing the Verilator build in {work_ver_path}")
     elif os.path.exists(work_ver_path):
@@ -760,57 +739,12 @@ def main():
         except OSError as e:
             print(f"[WARN] {e}")
 
-    # Validate the source file exists
-    abs_src_path = os.path.abspath(args.src_file)
-    if not os.path.exists(abs_src_path):
-        print(f"[ERROR] The file {abs_src_path} does not exist")
-        pkg = os.path.join(cva6_root, "core", "include",
-                           f"{args.src_file}_config_pkg.sv")
-        if os.path.isfile(pkg):
-            print(f"[ERROR] '{args.src_file}' is a target, not a test. The "
-                  f"test is the last argument, and the target before it can "
-                  f"be left out to get {DEFAULT_TARGET}.")
-        sys.exit(1)
 
-    lang = detect_lang(abs_src_path, args.lang)
-    overhead = OVERHEAD_SUITES[args.suite][lang]
-    print(f"[INFO] Overhead table: {args.suite}/{lang}")
-    codelist = CODELIST_PROFILES[lang]
-
-    rel_src_path = os.path.relpath(abs_src_path, sim_dir)
-    test_name = os.path.splitext(os.path.basename(abs_src_path))[0]
-
-    # Prepare environment
-    env = os.environ.copy()
-    env["PYTHONDONTWRITEBYTECODE"] = "1"
-    # cva6.py drives the flow, and its stdout is block-buffered once it is a
-    # file rather than a terminal, which would land its output in the log well
-    # after the unbuffered stderr it belongs next to.
-    env["PYTHONUNBUFFERED"] = "1"
-    env["DV_SIMULATORS"] = "veri-testharness"
-
-    # Output paths
-    today = datetime.date.today().strftime("%Y-%m-%d")
-    log_dir_prediction = os.path.join(
-        sim_dir, f"out_{today}", "veri-testharness_sim")
-    binary_dir_compilation = os.path.join(
-        sim_dir, f"out_{today}", "directed_tests")
-
-    log_main = f"{test_name}.{args.target}.log"
-    log_iss = f"{test_name}.{args.target}.log.iss"
-
-    # Clean previous logs
-    files_to_clean = [log_main, log_iss]
-    for fname in files_to_clean:
-        fpath = os.path.join(log_dir_prediction, fname)
-        if os.path.exists(fpath):
-            try:
-                os.remove(fpath)
-            except OSError:
-                pass
-
-    # VCD / TRACE_FAST flag handling
+def simulation_command(args, lang, rel_src_path, setup_script, env):
+    """The bash command that sources the flow's environment and runs cva6.py
+    on the test. The test flag is the only per-language difference."""
     if args.no_vcd:
+        # Both emptied, so cva6.py writes neither a .vcd nor an .fst.
         env["TRACE_FAST"] = ""
         env["TRACE_COMPACT"] = ""
         trace_injection = "export TRACE_FAST= && export TRACE_COMPACT= &&"
@@ -818,10 +752,8 @@ def main():
     else:
         env["TRACE_FAST"] = "1"
         trace_injection = "export TRACE_FAST=1 &&"
-
-    # Build command. The only per-language difference is the test flag.
     test_flag = "--c_tests" if lang == "c" else "--asm_tests"
-    py_cmd_list = [
+    py_cmd = shlex.join([
         "python3", "cva6.py",
         "--target", args.target,
         f"--iss={env['DV_SIMULATORS']}",
@@ -832,206 +764,225 @@ def main():
         "-nostartfiles -g ../tests/custom/common/syscalls.c "
         "../tests/custom/common/crt.S -lgcc -I../tests/custom/env "
         "-I../tests/custom/common"
-    ]
+    ])
+    return f"source {shlex.quote(setup_script)} && {trace_injection} {py_cmd}"
 
-    py_cmd_str = shlex.join(py_cmd_list)
-    final_shell_cmd = f"source {setup_script} && {trace_injection} {py_cmd_str}"
+
+def run_simulation(command, sim_dir, sim_out_dir, run_log, env):
+    """Run the simulation with both streams in run_log, printing its tail
+    when it fails. True on success."""
+    try:
+        os.makedirs(sim_out_dir, exist_ok=True)
+        with open(run_log, "w") as log:
+            subprocess.run(command, cwd=sim_dir, check=True, env=env,
+                           stdout=log, stderr=subprocess.STDOUT, shell=True,
+                           executable="/bin/bash")
+    except subprocess.CalledProcessError as e:
+        print(f"[ERROR] The simulation failed with exit code {e.returncode}",
+              file=sys.stderr)
+        print_log_tail(run_log)
+        print(f"[ERROR] Full output: {run_log}", file=sys.stderr)
+        return False
+    except OSError as e:
+        print(f"[ERROR] Could not run the simulation: {e}", file=sys.stderr)
+        return False
+    return True
+
+
+def read_register_values(log_path):
+    """The metric registers the test left in the simulation log, the last
+    occurrence of each, or None when the log cannot be read."""
+    values = {}
+    try:
+        with open(log_path) as f:
+            for line in f:
+                match = re.search(r"x\s*(\d+)\s+(0x[0-9a-fA-F]+)", line)
+                if match and f"x{match.group(1)}" in METRICS_MAP:
+                    values[f"x{match.group(1)}"] = int(match.group(2), 16)
+    except OSError as e:
+        print(f"[ERROR] Could not read {log_path}: {e}", file=sys.stderr)
+        return None
+    return values
+
+
+def metrics_table(values, overhead, src_path, header):
+    """The boxed metrics table as lines, OFFICIAL and NET side by side, with
+    the clean result lists under it."""
+    raw_cycles = values.get("x18", 0)
+    net_cycles = max(0, raw_cycles - overhead.get("x18", 0))
+    raw_inst = values.get("x19", 0)
+    net_inst = max(0, raw_inst - overhead.get("x19", 0))
+    ipc_official = raw_inst / raw_cycles if raw_cycles else 0.0
+    ipc_corrected = net_inst / net_cycles if net_cycles else 0.0
+
+    # The test computes Time (us) as cycles * 1e6 / CPU_FREQ with an integer
+    # divide, so x26 arrives with the fraction cut off. The same division
+    # here, from the same constant, keeps it.
+    cpu_freq = read_cpu_freq(src_path)
+    time_us = net_time_us = None
+    if cpu_freq:
+        time_us = raw_cycles * 1_000_000 / cpu_freq
+        counter = values.get("x26", 0)
+        if counter and int(time_us) != int(counter):
+            print(f"[WARN] Time from cycles ({int(time_us)} us) disagrees "
+                  f"with the counter ({int(counter)} us). The counter is "
+                  f"reported. Check how the test computes it.")
+            time_us = None
+        else:
+            # The net time is the net cycles read through the same clock.
+            net_time_us = net_cycles * 1_000_000 / cpu_freq
+
+    width = max(70, max(len(line) for line in header))
+    lines = ["=" * width, *header, "=" * width,
+             f"{'METRIC':<25} | {'OFFICIAL':>15} | {'NET':>15}", "=" * width]
+    clean_official, clean_corrected = [], []
+    for key in ORDERED_KEYS:
+        official = values.get(key, 0)
+        corrected = max(0, official - overhead.get(key, 0))
+        if key == "x26":
+            if time_us is not None:
+                official, corrected = time_us, net_time_us
+            else:
+                corrected = (official * net_cycles / raw_cycles
+                             if raw_cycles else 0)
+        # round() leaves a count alone and only bites on the one metric that
+        # carries a fraction.
+        clean_official.append(round(official, 4))
+        clean_corrected.append(round(corrected, 4))
+        lines.append(f"{METRICS_MAP[key]:<25} | "
+                     f"{format_metric(official):>15} | "
+                     f"{format_metric(corrected):>15}")
+    lines.append(f"{'IPC':<25} | {format_metric(ipc_official):>15} | "
+                 f"{format_metric(ipc_corrected):>15}")
+    clean_official.append(round(ipc_official, 4))
+    clean_corrected.append(round(ipc_corrected, 4))
+    lines.append("=" * width)
+    lines.append(f"\nClean result (OFFICIAL):  {clean_official}")
+    lines.append(f"Clean result (NET):       {clean_corrected}\n")
+    return lines
+
+
+def append_to_report(report_path, lines):
+    if not report_path or not os.path.exists(report_path):
+        return
+    try:
+        with open(report_path, "a") as report:
+            report.write("\n")
+            for line in lines:
+                report.write(line + "\n")
+    except OSError as e:
+        print(f"[WARN] Could not save the metrics to the file: {e}")
+        return
+    print(f"[INFO] Metrics successfully consolidated in: {report_path}")
+
+
+def main():
+    args = build_parser().parse_args()
+    cva6_root = args.cva6_root or ("/CVA6" if os.path.isdir("/CVA6")
+                                   else repo_checkout())
+    if not os.path.isdir(os.path.join(cva6_root, "verif", "sim")):
+        print(f"[ERROR] '{cva6_root}' does not look like a CVA6 checkout: no "
+              f"verif/sim inside it. Point --cva6-root at one.",
+              file=sys.stderr)
+        return 1
+    print(f"[INFO] CVA6 root: {cva6_root}")
+    sim_dir = os.path.join(cva6_root, "verif", "sim")
+    setup_script = os.path.join(sim_dir, "setup-env.sh")
+
+    abs_src_path = os.path.abspath(args.src_file)
+    if not os.path.exists(abs_src_path):
+        print(f"[ERROR] Test not found: {abs_src_path}", file=sys.stderr)
+        pkg = os.path.join(cva6_root, "core", "include",
+                           f"{args.src_file}_config_pkg.sv")
+        if os.path.isfile(pkg):
+            print(f"[ERROR] '{args.src_file}' is a target, not a test. The "
+                  f"test is the last argument, and the target before it can "
+                  f"be left out to get {DEFAULT_TARGET}.", file=sys.stderr)
+        return 1
+    # Resolved after parsing rather than as an argparse default, since it
+    # reads the test's path.
+    suite = args.suite or default_suite(abs_src_path)
+    if suite is None:
+        return 1
+    prepare_build(cva6_root, args.keep_build)
+
+    lang = detect_lang(abs_src_path, args.lang)
+    overhead = OVERHEAD_SUITES[suite][lang]
+    print(f"[INFO] Overhead table: {suite}/{lang}")
+    rel_src_path = os.path.relpath(abs_src_path, sim_dir)
+    test_name = os.path.splitext(os.path.basename(abs_src_path))[0]
+
+    env = os.environ.copy()
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    # cva6.py's stdout is block-buffered once it goes to a file, which would
+    # land its output in the log well after the stderr it belongs next to.
+    env["PYTHONUNBUFFERED"] = "1"
+    env["DV_SIMULATORS"] = "veri-testharness"
+
+    today = datetime.date.today().strftime("%Y-%m-%d")
+    log_main = f"{test_name}.{args.target}.log"
+    # A stale log from an earlier run today would otherwise be parsed if this
+    # run fails before writing its own.
+    for name in (log_main, log_main + ".iss"):
+        stale = os.path.join(sim_dir, f"out_{today}", "veri-testharness_sim",
+                             name)
+        if os.path.exists(stale):
+            try:
+                os.remove(stale)
+            except OSError:
+                pass
 
     # Both streams go to a log under out_<date>/ rather than the terminal,
     # and its tail is printed when the run fails. Merged, so an error sits
     # next to the step it interrupted.
     sim_out_dir = os.path.join(sim_dir, f"out_{today}")
     run_log = os.path.join(sim_out_dir, f"{test_name}_run.log")
-
-    ext_label = "c" if lang == "c" else "S"
+    command = simulation_command(args, lang, rel_src_path, setup_script, env)
     print(f"[INFO] Running Verilator simulation with "
-          f"'{test_name}.{ext_label}'")
+          f"'{os.path.basename(abs_src_path)}'")
     print(f"[INFO] The build is quiet. Everything it writes goes to "
           f"{run_log}\n")
-    try:
-        os.makedirs(sim_out_dir, exist_ok=True)
-        with open(run_log, "w") as log:
-            subprocess.run(
-                final_shell_cmd,
-                cwd=sim_dir,
-                check=True,
-                env=env,
-                stdout=log,
-                stderr=subprocess.STDOUT,
-                shell=True,
-                executable='/bin/bash'
-            )
-    except subprocess.CalledProcessError as e:
-        print(f"[ERROR] The simulation failed with exit code {e.returncode}")
-        print_log_tail(run_log)
-        print(f"[ERROR] Full output: {run_log}")
-        sys.exit(1)
-    except OSError as e:
-        print(f"[ERROR] Could not run the simulation: {e}")
-        sys.exit(1)
+    if not run_simulation(command, sim_dir, sim_out_dir, run_log, env):
+        return 1
 
     # The run is over, so the folder it actually wrote to is known.
     out_name = resolve_out_dir(
         sim_dir, f"out_{today}",
         os.path.join("veri-testharness_sim", log_main))
-    log_dir_prediction = os.path.join(sim_dir, out_name,
-                                      "veri-testharness_sim")
-    binary_dir_compilation = os.path.join(sim_dir, out_name, "directed_tests")
+    log_dir = os.path.join(sim_dir, out_name, "veri-testharness_sim")
+    binary_dir = os.path.join(sim_dir, out_name, "directed_tests")
 
-    # --------------------------------------------------------------------------
-    # GENERATE AND SHOW CODE
-    # --------------------------------------------------------------------------
-    binary_path = os.path.join(binary_dir_compilation, f"{test_name}.o")
-    report_path = generate_and_show_codelist(binary_path, codelist)
-
-    # --------------------------------------------------------------------------
-    # PARSE METRICS
-    # --------------------------------------------------------------------------
-    log_path = os.path.join(log_dir_prediction, log_main)
-
+    report_path = generate_codelist(
+        os.path.join(binary_dir, f"{test_name}.o"), CODELIST_PROFILES[lang])
+    log_path = os.path.join(log_dir, log_main)
     if not os.path.exists(log_path):
-        print(f"[ERROR] Simulation log not found: {log_path}")
-        sys.exit(1)
+        print(f"[ERROR] Simulation log not found: {log_path}",
+              file=sys.stderr)
+        return 1
+    values = read_register_values(log_path)
+    if values is None:
+        return 1
 
-    final_values = {}
-    try:
-        with open(log_path, 'r') as f:
-            for line in f:
-                # Match patterns: x<number> <hex>. If a register appears more
-                # than once, the last occurrence is kept.
-                match = re.search(r'x\s*(\d+)\s+(0x[0-9a-fA-F]+)', line)
-                if match:
-                    reg_key = f"x{match.group(1)}"
-                    if reg_key in METRICS_MAP:
-                        final_values[reg_key] = int(match.group(2), 16)
-    except Exception as e:
-        print(f"[ERROR] {e}")
-        sys.exit(1)
-
-    # --------------------------------------------------------------------------
-    # CALCULATIONS AND PRINTING
-    # --------------------------------------------------------------------------
     print("[INFO] Extracting statistics\n")
-
-    clean_official = []
-    clean_corrected = []
-
-    # Pre-compute corrected IPC
-    raw_inst = final_values.get('x19', 0)
-    ovh_inst = overhead.get('x19', 0)
-    net_inst = max(0, raw_inst - ovh_inst)
-
-    raw_cycles = final_values.get('x18', 1)  # avoid div by 0
-    ovh_cycles = overhead.get('x18', 0)
-    net_cycles = max(1, raw_cycles - ovh_cycles)
-
-    ipc_official = raw_inst / raw_cycles if raw_cycles > 0 else 0.0
-    ipc_corrected = net_inst / net_cycles if net_cycles > 0 else 0.0
-
-    # The test computes Time (us) as cycles * 1e6 / CPU_FREQ with an integer
-    # divide, so x26 arrives with the fraction already cut off. The same
-    # division here, from the same constant, keeps it.
-    cpu_freq = read_cpu_freq(abs_src_path)
-    time_us = None
-    if cpu_freq:
-        # Not raw_cycles: that one defaults to 1 to keep IPC out of a
-        # division by zero, and a run with no counters means no time.
-        time_us = final_values.get('x18', 0) * 1_000_000 / cpu_freq
-        counter = final_values.get('x26', 0)
-        if counter and int(time_us) != int(counter):
-            print(f"[WARN] Time from cycles ({int(time_us)} us) disagrees "
-                  f"with the counter ({int(counter)} us). The counter is "
-                  f"reported, check how the test computes it")
-            time_us = None
-
-    # The time is the cycle count read through the clock, so the net time is
-    # the net cycles read through the same clock.
-    net_time_us = None
-    if time_us is not None:
-        net_time_us = (max(0, final_values.get('x18', 0) - ovh_cycles)
-                       * 1_000_000 / cpu_freq)
-
     geometry = read_cache_geometry(cva6_root, args.target)
-    header = build_table_header("CVA6", args.target,
-                                os.path.basename(abs_src_path), geometry,
-                                f"{cva6_root}  (overhead: "
-                                f"{args.suite}/{lang})")
-    # The rule is widened when the title is longer, so the box never breaks.
-    width = max(70, max(len(line) for line in header))
-
-    output_buffer = []
-    output_buffer.append("=" * width)
-    output_buffer.extend(header)
-    output_buffer.append("=" * width)
-    output_buffer.append(f"{'METRIC':<25} | {'OFFICIAL':>15} | {'NET':>15}")
-    output_buffer.append("=" * width)
-
-    # Iterate metrics
-    for key in ORDERED_KEYS:
-        metric_name = METRICS_MAP[key]
-        val_official = final_values.get(key, 0)
-        ovh = overhead.get(key, 0)
-
-        # Net value
-        val_corrected = max(0, val_official - ovh)
-
-        if key == 'x26':
-            if time_us is not None:
-                val_official = time_us
-                val_corrected = net_time_us
-            else:
-                val_corrected = (val_official * net_cycles / raw_cycles
-                                 if raw_cycles else 0)
-
-        # Format and store. round() leaves a count alone and only bites on the
-        # one metric that carries a fraction.
-        clean_official.append(round(val_official, 4))
-        clean_corrected.append(round(val_corrected, 4))
-
-        output_buffer.append(f"{metric_name:<25} | "
-                             f"{format_metric(val_official):>15} | "
-                             f"{format_metric(val_corrected):>15}")
-
-    # Print IPC
-    output_buffer.append(f"{'IPC':<25} | "
-                         f"{format_metric(ipc_official):>15} | "
-                         f"{format_metric(ipc_corrected):>15}")
-
-    # Add IPC to the clean lists
-    clean_official.append(round(ipc_official, 4))
-    clean_corrected.append(round(ipc_corrected, 4))
-
-    output_buffer.append("=" * width)
-    output_buffer.append(f"\nClean result (OFFICIAL):  {clean_official}")
-    output_buffer.append(f"Clean result (NET):       {clean_corrected}\n")
-
-    # Print everything to the terminal
-    for line in output_buffer:
+    header = build_table_header(
+        "CVA6", args.target, os.path.basename(abs_src_path), geometry,
+        f"{cva6_root}  (overhead: {suite}/{lang})")
+    lines = metrics_table(values, overhead, abs_src_path, header)
+    for line in lines:
         print(line)
-
-    # Append the same block to the _report.txt file
-    if report_path and os.path.exists(report_path):
-        try:
-            with open(report_path, "a") as f_report:
-                f_report.write("\n")
-                for line in output_buffer:
-                    f_report.write(line + "\n")
-            print(
-                f"[INFO] Metrics successfully consolidated in: {report_path}")
-        except Exception as e:
-            print(f"[WARN] Could not save the metrics to the file: {e}")
+    append_to_report(report_path, lines)
 
     # Done last, so the _report.txt copied out already carries the table.
     collect_results(
-        test_name,
-        os.path.join(log_dir_prediction, f"{test_name}.{args.target}.vcd"),
-        os.path.join(binary_dir_compilation, f"{test_name}.list"),
-        report_path, cva6_root)
-
-    # Last of all, since the copies above are taken from inside it.
+        test_name, os.path.join(log_dir, f"{test_name}.{args.target}.vcd"),
+        os.path.join(binary_dir, f"{test_name}.list"), report_path,
+        cva6_root)
+    # Last of all, since the files above are gathered from inside it.
     if not args.no_keep_sim_output:
         keep_sim_output(sim_dir, out_name, cva6_root)
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
