@@ -1,39 +1,39 @@
 #!/usr/bin/env python3
 """Remove the heavy run artefacts from this viewer repository.
 
-Deletes every .list, .vcd, .fst and debug-trace file, and every __pycache__
-folder,
-anywhere under the repository this script sits in.
+Deletes every .list, .vcd and .fst file, and every __pycache__ folder,
+anywhere under the repository this script sits in. No .json or .js is
+touched, wherever it is, and docs/ is kept whole.
 
-The viewer JSONs in tests/ are left alone.
-
-  python3 clean_CVA6Flow_repo.py             # list, then ask
-  python3 clean_CVA6Flow_repo.py -y          # delete without asking
-  python3 clean_CVA6Flow_repo.py --dry-run   # list only
+  python3 scripts/clean_CVA6Flow_repo.py             # list, then ask
+  python3 scripts/clean_CVA6Flow_repo.py -y          # delete without asking
+  python3 scripts/clean_CVA6Flow_repo.py --dry-run   # list only
 """
+import argparse
 import os
 import shutil
-import argparse
+import sys
 
-# Files removed, matched on the end of the name.
+# Files removed, matched on the end of the name. A CVA6 run writes no gem5
+# debug trace, so none is looked for.
 FILE_SUFFIXES = (".list", ".vcd", ".fst")
-
-# A debug trace is matched on '_trace' rather than on the ending, so a run
-# tagged with its configuration is caught too.
-TRACE_MARK = "_trace."
-TRACE_END = ".txt"
 
 # Folders removed whole.
 DIR_NAMES = {"__pycache__"}
 
-# Kept, whatever is in them, relative to this script.
-KEEP_DIRS = ["docs"]
+# Kept, whatever is in them, relative to the repository root.
+KEEP_DIRS = ("docs",)
+
+
+# SHARED BEGIN py-repo-root
+
+# Needs: os
 
 
 def repo_root():
-    """The repository this script sits in, found by walking up to the nearest
-    .git. The script lives in scripts/, so counting parents would be one more
-    thing to fix the next time the tree moves."""
+    """The nearest folder above this script holding a .git, so a moved tree
+    needs no parent count fixed. Without one, as in a release archive, the
+    parent of the script's folder, which is the documented layout."""
     here = os.path.dirname(os.path.abspath(__file__))
     path = here
     while True:
@@ -41,8 +41,10 @@ def repo_root():
             return path
         parent = os.path.dirname(path)
         if parent == path:
-            return here
+            return os.path.dirname(here)
         path = parent
+
+# SHARED END py-repo-root
 
 
 REPO_ROOT = repo_root()
@@ -56,12 +58,7 @@ def kind_of(path):
     for suffix in FILE_SUFFIXES:
         if name.endswith(suffix):
             return f"*{suffix}"
-    return "*_trace*.txt" if is_trace(name) else "?"
-
-
-def is_trace(name):
-    """True for a debug trace, however the configuration is tagged into it."""
-    return TRACE_MARK in name and name.endswith(TRACE_END)
+    return "?"
 
 
 def is_kept(path):
@@ -88,14 +85,14 @@ def find_targets():
 
         for filename in filenames:
             full = os.path.join(dirpath, filename)
-            if ((filename.endswith(FILE_SUFFIXES) or is_trace(filename))
-                    and not is_kept(full)):
+            if filename.endswith(FILE_SUFFIXES) and not is_kept(full):
                 targets.append(full)
     return sorted(targets)
 
 
 def size_of(path):
-    """Bytes held by a file or a folder. A race or a broken link counts zero."""
+    """Bytes held by a file or a folder. A race or a broken link counts
+    zero."""
     if os.path.isfile(path) or os.path.islink(path):
         try:
             return os.lstat(path).st_size
@@ -112,11 +109,21 @@ def size_of(path):
     return total
 
 
+# SHARED BEGIN py-human-size
+
+# Needs: none
+
+
 def human(size):
-    for unit in ("B", "KiB", "MiB", "GiB"):
-        if size < 1024 or unit == "GiB":
-            return f"{size:.0f}{unit}" if unit == "B" else f"{size:.1f}{unit}"
+    """A size in bytes as whole B, or as KiB, MiB or GiB with one decimal."""
+    if size < 1024:
+        return f"{size:.0f} B"
+    for unit in ("KiB", "MiB", "GiB"):
         size /= 1024
+        if size < 1024 or unit == "GiB":
+            return f"{size:.1f} {unit}"
+
+# SHARED END py-human-size
 
 
 def group(targets):
@@ -133,11 +140,11 @@ def group(targets):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Delete the .list, .vcd, .fst and trace files and "
+        description="Delete the .list, .vcd and .fst files and "
                     "__pycache__ folders in this viewer repository.")
     parser.add_argument("-y", "--yes", action="store_true",
                         help="Delete without asking for confirmation")
-    parser.add_argument("-n", "--dry-run", action="store_true",
+    parser.add_argument("--dry-run", action="store_true",
                         help="List what would be deleted and stop")
     parser.add_argument("-v", "--verbose", action="store_true",
                         help="List every path instead of one row per folder")
@@ -151,7 +158,7 @@ def main():
     targets = find_targets()
     if not targets:
         print("[INFO] Nothing to clean")
-        return
+        return 0
 
     print("\n" + "=" * 70)
     print("TO DELETE")
@@ -173,17 +180,17 @@ def main():
 
     if args.dry_run:
         print("[INFO] Dry run, nothing was deleted")
-        return
+        return 0
 
     if not args.yes:
         try:
             reply = input("Delete these? [y/N] ").strip().lower()
         except (EOFError, KeyboardInterrupt):
             print("\n[INFO] Cancelled")
-            return
+            return 0
         if reply not in ("y", "yes"):
             print("[INFO] Cancelled")
-            return
+            return 0
 
     deleted = 0
     for path in targets:
@@ -194,11 +201,12 @@ def main():
                 os.remove(path)
             deleted += 1
         except OSError as e:
-            print(f"[WARN] Could not delete {path}: {e}")
+            print(f"[ERROR] Could not delete {path}: {e}", file=sys.stderr)
 
     print(f"[INFO] Deleted {deleted} of {len(targets)} item(s), "
           f"{human(total)} freed")
+    return 0 if deleted == len(targets) else 1
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
