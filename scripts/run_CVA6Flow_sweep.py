@@ -248,7 +248,8 @@ def discard_run(root, results_dir, test_name, target):
     """Delete what this run left behind once it has been collected, since a
     VCD runs to hundreds of MiB per test. Only this test's files go, in
     results/run/ and in every dated folder it wrote to, so a failed test's
-    output and anything else left there survive the rest of the runs."""
+    output and anything else left there survive the rest of the runs.
+    Returns the dated folders it cleared."""
     folders = run_output_dirs(root, test_name)
     for path in list(output_paths(results_dir, test_name).values()) + [
             path for folder in folders

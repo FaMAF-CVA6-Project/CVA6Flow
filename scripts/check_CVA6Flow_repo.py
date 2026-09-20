@@ -93,7 +93,7 @@ NON_ASCII = re.compile("[^\x00-\x7f\u00c0-\u024f]")
 TABULAR = re.compile(r"\S {2,}\S")
 
 # A section heading, which introduces what follows rather than explaining a
-# line of code, so it neither joins a block nor counts toward its length.
+# line of code, so it neither joins a block nor counts towards its length.
 BANNER = re.compile(r"^[-=_*]{3,}")
 CODEISH = re.compile(r"//|\bfor\b.*;|^\s*[\"\'].*[\"\']\s*,?$"
                      r"|=\s*\w+\s*;|\w+\(.*\)\s*;|^\s*[-|+]{3,}")

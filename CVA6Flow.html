@@ -1872,7 +1872,7 @@
     const RULER_TEXT_LIFT = 3;
     const EMPTY_RANGE_FONT_PX = 12;
 
-    /* Heights grow toward commit, so a row reads left to right as the instruction
+    /* Heights grow towards commit, so a row reads left to right as the instruction
      * nears retirement. Each is the bottom-aligned share of the row a cell fills. */
     const BAND = Object.freeze({
       commit: 1, execute: 0.85, decode: 0.65, frontEnd: 0.6, leadIn: 0.55,
@@ -1981,8 +1981,8 @@
      * page adds one. */
     const LEGEND_SHARED = Object.freeze({
       preFetchWait: 'Toolbar toggle "Pre-fetch Wait". The wait before this fetch could start, '
-        + 'measured from the previous fetch request. It counts in Cycles, and toward Flush stall '
-        + 'when the instruction resumes after a flush and toward Fetch stall otherwise, whether '
+        + 'measured from the previous fetch request. It counts in Cycles, and towards Flush stall '
+        + 'when the instruction resumes after a flush and towards Fetch stall otherwise, whether '
         + 'or not the toggle draws it.',
       bubblePredTaken: 'A bubble after a correctly predicted taken branch, while the front end '
         + 'starts fetching the target. No instruction is flushed.',
@@ -2344,7 +2344,7 @@
       },
     ]);
 
-    /* Which stages count toward Cycles, a statement rather than a copy of the
+    /* Which stages count towards Cycles, a statement rather than a copy of the
      * tracer's cycle_fields. A flushed record never wrote back or committed, so
      * its writeback and commit fields do not stretch the range. */
     const METRIC_CYCLE_KEYS = Object.freeze(['fe1_lo_cycle', 'fe1_hi_cycle', 'fe2_lo_cycle',
