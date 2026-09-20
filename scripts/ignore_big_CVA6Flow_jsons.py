@@ -6,23 +6,24 @@ refuses above 100 MiB, and git has no size test of its own: .gitignore matches
 a path, never a size.
 
 Re-run it after a sweep. A file already tracked is reported, not ignored:
-.gitignore has no effect on a file git is already carrying, which is what
-keeps the committed sample visible.
+.gitignore has no effect on a file git is already carrying, so a committed
+file stays visible.
 
-  python3 ignore_big_CVA6Flow_jsons.py             # list, then ask
-  python3 ignore_big_CVA6Flow_jsons.py -y          # write without asking
-  python3 ignore_big_CVA6Flow_jsons.py --dry-run   # list only
-  python3 ignore_big_CVA6Flow_jsons.py -l 20       # a different threshold, in MiB
-  python3 ignore_big_CVA6Flow_jsons.py --prune     # also drop entries no longer oversized
+    python3 scripts/ignore_big_CVA6Flow_jsons.py            # list, then ask
+    python3 scripts/ignore_big_CVA6Flow_jsons.py -y         # without asking
+    python3 scripts/ignore_big_CVA6Flow_jsons.py --dry-run  # list only
+    python3 scripts/ignore_big_CVA6Flow_jsons.py -l 20      # limit in MiB
+    python3 scripts/ignore_big_CVA6Flow_jsons.py --prune    # drop stale ones
 """
+import argparse
+import importlib.util
 import os
 import re
-import sys
-import argparse
 import subprocess
+import sys
 
-# The tracer output: the viewer JSON, and the .js that wraps it for local
-# loading. Both hold the same trace and grow at the same rate.
+# A tracer JSON, and the sample .js make_CVA6Flow_sample.py wraps one in.
+# Both hold a JSON and grow at the same rate.
 SUFFIXES = (".json", ".js")
 
 # GitHub warns here and refuses at 100.
@@ -32,11 +33,28 @@ DEFAULT_LIMIT_MIB = 50
 BEGIN = "## BEGIN oversized JSONs"
 END = "## END oversized JSONs"
 
+# The frozen trees are the checker's, so the two scripts skip the same ones.
+_spec = importlib.util.spec_from_file_location(
+    "check_CVA6Flow_repo",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                 "check_CVA6Flow_repo.py"))
+_check = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_check)
+FROZEN = _check.FROZEN
+
+# Never descended into: git's own store and any Node install.
+SKIP_DIRS = {".git", "node_modules"}
+
+
+# SHARED BEGIN py-repo-root
+
+# Needs: os
+
 
 def repo_root():
-    """The repository this script sits in, found by walking up to the nearest
-    .git. The script lives in scripts/, so counting parents would be one more
-    thing to fix the next time the tree moves."""
+    """The nearest folder above this script holding a .git, so a moved tree
+    needs no parent count fixed. Without one, as in a release archive, the
+    parent of the script's folder, which is the documented layout."""
     here = os.path.dirname(os.path.abspath(__file__))
     path = here
     while True:
@@ -44,19 +62,43 @@ def repo_root():
             return path
         parent = os.path.dirname(path)
         if parent == path:
-            return here
+            return os.path.dirname(here)
         path = parent
+
+# SHARED END py-repo-root
 
 
 REPO_ROOT = repo_root()
 GITIGNORE = os.path.join(REPO_ROOT, ".gitignore")
 
 
+# SHARED BEGIN py-human-size
+
+# Needs: none
+
+
+def human(size):
+    """A size in bytes as whole B, or as KiB, MiB or GiB with one decimal."""
+    if size < 1024:
+        return f"{size:.0f} B"
+    for unit in ("KiB", "MiB", "GiB"):
+        size /= 1024
+        if size < 1024 or unit == "GiB":
+            return f"{size:.1f} {unit}"
+
+# SHARED END py-human-size
+
+
 def find_candidates():
-    """Every tracer file in the repository, as (relpath, size)."""
+    """Every tracer file in the repository outside the frozen trees, as
+    (relpath, size)."""
     found = []
     for dirpath, dirnames, filenames in os.walk(REPO_ROOT):
-        dirnames[:] = [d for d in dirnames if d != ".git"]
+        here = os.path.relpath(dirpath, REPO_ROOT)
+        dirnames[:] = [
+            d for d in dirnames if d not in SKIP_DIRS
+            and os.path.normpath(os.path.join(here, d)).replace(os.sep, "/")
+            not in FROZEN]
         for filename in filenames:
             if not filename.endswith(SUFFIXES):
                 continue
@@ -122,15 +164,9 @@ def owns(pattern):
     return not os.path.isdir(os.path.join(REPO_ROOT, path))
 
 
-def human(size):
-    for unit in ("B", "KiB", "MiB", "GiB"):
-        if size < 1024 or unit == "GiB":
-            return f"{size:.0f}{unit}" if unit == "B" else f"{size:.1f}{unit}"
-        size /= 1024
-
-
 def read_gitignore():
-    """(lines before our block, our entries, lines after our block)."""
+    """(lines before our block, our entries, lines after our block), or None
+    when the block has no end, which is left for a person to fix."""
     if not os.path.isfile(GITIGNORE):
         return [], [], []
 
@@ -145,17 +181,18 @@ def read_gitignore():
     if END not in rest:
         print(f"[ERROR] {GITIGNORE} has our opening marker but no closing "
               f"'{END}'. Fix that by hand first, refusing to guess where the "
-              f"block ends.")
-        sys.exit(1)
+              f"block ends.", file=sys.stderr)
+        return None
 
     stop = start + 1 + rest.index(END)
-    entries = [l.strip() for l in lines[start + 1:stop]
-               if l.strip() and not l.strip().startswith("#")]
+    entries = [line.strip() for line in lines[start + 1:stop]
+               if line.strip() and not line.strip().startswith("#")]
     return lines[:start], entries, lines[stop + 1:]
 
 
-def write_gitignore(before, entries, after, limit_mib):
-    """Put the block back, with the rest of the file untouched."""
+def write_gitignore(before, entries, after):
+    """Put the block back. Blank lines around it are normalised, and the rest
+    of the file is left as it was."""
     block = [BEGIN, *entries, END]
 
     while before and not before[-1].strip():
@@ -176,7 +213,7 @@ def main():
         description="Add the tracer JSONs too big for GitHub to .gitignore.")
     parser.add_argument("-y", "--yes", action="store_true",
                         help="Write .gitignore without asking")
-    parser.add_argument("-n", "--dry-run", action="store_true",
+    parser.add_argument("--dry-run", action="store_true",
                         help="List what would be added and stop")
     parser.add_argument("-v", "--verbose", action="store_true",
                         help="List the files under the limit too")
@@ -197,7 +234,10 @@ def main():
     big = [(rel, size) for rel, size in candidates if size >= limit]
     small = len(candidates) - len(big)
 
-    before, entries, after = read_gitignore()
+    current = read_gitignore()
+    if current is None:
+        return 1
+    before, entries, after = current
     listed = set(entries)
     tracked = tracked_paths()
     ignored = ignored_paths([rel for rel, _ in big])
@@ -266,27 +306,33 @@ def main():
 
     if not added and not dropped:
         print("[INFO] .gitignore is already up to date")
-        return
+        return 0
 
     if args.dry_run:
         print("[INFO] Dry run, .gitignore was not changed")
-        return
+        return 0
 
     if not args.yes:
         try:
             reply = input("Write these to .gitignore? [y/N] ").strip().lower()
         except (EOFError, KeyboardInterrupt):
             print("\n[INFO] Cancelled")
-            return
+            return 0
         if reply not in ("y", "yes"):
             print("[INFO] Cancelled")
-            return
+            return 0
 
     kept = [e for e in entries if e not in dropped]
-    write_gitignore(before, sorted(set(kept + added)), after, args.limit)
+    written = sorted(set(kept + added))
+    try:
+        write_gitignore(before, written, after)
+    except OSError as e:
+        print(f"[ERROR] Could not write {GITIGNORE}: {e}", file=sys.stderr)
+        return 1
     print(f"[INFO] .gitignore updated: {len(added)} added, "
-          f"{len(dropped)} dropped, {len(kept + added)} listed in total")
+          f"{len(dropped)} dropped, {len(written)} listed in total")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
