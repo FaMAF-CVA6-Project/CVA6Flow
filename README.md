@@ -2,7 +2,7 @@
 
 A browser-based pipeline visualiser for the CORE-V CVA6 RISC-V core. It rebuilds the pipeline cycle by cycle from a Verilator VCD of the RTL, and draws every fetched instruction as a row.
 
-![CVA6Flow rendering the CVA6 pipeline](docs/CVA6Flow_intro.png)
+![CVA6Flow loading its daxpy sample, zooming into the CVA6 pipeline, and showing forwarding and an instruction's timeline](docs/CVA6Flow_demo.gif)
 
 ## Motivation
 
