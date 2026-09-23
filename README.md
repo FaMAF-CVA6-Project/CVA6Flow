@@ -220,7 +220,7 @@ The viewer also has fit-to-viewport zoom, collapsible panels, a tooltip with per
 
 Keys: `+` and `-` to zoom, arrows to navigate, `Home` and `End` to jump, `Enter` and `Shift+Enter` to step through PC matches, `P` to pin the tooltip, `S` to save a screenshot, `Esc` to close panels and clear the pins.
 
-**Screenshots.** The Screenshot button beside Copy Metrics saves the whole window as a PNG at three times its resolution, into the browser's downloads, for figures that stay sharp in print. The canvases are redrawn at that scale and the rest of the page is drawn from a copy of itself, so text, controls and an open tooltip come out as sharp as the timeline. The `S` key does the same without moving the pointer, so the tooltip under it is kept. The file is named after the JSON and the cycles and rows in view, for example `CVA6Flow_daxpy_c214-267_r65-98.png`, and `SCREENSHOT_SCALE` in the page sets the factor.
+**Screenshots.** The Screenshot button beside Copy Metrics saves the whole window as a PNG at three times its resolution, into the browser's downloads, for figures that stay sharp in print. The canvases are redrawn at that scale and the rest of the page is drawn from a copy of itself, so text, controls and an open tooltip come out as sharp as the timeline. It works in Chrome, Firefox and Safari, tested on their engines, Chromium, Gecko and WebKit. The `S` key does the same without moving the pointer, so the tooltip under it is kept. The file is named after the JSON and the cycles and rows in view, for example `CVA6Flow_daxpy_c214-267_r65-98.png`, and `SCREENSHOT_SCALE` in the page sets the factor.
 
 ## Tested with
 

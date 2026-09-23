@@ -7449,11 +7449,71 @@
 
     /* Needs: records, VIEWER_NAME, SCREENSHOT_SCALE, COPY_FLASH_MS, setupGeometry, redraw,
      * redrawStallDiagramIfOpen, flashButtonLabel, firstVisibleCycle, cycDisp, cellW,
-     * timelineCanvas */
+     * timelineCanvas, css-tokens */
 
-    /* The window as a PNG at SCREENSHOT_SCALE times its resolution, for figures. The canvases are
-     * redrawn at that scale, and the page around them is drawn from a copy of itself inside an SVG
-     * foreignObject, so text and controls stay sharp too. The page is put back as it was. */
+    /* Firefox leaves native controls out of an SVG image, so each is drawn as a plain box that looks
+     * like it, a checkbox, a slider or a field's value, and null means it is not on screen. */
+    function drawControl(node) {
+      const style = getComputedStyle(node);
+      if (style.display === 'none' || node.type === 'hidden' || node.type === 'file') return null;
+      const rect = node.getBoundingClientRect();
+      const accent = style.accentColor && style.accentColor !== 'auto' ? style.accentColor
+        : getComputedStyle(document.documentElement).getPropertyValue('--accent').trim();
+      const box = document.createElement('span');
+      Object.assign(box.style, {
+        display: 'inline-block', position: 'relative', boxSizing: 'border-box', flexShrink: '0',
+        width: `${rect.width}px`, height: `${rect.height}px`, margin: style.margin,
+        verticalAlign: style.verticalAlign, opacity: node.disabled ? '0.5' : '1',
+      });
+      if (node.type === 'checkbox' || node.type === 'radio') {
+        Object.assign(box.style, {
+          border: `1px solid ${node.checked ? accent : style.color}`,
+          borderRadius: node.type === 'radio' ? '50%' : '3px',
+          background: node.checked ? accent : 'transparent',
+        });
+        if (node.checked) {
+          box.innerHTML = '<svg viewBox="0 0 16 16" width="100%" height="100%" '
+            + 'style="position:absolute;left:0;top:0"><path d="M3.5 8.5 L6.5 11.5 L12.5 4.5" '
+            + 'fill="none" stroke="#18181a" stroke-width="2.2" stroke-linecap="round" '
+            + 'stroke-linejoin="round"/></svg>';
+        }
+      } else if (node.type === 'range') {
+        const lo = parseFloat(node.min || '0');
+        const hi = parseFloat(node.max || '100');
+        const at = hi > lo ? Math.min(1, Math.max(0, (parseFloat(node.value) - lo) / (hi - lo))) : 0;
+        const thumb = Math.min(14, rect.height);
+        const bar = 'position:absolute;top:50%;height:4px;margin-top:-2px;border-radius:2px;';
+        box.innerHTML = `<span style="${bar}left:0;right:0;background:rgba(255,255,255,0.18)"></span>`
+          + `<span style="${bar}left:0;width:${at * 100}%;background:${accent}"></span>`
+          + `<span style="position:absolute;top:50%;left:${at * (rect.width - thumb)}px;`
+          + `width:${thumb}px;height:${thumb}px;margin-top:${-thumb / 2}px;border-radius:50%;`
+          + `background:${accent};border:2px solid #18181a"></span>`;
+      } else {
+        const align = { right: 'flex-end', end: 'flex-end', center: 'center' }[style.textAlign];
+        Object.assign(box.style, {
+          display: 'inline-flex', alignItems: 'center', justifyContent: align || 'flex-start',
+          background: style.backgroundColor, color: style.color, padding: style.padding,
+          border: `${style.borderTopWidth} ${style.borderTopStyle} ${style.borderTopColor}`,
+          borderRadius: style.borderTopLeftRadius, fontFamily: style.fontFamily,
+          fontSize: style.fontSize, fontWeight: style.fontWeight, whiteSpace: 'nowrap',
+          overflow: 'hidden',
+        });
+        if (node.tagName === 'SELECT') {
+          const option = node.options[node.selectedIndex];
+          box.textContent = `${option ? option.text : ''} \u25BE`;
+        } else if (node.value) {
+          box.textContent = node.value;
+        } else {
+          box.textContent = node.placeholder || '';
+          box.style.color = getComputedStyle(node, '::placeholder').color;
+        }
+      }
+      return box;
+    }
+
+    /* The window as a PNG at SCREENSHOT_SCALE times its resolution, for figures. The page is drawn
+     * from a copy of itself inside an SVG foreignObject, the canvases are painted in from bitmaps
+     * redrawn at that scale, and whatever lies over them comes last, as a second SVG layer. */
     async function captureView(scale) {
       const width = document.documentElement.clientWidth;
       const height = document.documentElement.clientHeight;
@@ -7468,56 +7528,86 @@
         }
         redrawStallDiagramIfOpen();
       };
-      const bitmaps = new Map();
+      const shots = new Map();
       const realRatio = Object.getOwnPropertyDescriptor(window, 'devicePixelRatio');
       Object.defineProperty(window, 'devicePixelRatio', { configurable: true, get: () => scale });
       try {
         redrawAll();
         for (const canvas of document.querySelectorAll('canvas')) {
-          if (canvas.width && canvas.height) bitmaps.set(canvas, canvas.toDataURL('image/png'));
+          if (!canvas.width || !canvas.height || !canvas.getClientRects().length) continue;
+          const shot = document.createElement('canvas');
+          shot.width = canvas.width;
+          shot.height = canvas.height;
+          shot.getContext('2d').drawImage(canvas, 0, 0);
+          shots.set(canvas, shot);
         }
       } finally {
         if (realRatio) Object.defineProperty(window, 'devicePixelRatio', realRatio);
         else delete window.devicePixelRatio;
         redrawAll();
       }
+      /* What lies over a canvas: a box positioned out of the flow, after the canvas and on top of
+       * it, such as the tooltip, the crosshair or an open panel. */
+      const canvases = [...shots.keys()];
+      const overlaps = (a, b) =>
+        a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom;
+      const isOver = node => {
+        if (!/absolute|fixed/.test(getComputedStyle(node).position)) return false;
+        const box = node.getBoundingClientRect();
+        return box.width > 0 && box.height > 0 && canvases.some(canvas => !node.contains(canvas)
+          && canvas.compareDocumentPosition(node) & Node.DOCUMENT_POSITION_FOLLOWING
+          && overlaps(box, canvas.getBoundingClientRect()));
+      };
       /* A copy of the page, walked beside the live one to carry over what the markup does not
-       * hold: each canvas's pixels, the state of each control, and each box's scroll. */
+       * hold: the state of each control and each box's scroll. A canvas becomes an empty box of
+       * its size, or an image when it sits inside something that lies over the others. */
       const copy = document.body.cloneNode(true);
       const live = document.body.querySelectorAll('*');
       const copied = copy.querySelectorAll('*');
-      const scrolled = [];
+      const scrolled = [], over = [], painted = [];
       live.forEach((node, i) => {
         const twin = copied[i];
         if (node.tagName === 'CANVAS') {
-          const img = document.createElement('img');
-          img.id = node.id;
-          img.className = node.className;
-          img.setAttribute('style', node.getAttribute('style') || '');
-          img.style.display = getComputedStyle(node).display;
-          img.style.width = `${node.clientWidth}px`;
-          img.style.height = `${node.clientHeight}px`;
-          img.src = bitmaps.get(node) || '';
-          twin.replaceWith(img);
-        } else if (node.tagName === 'INPUT') {
-          if (node.type === 'checkbox' || node.type === 'radio') {
-            twin.toggleAttribute('checked', node.checked);
-          } else {
-            twin.setAttribute('value', node.value);
-          }
-        } else if (node.tagName === 'SELECT') {
-          [...twin.options].forEach((option, k) =>
-            option.toggleAttribute('selected', k === node.selectedIndex));
-        } else if (node.scrollTop || node.scrollLeft) {
-          scrolled.push([twin, node.scrollTop, node.scrollLeft]);
+          const lifted = over.some(([, shown]) => shown.contains(node));
+          const stand = document.createElement(lifted && shots.has(node) ? 'img' : 'span');
+          stand.id = node.id;
+          stand.className = node.className;
+          stand.setAttribute('style', node.getAttribute('style') || '');
+          stand.style.display = getComputedStyle(node).display;
+          stand.style.width = `${node.clientWidth}px`;
+          stand.style.height = `${node.clientHeight}px`;
+          if (lifted && shots.has(node)) stand.src = shots.get(node).toDataURL('image/png');
+          else if (shots.has(node)) painted.push(node);
+          twin.replaceWith(stand);
+          return;
         }
+        if (node.tagName === 'INPUT' || node.tagName === 'SELECT') {
+          const drawn = drawControl(node);
+          if (drawn) twin.replaceWith(drawn);
+          return;
+        }
+        if (!over.some(([, shown]) => shown.contains(node)) && isOver(node)) over.push([twin, node]);
+        if (node.scrollTop || node.scrollLeft) scrolled.push([twin, node]);
       });
       copy.querySelectorAll('script').forEach(script => script.remove());
-      for (const [box, top, left] of scrolled) {
-        const shift = document.createElementNS(xhtml, 'div');
-        shift.setAttribute('style', `transform:translate(${-left}px,${-top}px)`);
-        while (box.firstChild) shift.appendChild(box.firstChild);
-        box.appendChild(shift);
+      /* Each child moves, since a wrapper would take them out of a flex row such as the top bar's.
+       * An empty see-through child larger than its box, such as the timeline's spacer, only gives
+       * the scrollbars their range, and shrinks to nothing rather than become a huge layer. */
+      for (const [box, node] of scrolled) {
+        [...box.children].forEach((child, k) => {
+          const shown = node.children[k];
+          const look = shown && getComputedStyle(shown);
+          if (look && !shown.childNodes.length && look.backgroundColor === 'rgba(0, 0, 0, 0)'
+            && look.backgroundImage === 'none' && parseFloat(look.borderTopWidth) === 0
+            && (shown.offsetWidth > node.clientWidth || shown.offsetHeight > node.clientHeight)) {
+            child.style.width = '0px';
+            child.style.height = '0px';
+            return;
+          }
+          const own = child.style.transform;
+          child.style.transform = `translate(${-node.scrollLeft}px,${-node.scrollTop}px)`
+            + (own ? ` ${own}` : '');
+        });
       }
       /* The page's own stylesheet, with the rules for the root and the body pointed at the two
        * boxes that stand in for them inside the SVG, and no scrollbars in a figure. */
@@ -7527,28 +7617,67 @@
         .replace(/(^|[\s,}])body(?=[\s,{.:#[>])/g, '$1.capture-body')
         + '\n.capture-root * { scrollbar-width: none !important; }'
         + '\n.capture-root *::-webkit-scrollbar { display: none !important; }';
+      /* Viewport units would size against the SVG, so they become the window's pixels. */
+      const units = { vh: height / 100, vw: width / 100, vmin: Math.min(width, height) / 100,
+        vmax: Math.max(width, height) / 100 };
+      const pixels = css.replace(/(\d*\.?\d+)(vh|vw|vmin|vmax)\b/g,
+        (match, value, unit) => `${parseFloat(value) * units[unit]}px`);
       const root = document.createElementNS(xhtml, 'div');
       root.className = `capture-root ${document.documentElement.className}`;
-      root.setAttribute('style', `width:${width}px;height:${height}px;overflow:hidden`);
+      /* Scaled by zoom, since WebKit ignores the SVG's viewBox for foreignObject content. */
+      root.setAttribute('style', `width:${width}px;height:${height}px;overflow:hidden;`
+        + `zoom:${scale}`);
       const style = document.createElementNS(xhtml, 'style');
-      style.textContent = css;
+      style.textContent = pixels;
       const body = document.createElementNS(xhtml, 'div');
       body.className = `capture-body ${document.body.className}`;
       body.setAttribute('style', `width:${width}px;height:${height}px;margin:0;overflow:hidden;`
         + (document.body.getAttribute('style') || ''));
       while (copy.firstChild) body.appendChild(copy.firstChild);
       root.append(style, body);
-      const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width * scale}" `
-        + `height="${height * scale}" viewBox="0 0 ${width} ${height}">`
-        + `<foreignObject x="0" y="0" width="${width}" height="${height}">`
-        + `${new XMLSerializer().serializeToString(root)}</foreignObject></svg>`;
-      const image = new Image();
-      image.src = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
-      await image.decode();
+      const toImage = async () => {
+        const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width * scale}" `
+          + `height="${height * scale}">`
+          + `<foreignObject x="0" y="0" width="${width * scale}" height="${height * scale}">`
+          + `${new XMLSerializer().serializeToString(root)}</foreignObject></svg>`;
+        const image = new Image();
+        image.src = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+        await image.decode();
+        return image;
+      };
       const out = document.createElement('canvas');
       out.width = width * scale;
       out.height = height * scale;
-      out.getContext('2d').drawImage(image, 0, 0, out.width, out.height);
+      const ctx = out.getContext('2d');
+      /* The page with what lies over the canvases hidden, then each canvas clipped to the boxes
+       * that clip it on screen, then what lies over them, alone on a see-through page. */
+      for (const [twin] of over) twin.style.visibility = 'hidden';
+      ctx.drawImage(await toImage(), 0, 0, out.width, out.height);
+      for (const canvas of painted) {
+        const at = canvas.getBoundingClientRect();
+        let clip = { left: at.left, top: at.top, right: at.right, bottom: at.bottom };
+        for (let box = canvas.parentElement; box && box !== document.body; box = box.parentElement) {
+          const flow = getComputedStyle(box);
+          if (flow.overflowX === 'visible' && flow.overflowY === 'visible') continue;
+          const edge = box.getBoundingClientRect();
+          clip = { left: Math.max(clip.left, edge.left), top: Math.max(clip.top, edge.top),
+            right: Math.min(clip.right, edge.right), bottom: Math.min(clip.bottom, edge.bottom) };
+        }
+        if (clip.right <= clip.left || clip.bottom <= clip.top) continue;
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(clip.left * scale, clip.top * scale, (clip.right - clip.left) * scale,
+          (clip.bottom - clip.top) * scale);
+        ctx.clip();
+        ctx.drawImage(shots.get(canvas), at.left * scale, at.top * scale, at.width * scale,
+          at.height * scale);
+        ctx.restore();
+      }
+      if (over.length) {
+        root.style.visibility = 'hidden';
+        for (const [twin] of over) twin.style.visibility = 'visible';
+        ctx.drawImage(await toImage(), 0, 0, out.width, out.height);
+      }
       return new Promise((resolve, reject) =>
         out.toBlob(blob => (blob ? resolve(blob) : reject(new Error('no PNG'))), 'image/png'));
     }
