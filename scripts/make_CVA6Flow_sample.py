@@ -6,7 +6,8 @@ the cycles those records span, by the rule the viewer's streamed loader
 follows, and writes both forms: the .js the page loads with a script tag,
 served or opened from disk, and the .json for every other reader. The sample
 is then listed in samples.js beside it, the manifest the page reads from
-tests/. Samples are generated, not committed.
+tests/. The samples in tests/ are committed, so the button works in a
+fresh clone.
 
     python3 scripts/make_CVA6Flow_sample.py tests/daxpy.json
     python3 scripts/make_CVA6Flow_sample.py tests/daxpy.json -n 1500
