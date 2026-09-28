@@ -220,7 +220,7 @@ The viewer also has fit-to-viewport zoom, collapsible panels, a tooltip with per
 
 **View** holds what the diagram draws, Forwarding, Pre-fetch Wait and Stalls, the Hide Metrics, Hide Labels and Hide Writebacks buttons, the theme, Figure mode and Screenshot. The toggles and the theme are remembered in the browser.
 
-**Themes and figures.** The light theme, chosen under View, is a calm off-white rather than paper white, for daylight work and figures. Every colour of the page and the diagram has a light counterpart, and the stage colours are mirrored in lightness, so the quiet stages stay quiet on white and each cell's tag stays readable. **Figure mode**, or the `F` key, leaves the diagram and its labels alone on the page for a screenshot, and `F` or `Esc` brings the rest back.
+**Themes and figures.** The light theme, chosen under View, is a palette of its own in the manner of macOS: grey chrome, white rows and Apple's system hues as tints, faint for a wait, soft for a stage and strong for an event, with each cell's tag in a darker shade of its own hue. **Figure mode**, or the `F` key, leaves the diagram and its labels alone on the page for a screenshot, and `F` or `Esc` brings the rest back.
 
 Keys: `+` and `-` to zoom, arrows to navigate, `Home` and `End` to jump, `Enter` and `Shift+Enter` to step through PC matches, `P` to pin the tooltip, `S` to save a screenshot, `F` for figure mode, `Esc` to close menus and panels, clear the pins and leave figure mode.
 

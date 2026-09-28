@@ -84,58 +84,59 @@
 
     /* Needs: css-tokens */
 
-    /* The light look, a calm off-white ground rather than paper white, for daylight and figures.
-     * It restates every colour of css-tokens, and each page restates its own beside its root. */
+    /* The light look, a palette of its own after macOS's: grey chrome, white controls and rows,
+     * near-black text and Apple's system hues. It restates every colour of css-tokens. */
     html[data-theme="light"] {
-      --bg: #eeeeea;
-      --bg2: #e5e5e0;
-      --bg3: #dadad4;
-      --bg4: #cfcfc8;
-      --border: rgba(0, 0, 0, 0.1);
-      --border2: rgba(0, 0, 0, 0.19);
-      --text: #2a2a2e;
-      --text2: #4a4a50;
-      --text3: #65655f;
-      --text-id: #7f7f79;
-      --text-pc: #62628c;
-      --text-hit: #6e4800;
-      --accent: #0f6e4c;
-      --warn: #8f5600;
-      --bad: #b3313a;
-      --compressed: #0c7d74;
-      --link: #1a5a98;
-      --link-hover: #0f4478;
-      --link-dim: #56698a;
-      --grip: rgba(26, 90, 152, 0.45);
-      --focus: rgba(26, 90, 152, 0.4);
-      --crosshair: rgba(0, 0, 0, 0.22);
-      --timeline-bg: #eeeeea;
-      --scrollbar-thumb: #bdbdb6;
-      --scrollbar-thumb-hover: #a8a8a1;
-      --ruler-bg: #e5e5e0;
-      --label-row: #eeeeea;
-      --label-row-alternate: #e7e7e2;
-      --label-row-hit: #efd9a4;
-      --scrim: rgba(0, 0, 0, 0.25);
-      --shadow: rgba(0, 0, 0, 0.16);
-      --timeline-row: #eeeeea;
-      --timeline-row-alternate: #e7e7e2;
-      --grid-minor: rgba(0, 0, 0, 0.05);
-      --grid-major: rgba(0, 0, 0, 0.11);
-      --grid-sparse: rgba(0, 0, 0, 0.08);
-      --ruler-tick: #cfcfc9;
-      --ruler-tick-major: #a9a9a3;
-      --ruler-text: #55554f;
-      --empty-range: #66665f;
-      --op-int: #1a7044;
-      --op-fp: #1a5a98;
-      --op-mem: #8a5200;
-      --op-branch: #6e38a0;
-      --op-flushed: #984242;
-      --forward-arrival: #4a5f5f;
-      --stall-ground: #e2e2dd;
-      --stall-label: #55554f;
-      --stall-axis: #9d9d97;
+      --bg: #f2f2f5;
+      --bg2: #eaeaee;
+      --bg3: #ffffff;
+      --bg4: #e0e0e5;
+      --border: rgba(0, 0, 0, 0.08);
+      --border2: rgba(0, 0, 0, 0.14);
+      --text: #1d1d1f;
+      --text2: #48484a;
+      --text3: #636366;
+      --text-id: #8e8e93;
+      --text-pc: #5f5e9c;
+      --text-hit: #7a4f00;
+      --accent: #13744f;
+      --warn: #c93400;
+      --bad: #d70015;
+      --compressed: #00788d;
+      --link: #0066cc;
+      --link-hover: #004f9e;
+      --link-dim: #6e7a8a;
+      --grip: rgba(0, 122, 255, 0.4);
+      --focus: rgba(0, 122, 255, 0.4);
+      --crosshair: rgba(0, 0, 0, 0.16);
+      --timeline-bg: #ffffff;
+      --scrollbar-thumb: #c7c7cc;
+      --scrollbar-thumb-hover: #aeaeb2;
+      --ruler-bg: #f6f6f8;
+      --label-row: #ffffff;
+      --label-row-alternate: #f6f6f8;
+      --label-row-hit: #fff1c2;
+      --scrim: rgba(0, 0, 0, 0.2);
+      --shadow: rgba(0, 0, 0, 0.12);
+      --timeline-row: #ffffff;
+      --timeline-row-alternate: #f6f6f8;
+      --grid-minor: rgba(0, 0, 0, 0.035);
+      --grid-major: rgba(0, 0, 0, 0.08);
+      --grid-sparse: rgba(0, 0, 0, 0.055);
+      --ruler-tick: #d8d8dc;
+      --ruler-tick-major: #aeaeb2;
+      --ruler-text: #636366;
+      --empty-range: #8e8e93;
+      --op-int: #1e7a34;
+      --op-fp: #0060c0;
+      --op-mem: #9a5a00;
+      --op-branch: #8944ab;
+      --op-flushed: #c0474f;
+      --forward-arrival: #6e7e7e;
+      --stall-ground: #f2f2f5;
+      --stall-label: #636366;
+      --stall-axis: #aeaeb2;
+      --swatch-edge: rgba(0, 0, 0, 0.16);
       color-scheme: light;
     }
 
@@ -150,9 +151,9 @@
     }
 
     html[data-theme="light"] {
-      --mem-wb-title: #9a6a10;
-      --histogram-bar: #c79a3a;
-      --mem-wb-lane-line: rgba(0, 0, 0, 0.08);
+      --mem-wb-title: #b25000;
+      --histogram-bar: #ffb340;
+      --mem-wb-lane-line: rgba(0, 0, 0, 0.06);
     }
 
     /* SHARED BEGIN css-base */
@@ -906,6 +907,7 @@
       height: 10px;
       border-radius: 2px;
       flex-shrink: 0;
+      box-shadow: inset 0 0 0 0.5px var(--swatch-edge, transparent);
     }
 
     #timeline-row {
@@ -2248,13 +2250,51 @@
       memWbQueued: '#352060',
       memWbEviction: '#40c0ff',
     });
-    /* The light look's own choices where the derived colour would not do, thin lines and outlines
-     * that must stand out from white. Every other stage colour is derived from the dark one. */
+    /* The light look's own stage colours, not derived from the dark ones: Apple's system hues
+     * laid over white as tints, faint for a wait, soft for a stage and strong for an event. */
     const COL_LIGHT = Object.freeze({
-      feSynth: 'rgba(28,28,30,0.7)',
-      fwdWb: '#12857e',
-      fwdSb: '#a050a0',
-      flushedFwd: '#a04a4a',
+      preFetchWait: '#eeeefb',
+      bubblePredTaken: 'rgb(175,82,222)',
+      bubbleUnpred: 'rgb(230,170,0)',
+      bubbleMispred: 'rgb(255,149,0)',
+      bubbleFlush: 'rgb(48,176,199)',
+      fe1Req: '#b2d7ff',
+      feSynth: 'rgba(29,29,31,0.55)',
+      fe1ReqMiss: '#ffc4c1',
+      icStall: '#ffdcda',
+      fe2: '#d1e7ff',
+      hiLineWait: '#e6f2ff',
+      fe1ReqHi: '#c2e6f8',
+      fe1ReqMissHi: '#ffc0cc',
+      icStallHi: '#ffd9e0',
+      fe2Hi: '#daf0fb',
+      bpCorrect: '#6bc4ed',
+      feBuf: '#e6f2ff',
+      feOut: '#daf0fb',
+      decBuf: '#f7eefc',
+      decIs: '#cdccf3',
+      fwdWb: '#008299',
+      fwdSb: '#8944ab',
+      flushedFwd: '#c8424f',
+      int: '#c2eecd',
+      fp: '#c1e7ee',
+      mem: '#e3dacf',
+      branch: '#e7cbf5',
+      bpMispred: '#ff3b30',
+      bpUnpred: '#ffb347',
+      memReq: '#ffe88a',
+      dcMiss: '#ffa5a0',
+      dcStall: '#ffdcda',
+      refillOverlap: '#ffecd1',
+      coWait: '#daf1f5',
+      amo: '#ffc0cc',
+      fenceFlush: '#eee9e2',
+      co: '#a2e5b3',
+      flushed: '#ffebea',
+      pcFind: '255,204,0',
+      stallBand: '88,86,214',
+      memWbQueued: '#f7eefc',
+      memWbEviction: '#6bc4ed',
     });
     let COL = COL_DARK;
 
@@ -3062,8 +3102,8 @@
     /* Needs: COL_DARK, COL_LIGHT, COL, INK, readInks, rebuildThemedTables, records, buildLegend,
      * redraw, redrawStallDiagramIfOpen, tooltip, hideTip, cssToken, css-tokens-light */
 
-    /* Two looks, dark and light. The stylesheet holds the inks, and the stage colours are
-     * written for the dark ground, so the light look derives its own from them. */
+    /* Two looks, dark and light, each with its own stage colours. The stylesheet holds the other
+     * inks. */
     const THEME_LIGHT = 'light';
 
     function currentTheme() {
@@ -3122,51 +3162,53 @@
         -0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s];
     }
 
-    /* A colour at or under MIRROR_SPLIT has its OKLab lightness mirrored, so a quiet dark wait
-     * becomes a quiet pale tint. A brighter one keeps its hue and drops at most to BRIGHT_CAP, so
-     * orange stays orange. Chroma shrinks only as far as sRGB needs. */
-    const MIRROR_SPLIT = 0.6;
-    const MIRROR_SUM = 1.13;
-    const MIRROR_CEILING = 0.89;
-    const BRIGHT_CAP = 0.74;
-    const CHROMA_BOOST = 1.2;
-    const CHROMA_STEP = 0.92;
-
-    function mirrorColour(colour) {
-      const parsed = parseColour(colour);
-      if (!parsed) return colour;
-      const [lightness, a, b] = toOklab(parsed);
-      if (lightness > MIRROR_SPLIT && lightness <= BRIGHT_CAP) return colour;
-      const dark = lightness <= MIRROR_SPLIT;
-      const target = dark ? Math.min(MIRROR_CEILING, MIRROR_SUM - lightness) : BRIGHT_CAP;
-      let chroma = dark ? CHROMA_BOOST : 1;
-      let linear = fromOklab([target, a * chroma, b * chroma]);
-      while (linear.some(v => v < -0.001 || v > 1.001) && chroma > 0.05) {
-        chroma *= CHROMA_STEP;
-        linear = fromOklab([target, a * chroma, b * chroma]);
-      }
-      const rgb = linear.map(linearToSrgb);
-      const text = String(colour).trim();
-      if (!text.startsWith('#') && !text.startsWith('rgb')) return rgb.join(',');
-      if (parsed[3] < 1) return `rgba(${rgb.join(',')},${parsed[3]})`;
-      return `#${rgb.map(v => v.toString(16).padStart(2, '0')).join('')}`;
+    /* The page's stage colours in the current look, each look with a table of its own. */
+    function stageColours() {
+      return currentTheme() === THEME_LIGHT ? COL_LIGHT : COL_DARK;
     }
 
-    /* The page's stage colours in the current look, with the page's own light choices on top. */
-    function stageColours() {
-      if (currentTheme() !== THEME_LIGHT) return COL_DARK;
-      const light = {};
-      for (const [key, value] of Object.entries(COL_DARK)) light[key] = mirrorColour(value);
-      return Object.freeze({ ...light, ...COL_LIGHT });
+    /* On light, text in a stage's colour is that hue darkened in OKLab until it reads on its
+     * ground, as a calendar writes an event in its own colour. A grey stays grey. */
+    const HUE_INK_LIGHTNESS = 0.42;
+    const HUE_INK_CHROMA = 0.13;
+    const hueInks = new Map();
+
+    function hueInk(colour, ground) {
+      const key = `${colour}@${ground}`;
+      if (hueInks.has(key)) return hueInks.get(key);
+      const [, a, b] = toOklab(colour);
+      const chroma = Math.hypot(a, b);
+      const boost = chroma < 0.01 ? 0 : HUE_INK_CHROMA / chroma;
+      let ink = [29, 29, 31, 1];
+      for (let lightness = HUE_INK_LIGHTNESS; lightness > 0.2; lightness -= 0.03) {
+        let scale = boost;
+        let linear = fromOklab([lightness, a * scale, b * scale]);
+        while (linear.some(v => v < -0.001 || v > 1.001) && scale > 0.05) {
+          scale *= 0.92;
+          linear = fromOklab([lightness, a * scale, b * scale]);
+        }
+        const rgb = linear.map(linearToSrgb).concat(1);
+        if (contrastRatio(rgb, ground) >= 4.5) {
+          ink = rgb;
+          break;
+        }
+      }
+      hueInks.set(key, ink);
+      return ink;
     }
 
     /* Stage names take their cell's colour, which can sit too close to the tooltip's ground to read
-     * as text. On dark a hex under the Rec. 709 luma floor is scaled up to it, and on light one over
-     * the ceiling is scaled down to it. */
+     * as text. On dark a hex under the Rec. 709 luma floor is scaled up to it, and on light the
+     * name takes its hue's ink. */
     const LEGIBLE_MIN_LUMINANCE = 130;
-    const LEGIBLE_MAX_LUMINANCE = 100;
 
     function legibleText(hex) {
+      if (currentTheme() === THEME_LIGHT) {
+        const colour = parseColour(hex), ground = parseColour(cssToken('--bg2'));
+        if (!colour || !ground) return hex;
+        const [red, green, blue] = hueInk(layOver(colour, ground), ground);
+        return `rgb(${red}, ${green}, ${blue})`;
+      }
       let digits = String(hex).replace('#', '');
       if (digits.length === 3) digits = digits.split('').map(c => c + c).join('');
       if (!/^[0-9a-fA-F]{6}$/.test(digits)) return hex;
@@ -3174,10 +3216,8 @@
       let g = parseInt(digits.slice(2, 4), 16);
       let b = parseInt(digits.slice(4, 6), 16);
       const luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b;
-      const light = currentTheme() === THEME_LIGHT;
-      const bound = light ? LEGIBLE_MAX_LUMINANCE : LEGIBLE_MIN_LUMINANCE;
-      if (light ? luminance > bound : luminance < bound) {
-        const scale = bound / Math.max(luminance, 1);
+      if (luminance < LEGIBLE_MIN_LUMINANCE) {
+        const scale = LEGIBLE_MIN_LUMINANCE / Math.max(luminance, 1);
         r = Math.min(255, Math.round(r * scale));
         g = Math.min(255, Math.round(g * scale));
         b = Math.min(255, Math.round(b * scale));
@@ -3185,11 +3225,13 @@
       return `rgb(${r}, ${g}, ${b})`;
     }
 
-    /* A cell's tag takes white or near-black ink, whichever stands out more from its fill, with a
-     * translucent fill laid over the rows' ground first. White keeps each lane's own alpha. */
+    /* On dark a cell's tag takes white or near-black ink, whichever stands out more from its fill
+     * laid over the rows' ground, white at each lane's alpha. On light it takes its hue's ink,
+     * and white only on a fill deeper than TAG_WHITE_BELOW. */
     const TAG_ALPHA = Object.freeze({ cell: 0.55, strip: 0.85, part: 0.92 });
     const TAG_INK_DARK = '20,20,22';
     const TAG_DARK_ALPHA_MIN = 0.82;
+    const TAG_WHITE_BELOW = 0.6;
     const tagInks = new Map();
 
     function relativeLuminance(rgb) {
@@ -3216,6 +3258,10 @@
         const base = parseColour(fill), floor = parseColour(ground);
         if (!base || !floor) {
           ink = light;
+        } else if (currentTheme() === THEME_LIGHT) {
+          const under = layOver(base, floor);
+          ink = toOklab(under)[0] < TAG_WHITE_BELOW ? light
+            : `rgb(${hueInk(under, under).slice(0, 3).join(',')})`;
         } else {
           const under = layOver(base, floor);
           const lightContrast = contrastRatio(layOver(parseColour(light), under), under);
