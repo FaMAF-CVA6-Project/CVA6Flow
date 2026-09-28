@@ -2167,7 +2167,7 @@ def build_degraded(resolved, run, pipeline):
         "produce, so every co_cycle is null and the VCD is most likely cut.")
     period = run.vcd_clock_period
     first = run.first_edge_ts or 0
-    # A dump windowed with verilator_changes/custom_size_vcds starts part
+    # A dump windowed with verilator_changes/vcd_window starts part
     # way through the run, which moves every timestamp but not the period.
     census.require(
         not period or period <= 0 or first <= 2 * period, "windowed",
