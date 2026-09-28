@@ -84,58 +84,58 @@
 
     /* Needs: css-tokens */
 
-    /* The light look, for printed figures. It restates every colour of css-tokens, so the pages
-     * keep one light palette, and each page restates its own colours beside its own root. */
+    /* The light look, a calm off-white ground rather than paper white, for daylight and figures.
+     * It restates every colour of css-tokens, and each page restates its own beside its root. */
     html[data-theme="light"] {
-      --bg: #ffffff;
-      --bg2: #f4f4f2;
-      --bg3: #eaeae6;
-      --bg4: #dcdcd7;
-      --border: rgba(0, 0, 0, 0.09);
-      --border2: rgba(0, 0, 0, 0.18);
-      --text: #1c1c1e;
-      --text2: #45454a;
-      --text3: #6f6f69;
-      --text-id: #8a8a84;
-      --text-pc: #72729a;
-      --text-hit: #8a5a00;
-      --accent: #127552;
-      --warn: #a86400;
-      --bad: #c3373d;
-      --compressed: #0f8a80;
-      --link: #1d64a8;
-      --link-hover: #0f4a82;
-      --link-dim: #5a6f8f;
-      --grip: rgba(29, 100, 168, 0.45);
-      --focus: rgba(29, 100, 168, 0.4);
+      --bg: #eeeeea;
+      --bg2: #e5e5e0;
+      --bg3: #dadad4;
+      --bg4: #cfcfc8;
+      --border: rgba(0, 0, 0, 0.1);
+      --border2: rgba(0, 0, 0, 0.19);
+      --text: #2a2a2e;
+      --text2: #4a4a50;
+      --text3: #65655f;
+      --text-id: #7f7f79;
+      --text-pc: #62628c;
+      --text-hit: #6e4800;
+      --accent: #0f6e4c;
+      --warn: #8f5600;
+      --bad: #b3313a;
+      --compressed: #0c7d74;
+      --link: #1a5a98;
+      --link-hover: #0f4478;
+      --link-dim: #56698a;
+      --grip: rgba(26, 90, 152, 0.45);
+      --focus: rgba(26, 90, 152, 0.4);
       --crosshair: rgba(0, 0, 0, 0.22);
-      --timeline-bg: #ffffff;
-      --scrollbar-thumb: #c4c4c0;
-      --scrollbar-thumb-hover: #b0b0ac;
-      --ruler-bg: #f4f4f1;
-      --label-row: #ffffff;
-      --label-row-alternate: #f5f5f3;
-      --label-row-hit: #fbecc8;
-      --scrim: rgba(0, 0, 0, 0.3);
-      --shadow: rgba(0, 0, 0, 0.18);
-      --timeline-row: #ffffff;
-      --timeline-row-alternate: #f5f5f3;
+      --timeline-bg: #eeeeea;
+      --scrollbar-thumb: #bdbdb6;
+      --scrollbar-thumb-hover: #a8a8a1;
+      --ruler-bg: #e5e5e0;
+      --label-row: #eeeeea;
+      --label-row-alternate: #e7e7e2;
+      --label-row-hit: #efd9a4;
+      --scrim: rgba(0, 0, 0, 0.25);
+      --shadow: rgba(0, 0, 0, 0.16);
+      --timeline-row: #eeeeea;
+      --timeline-row-alternate: #e7e7e2;
       --grid-minor: rgba(0, 0, 0, 0.05);
       --grid-major: rgba(0, 0, 0, 0.11);
       --grid-sparse: rgba(0, 0, 0, 0.08);
-      --ruler-tick: #dcdcd8;
-      --ruler-tick-major: #b4b4ae;
-      --ruler-text: #5c5c57;
-      --empty-range: #6b6b66;
-      --op-int: #1d7a4a;
-      --op-fp: #1d64a8;
-      --op-mem: #9a5b00;
-      --op-branch: #7a3fb0;
-      --op-flushed: #a04848;
-      --forward-arrival: #4d6363;
-      --stall-ground: #ecece8;
-      --stall-label: #5c5c57;
-      --stall-axis: #a4a4a0;
+      --ruler-tick: #cfcfc9;
+      --ruler-tick-major: #a9a9a3;
+      --ruler-text: #55554f;
+      --empty-range: #66665f;
+      --op-int: #1a7044;
+      --op-fp: #1a5a98;
+      --op-mem: #8a5200;
+      --op-branch: #6e38a0;
+      --op-flushed: #984242;
+      --forward-arrival: #4a5f5f;
+      --stall-ground: #e2e2dd;
+      --stall-label: #55554f;
+      --stall-axis: #9d9d97;
       color-scheme: light;
     }
 
@@ -1845,7 +1845,7 @@
           <select class="tool-select" id="theme-select" data-remember
             title="Light suits a printed page. The choice is remembered, like the toggles.">
             <option value="dark">Dark</option>
-            <option value="light">Light, for print</option>
+            <option value="light">Light</option>
           </select>
         </label>
         <div class="menu-buttons">
@@ -3062,7 +3062,7 @@
     /* Needs: COL_DARK, COL_LIGHT, COL, INK, readInks, rebuildThemedTables, records, buildLegend,
      * redraw, redrawStallDiagramIfOpen, tooltip, hideTip, cssToken, css-tokens-light */
 
-    /* Two looks, dark and light for print. The stylesheet holds the inks, and the stage colours are
+    /* Two looks, dark and light. The stylesheet holds the inks, and the stage colours are
      * written for the dark ground, so the light look derives its own from them. */
     const THEME_LIGHT = 'light';
 
@@ -3126,10 +3126,10 @@
      * becomes a quiet pale tint. A brighter one keeps its hue and drops at most to BRIGHT_CAP, so
      * orange stays orange. Chroma shrinks only as far as sRGB needs. */
     const MIRROR_SPLIT = 0.6;
-    const MIRROR_SUM = 1.21;
-    const MIRROR_CEILING = 0.97;
-    const BRIGHT_CAP = 0.78;
-    const CHROMA_BOOST = 1.15;
+    const MIRROR_SUM = 1.13;
+    const MIRROR_CEILING = 0.89;
+    const BRIGHT_CAP = 0.74;
+    const CHROMA_BOOST = 1.2;
     const CHROMA_STEP = 0.92;
 
     function mirrorColour(colour) {
