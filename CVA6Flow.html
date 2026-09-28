@@ -24,9 +24,9 @@
       --border2: rgba(255, 255, 255, .14);
       --text: #e4e2dc;
       --text2: #a0a09a;
-      --text3: #505050;
-      --text-id: #383838;
-      --text-pc: #505070;
+      --text3: #76766f;
+      --text-id: #6a6a68;
+      --text-pc: #66668c;
       --text-hit: #f0d090;
       --accent: #3ecf9a;
       --warn: #f0a030;
@@ -47,6 +47,26 @@
       --label-row-hit: #4a3a18;
       --scrim: rgba(0, 0, 0, 0.55);
       --shadow: rgba(0, 0, 0, 0.5);
+      /* The diagram's own inks. The script reads them again whenever the theme
+       * changes, since a canvas keeps no reference to a token. */
+      --timeline-row: #1a1a1c;
+      --timeline-row-alternate: #1c1c1e;
+      --grid-minor: rgba(255, 255, 255, 0.03);
+      --grid-major: rgba(255, 255, 255, 0.07);
+      --grid-sparse: rgba(255, 255, 255, 0.05);
+      --ruler-tick: #252525;
+      --ruler-tick-major: #383838;
+      --ruler-text: #909090;
+      --empty-range: #707070;
+      --op-int: #70d090;
+      --op-fp: #5aabf0;
+      --op-mem: #e0a030;
+      --op-branch: #c890e8;
+      --op-flushed: #804040;
+      --forward-arrival: #90a5a5;
+      --stall-ground: #232326;
+      --stall-label: #909090;
+      --stall-axis: #505050;
       --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
       --font-mono: 'SF Mono', Menlo, Consolas, monospace;
       /* Canvas geometry depends on these sizes, so the script reads or mirrors
@@ -55,15 +75,84 @@
       --label-w: 390px;
       --mem-wb-h: 140px;
       --label-pad-x: 6px;
+      color-scheme: dark;
     }
 
     /* SHARED END css-tokens */
 
+    /* SHARED BEGIN css-tokens-light */
+
+    /* Needs: css-tokens */
+
+    /* The light look, for printed figures. It restates every colour of css-tokens, so the pages
+     * keep one light palette, and each page restates its own colours beside its own root. */
+    html[data-theme="light"] {
+      --bg: #ffffff;
+      --bg2: #f4f4f2;
+      --bg3: #eaeae6;
+      --bg4: #dcdcd7;
+      --border: rgba(0, 0, 0, 0.09);
+      --border2: rgba(0, 0, 0, 0.18);
+      --text: #1c1c1e;
+      --text2: #45454a;
+      --text3: #6f6f69;
+      --text-id: #8a8a84;
+      --text-pc: #72729a;
+      --text-hit: #8a5a00;
+      --accent: #127552;
+      --warn: #a86400;
+      --bad: #c3373d;
+      --compressed: #0f8a80;
+      --link: #1d64a8;
+      --link-hover: #0f4a82;
+      --link-dim: #5a6f8f;
+      --grip: rgba(29, 100, 168, 0.45);
+      --focus: rgba(29, 100, 168, 0.4);
+      --crosshair: rgba(0, 0, 0, 0.22);
+      --timeline-bg: #ffffff;
+      --scrollbar-thumb: #c4c4c0;
+      --scrollbar-thumb-hover: #b0b0ac;
+      --ruler-bg: #f4f4f1;
+      --label-row: #ffffff;
+      --label-row-alternate: #f5f5f3;
+      --label-row-hit: #fbecc8;
+      --scrim: rgba(0, 0, 0, 0.3);
+      --shadow: rgba(0, 0, 0, 0.18);
+      --timeline-row: #ffffff;
+      --timeline-row-alternate: #f5f5f3;
+      --grid-minor: rgba(0, 0, 0, 0.05);
+      --grid-major: rgba(0, 0, 0, 0.11);
+      --grid-sparse: rgba(0, 0, 0, 0.08);
+      --ruler-tick: #dcdcd8;
+      --ruler-tick-major: #b4b4ae;
+      --ruler-text: #5c5c57;
+      --empty-range: #6b6b66;
+      --op-int: #1d7a4a;
+      --op-fp: #1d64a8;
+      --op-mem: #9a5b00;
+      --op-branch: #7a3fb0;
+      --op-flushed: #a04848;
+      --forward-arrival: #4d6363;
+      --stall-ground: #ecece8;
+      --stall-label: #5c5c57;
+      --stall-axis: #a4a4a0;
+      color-scheme: light;
+    }
+
+    /* SHARED END css-tokens-light */
+
     /* The colours of the side track and the histogram, which MinorFlow does not
-     * draw. The stylesheet alone reads them. */
+     * draw. The script reads the lane line, and the stylesheet the rest. */
     :root {
       --mem-wb-title: #e6b45a;
       --histogram-bar: #b08020;
+      --mem-wb-lane-line: rgba(255, 255, 255, 0.05);
+    }
+
+    html[data-theme="light"] {
+      --mem-wb-title: #9a6a10;
+      --histogram-bar: #c79a3a;
+      --mem-wb-lane-line: rgba(0, 0, 0, 0.08);
     }
 
     /* SHARED BEGIN css-base */
@@ -168,6 +257,8 @@
     .toolbar-label {
       font-size: 11px;
       color: var(--text3);
+      white-space: nowrap;
+      flex-shrink: 0;
     }
 
     .scope-badge {
@@ -267,7 +358,7 @@
       display: inline-block;
       vertical-align: middle;
       /* With overflow hidden a flex item's minimum width resolves to zero, which
-       * squeezed the name to nothing. The bar scrolls instead. */
+       * squeezed the name to nothing. The bar wraps instead. */
       flex-shrink: 0;
     }
 
@@ -275,17 +366,17 @@
       display: none;
     }
 
+    /* The bar wraps onto a second line in a narrow window rather than push its end off screen. */
     #top-bar {
-      height: 42px;
+      min-height: 42px;
       flex-shrink: 0;
       background: var(--bg2);
       border-bottom: 0.5px solid var(--border2);
-      padding: 0 14px;
+      padding: 6px 14px;
       display: flex;
+      flex-wrap: wrap;
       align-items: center;
-      gap: 10px;
-      overflow-x: auto;
-      overflow-y: hidden;
+      gap: 6px 10px;
     }
 
     #degraded-banner {
@@ -299,6 +390,164 @@
     }
 
     /* SHARED END css-toolbar */
+
+    /* SHARED BEGIN css-menus */
+
+    /* Needs: css-tokens */
+
+    /* The menus drop down from the bar. Each panel is fixed and the script places it under its
+     * button, inside the window whichever line the bar wrapped the button onto. */
+    .menu > summary {
+      list-style: none;
+    }
+
+    .menu > summary::-webkit-details-marker {
+      display: none;
+    }
+
+    .menu-panel {
+      position: fixed;
+      z-index: 40;
+      width: min(330px, calc(100vw - 32px));
+      overflow-y: auto;
+      padding: 10px 12px;
+      background: var(--bg2);
+      border: 0.5px solid var(--border2);
+      border-radius: 6px;
+      box-shadow: 0 8px 28px var(--shadow);
+      white-space: normal;
+      line-height: 1.5;
+      color: var(--text2);
+      font-size: 11px;
+    }
+
+    .menu-panel .option-row {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      margin: 6px 0;
+    }
+
+    .menu-panel p {
+      margin: 4px 0 8px;
+      color: var(--muted, var(--text2));
+    }
+
+    .menu-section {
+      margin: 12px 0 4px;
+      color: var(--muted, var(--text2));
+      font-size: 10px;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+    }
+
+    .menu-section:first-child {
+      margin-top: 0;
+    }
+
+    .menu-checks {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 0 10px;
+    }
+
+    .menu-check {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      margin: 2px 0;
+      cursor: pointer;
+    }
+
+    .menu-panel input[type=checkbox] {
+      margin: 0;
+      accent-color: var(--accent);
+    }
+
+    .menu-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      margin: 5px 0;
+    }
+
+    .menu-panel input[type=text] {
+      flex: 1;
+      min-width: 0;
+      padding: 3px 6px;
+      background: var(--bg3);
+      border: 0.5px solid var(--border2);
+      border-radius: 4px;
+      color: var(--text);
+      font-size: 11px;
+    }
+
+    .menu-panel input[type=color] {
+      width: 30px;
+      height: 20px;
+      padding: 0;
+      background: none;
+      border: 0.5px solid var(--border2);
+      border-radius: 4px;
+      cursor: pointer;
+    }
+
+    .menu-buttons {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin: 6px 0;
+    }
+
+    /* A select in the bar or in a menu, on the same ground as the buttons. */
+    .tool-select {
+      padding: 2px 6px;
+      background: var(--bg3);
+      border: 0.5px solid var(--border2);
+      border-radius: 5px;
+      color: var(--text2);
+      font-size: 11px;
+      max-width: 250px;
+      flex-shrink: 0;
+    }
+
+    /* SHARED END css-menus */
+
+    /* SHARED BEGIN css-figure-mode */
+
+    /* Needs: css-tokens */
+
+    /* Figure mode leaves the diagram alone on the page, for a screenshot. The Find PC row keeps its
+     * height, so the labels stay level with their rows. */
+    body.figure-mode #top-bar,
+    body.figure-mode #degraded-banner,
+    body.figure-mode #metric-bar,
+    body.figure-mode #pin-dock,
+    body.figure-mode #crosshair {
+      display: none !important;
+    }
+
+    body.figure-mode #label-head > * {
+      visibility: hidden;
+    }
+
+    #figure-hint {
+      position: fixed;
+      top: 10px;
+      right: 12px;
+      z-index: 45;
+      padding: 5px 10px;
+      background: var(--bg3);
+      border: 0.5px solid var(--border2);
+      border-radius: 5px;
+      box-shadow: 0 6px 20px var(--shadow);
+      color: var(--text2);
+      font-size: 11px;
+      pointer-events: none;
+    }
+
+    /* SHARED END css-figure-mode */
 
     /* ==========================================================================
      * 3. Drop zone and sample picker
@@ -574,6 +823,27 @@
       font-family: var(--font-sans);
     }
 
+    /* The mnemonic's colour by what executes it, dimmed on a flushed record. */
+    .label-mnemonic.op-int {
+      color: var(--op-int);
+    }
+
+    .label-mnemonic.op-fp {
+      color: var(--op-fp);
+    }
+
+    .label-mnemonic.op-mem {
+      color: var(--op-mem);
+    }
+
+    .label-mnemonic.op-branch {
+      color: var(--op-branch);
+    }
+
+    .label-mnemonic.op-flushed {
+      color: var(--op-flushed);
+    }
+
     .label-row.pc-find-hit .label-id {
       color: var(--text-hit);
     }
@@ -844,7 +1114,7 @@
     }
 
     .pin-card {
-      flex: 0 0 236px;
+      flex: 0 0 300px;
       background: var(--bg);
       border: 0.5px solid var(--border2);
       border-radius: 5px;
@@ -1539,28 +1809,53 @@
       <input type="checkbox" id="tooltip-on" data-remember checked>
       Tooltip
     </label>
-    <label class="toolbar-check"
-      title="Draw an arrow from each producer to its consumer, ending at the consumer's issue cycle. Teal is a same-cycle forward from writeback, purple a value read from the scoreboard.">
-      <input type="checkbox" id="forwarding-on" data-remember>
-      Forwarding
-    </label>
-    <label class="toolbar-check"
-      title="The wait before this fetch could start, measured from the previous fetch request. It covers front-end queue backpressure plus I-cache busy time inherited from the fetch before it. Only its cell follows this toggle, since Cycles and every stall figure count the wait either way.">
-      <input type="checkbox" id="pre-fetch-wait-on" data-remember>
-      Pre-fetch Wait
-    </label>
-    <label class="toolbar-check"
-      title="Tint every cycle column that contains a stall of any kind. The set is the deduplicated total the Stall metric reports for the current fetch range, so the highlight and the metric always agree.">
-      <input type="checkbox" id="stall-band-on" data-remember>
-      Stalls
-    </label>
-    <span class="toolbar-separator">│</span>
-    <button class="tool-button" id="metric-bar-toggle"
-      title="Hide the metric bar along the bottom to give the timeline more height.">▼ Hide Metrics</button>
-    <button class="tool-button" id="labels-toggle"
-      title="Collapse the label column to give the timeline more room.">◀ Hide Labels</button>
-    <button class="tool-button" id="mem-wb-toggle"
-      title="Show or hide the memory writeback track. Each bar is a dirty D-cache line written back to memory, with the eviction that caused it.">▼ Hide Writebacks</button>
+    <details class="menu" id="view-menu">
+      <summary class="tool-button"
+        title="What the diagram draws, which panels show and how the page looks, for screenshots and figures.">View ▾</summary>
+      <div class="menu-panel">
+        <div class="menu-section">Draw</div>
+        <div class="menu-checks">
+          <label class="toolbar-check"
+            title="Draw an arrow from each producer to its consumer, ending at the consumer's issue cycle. Teal is a same-cycle forward from writeback, purple a value read from the scoreboard.">
+            <input type="checkbox" id="forwarding-on" data-remember>
+            Forwarding
+          </label>
+          <label class="toolbar-check"
+            title="The wait before this fetch could start, measured from the previous fetch request. It covers front-end queue backpressure plus I-cache busy time inherited from the fetch before it. Only its cell follows this toggle, since Cycles and every stall figure count the wait either way.">
+            <input type="checkbox" id="pre-fetch-wait-on" data-remember>
+            Pre-fetch Wait
+          </label>
+          <label class="toolbar-check"
+            title="Tint every cycle column that contains a stall of any kind. The set is the deduplicated total the Stall metric reports for the current fetch range, so the highlight and the metric always agree.">
+            <input type="checkbox" id="stall-band-on" data-remember>
+            Stalls
+          </label>
+        </div>
+        <div class="menu-section">Panels</div>
+        <div class="menu-buttons">
+          <button class="tool-button" id="metric-bar-toggle"
+            title="Hide the metric bar along the bottom to give the timeline more height.">▼ Hide Metrics</button>
+          <button class="tool-button" id="labels-toggle"
+            title="Collapse the label column to give the timeline more room.">◀ Hide Labels</button>
+          <button class="tool-button" id="mem-wb-toggle"
+            title="Show or hide the memory writeback track. Each bar is a dirty D-cache line written back to memory, with the eviction that caused it.">▼ Hide Writebacks</button>
+        </div>
+        <div class="menu-section">Look</div>
+        <label class="menu-row">Theme
+          <select class="tool-select" id="theme-select" data-remember
+            title="Light suits a printed page. The choice is remembered, like the toggles.">
+            <option value="dark">Dark</option>
+            <option value="light">Light, for print</option>
+          </select>
+        </label>
+        <div class="menu-buttons">
+          <button class="tool-button" id="figure-mode-button"
+            title="Leave the diagram alone on the page, for a screenshot. Key: F, and F or Esc brings the page back.">Figure mode</button>
+          <button class="tool-button" id="view-screenshot"
+            title="Save the window as a PNG at three times its resolution, into the browser's downloads. The S key does the same.">Screenshot</button>
+        </div>
+      </div>
+    </details>
     <span class="toolbar-separator">│</span>
     <button class="tool-button" id="extra-info-toggle"
       title="Configuration of the whole JSON, and statistics for the current fetch range.">⚙ Extra Info</button>
@@ -1614,7 +1909,7 @@
     <h2>Drag a CVA6Flow JSON here, or click to browse</h2>
     <p>Written by CVA6Flow_tracer.py from a Verilator VCD of CVA6.</p>
     <p>Run the tracer with the objdump listing beside the VCD, which fills the instruction column.</p>
-    <p>Keys: + and - to zoom, arrows to navigate, Home and End to jump, Enter and Shift+Enter to step through PC matches, P to pin the tooltip, S to save a screenshot, Esc to close panels and clear the pins</p>
+    <p>Keys: + and - to zoom, arrows to navigate, Home and End to jump, Enter and Shift+Enter to step through PC matches, P to pin the tooltip, S to save a screenshot, F for figure mode, Esc to close menus and panels, leave figure mode and clear the pins</p>
     <div id="sample-picker">
       <select id="sample-select" title="Which sample JSON in tests/ to load." hidden></select>
       <button id="sample-load-button" hidden
@@ -1724,6 +2019,7 @@
   <!-- ============================ 7. Tooltip ============================ -->
 
   <div id="tooltip"></div>
+  <div id="figure-hint" hidden>Figure mode. F or Esc brings the page back.</div>
 
   <!-- ========================== 8. Extra Info =========================== -->
 
@@ -1902,11 +2198,13 @@
     const SCREENSHOT_SCALE = 3;
     const HISTOGRAM_BAR_MAX_PX = 56;
     const HISTOGRAM_BAR_MIN_PX = 2;
+    /* The alpha of a writeback bar's line number, in whichever ink its fill takes. */
+    const MEM_WB_TAG_ALPHA = 0.78;
 
     /* One key per drawn thing, shared by the legend, cellsOf and the stage
      * indicator. pcFind and stallBand are RGB triples, since each is drawn at
      * more than one alpha. */
-    const COL = Object.freeze({
+    const COL_DARK = Object.freeze({
       preFetchWait: '#3a3445',
       bubblePredTaken: 'rgb(160,110,225)',
       bubbleUnpred: 'rgb(230,180,90)',
@@ -1947,34 +2245,31 @@
       flushed: '#3a1515',
       pcFind: '235,180,80',
       stallBand: '120,150,210',
-    });
-
-    /* Canvas and tooltip inks that are not cells. */
-    const INK = Object.freeze({
-      rowEven: '#1c1c1e',
-      rowOdd: '#1a1a1c',
-      rowEvenBanded: 'rgba(28,28,30,0.55)',
-      rowOddBanded: 'rgba(26,26,28,0.55)',
-      belowRows: cssToken('--bg'),
-      gridMinor: 'rgba(255,255,255,.03)',
-      gridMajor: 'rgba(255,255,255,.07)',
-      gridSparse: 'rgba(255,255,255,.05)',
-      rulerGround: cssToken('--ruler-bg'),
-      rulerTick: '#252525',
-      rulerTickMajor: '#383838',
-      rulerText: '#909090',
-      cellTag: 'rgba(255,255,255,0.55)',
-      stripTag: 'rgba(255,255,255,0.85)',
-      emptyRange: '#707070',
-      flushedMnemonic: '#804040',
-      opText: Object.freeze({ mem: '#e0a030', fp: '#5aabf0', branch: '#c890e8', int: '#70d090' }),
-      memWbGround: cssToken('--timeline-bg'),
-      memWbLaneLine: 'rgba(255,255,255,.05)',
-      memWbLaneText: cssToken('--text3'),
       memWbQueued: '#352060',
       memWbEviction: '#40c0ff',
-      memWbTag: 'rgba(255,255,255,.78)',
     });
+    /* The light look's own choices where the derived colour would not do, thin lines and outlines
+     * that must stand out from white. Every other stage colour is derived from the dark one. */
+    const COL_LIGHT = Object.freeze({
+      feSynth: 'rgba(28,28,30,0.7)',
+      fwdWb: '#12857e',
+      fwdSb: '#a050a0',
+      flushedFwd: '#a04a4a',
+    });
+    let COL = COL_DARK;
+
+    /* Canvas and tooltip inks that are not cells, read from the stylesheet by applyTheme, which
+     * start-up runs before anything is drawn. */
+    let INK = null;
+
+    function readInks() {
+      return Object.freeze({
+        ...commonInks(),
+        memWbGround: cssToken('--timeline-bg'),
+        memWbLaneLine: cssToken('--mem-wb-lane-line'),
+        memWbLaneText: cssToken('--text3'),
+      });
+    }
 
     /* SHARED BEGIN legend-text */
 
@@ -1984,7 +2279,7 @@
      * thing reads the same in both viewers. A core sentence follows where the
      * page adds one. */
     const LEGEND_SHARED = Object.freeze({
-      preFetchWait: 'Toolbar toggle "Pre-fetch Wait". The wait before this fetch could start, '
+      preFetchWait: 'View menu toggle "Pre-fetch Wait". The wait before this fetch could start, '
         + 'measured from the previous fetch request. It counts in Cycles, and towards Flush stall '
         + 'when the instruction resumes after a flush and towards Fetch stall otherwise, whether '
         + 'or not the toggle draws it.',
@@ -2009,7 +2304,7 @@
       bpCorrect: 'Cap on the Fetch2 cell of a control-flow instruction whose prediction stood, so '
         + 'no redirect was needed. T is resolved taken, N resolved not taken. A correctly '
         + 'predicted taken branch still pays a predicted-taken bubble.',
-      flushedFwd: 'Toolbar toggle "Forwarding". An arrow into a flushed consumer, in the flushed '
+      flushedFwd: 'View menu toggle "Forwarding". An arrow into a flushed consumer, in the flushed '
         + 'colour lifted enough to follow. The forward happened, on the wrong path.',
       fp: 'Running on a floating-point unit.',
       branch: 'Running a control-flow instruction, where it resolves.',
@@ -2029,36 +2324,38 @@
         + 'architecturally visible.',
       pcFind: 'The address search hit the cursor is on. Enter and Shift+Enter step through the '
         + 'matches, and the same tint marks the row in the label column.',
-      stallBand: 'Toolbar toggle "Stalls". Tints every cycle column holding a stall of any kind, '
+      stallBand: 'View menu toggle "Stalls". Tints every cycle column holding a stall of any kind, '
         + 'the same deduplicated set the Stall metric counts for the current fetch range.',
     });
 
     /* SHARED END legend-text */
 
-    const BUBBLE_KINDS = Object.freeze({
+    const bubbleKinds = () => Object.freeze({
       pred_taken: {
         legendKey: 'bubblePredTaken', label: 'Bubble: predicted taken',
         shortLabel: 'predicted taken', swatch: COL.bubblePredTaken,
-        fill: 'rgba(160,110,225,0.55)',
+        fill: withAlpha(COL.bubblePredTaken, 0.55),
         desc: `${LEGEND_SHARED.bubblePredTaken} The predictor's cost is one cycle, and any longer `
           + 'gap is queue backpressure.',
       },
       unpred: {
         legendKey: 'bubbleUnpred', label: 'Bubble: unpredicted', shortLabel: 'unpredicted',
-        swatch: COL.bubbleUnpred, fill: 'rgba(230,180,90,0.55)', desc: LEGEND_SHARED.bubbleUnpred,
+        swatch: COL.bubbleUnpred, fill: withAlpha(COL.bubbleUnpred, 0.55),
+        desc: LEGEND_SHARED.bubbleUnpred,
       },
       mispred: {
         legendKey: 'bubbleMispred', label: 'Bubble: mispredict', shortLabel: 'mispredict',
-        swatch: COL.bubbleMispred, fill: 'rgba(255,168,80,0.55)',
+        swatch: COL.bubbleMispred, fill: withAlpha(COL.bubbleMispred, 0.55),
         desc: LEGEND_SHARED.bubbleMispred,
       },
       flush: {
         legendKey: 'bubbleFlush', label: 'Bubble: CSR or fence flush', shortLabel: 'flush',
-        swatch: COL.bubbleFlush, fill: 'rgba(90,160,170,0.55)',
+        swatch: COL.bubbleFlush, fill: withAlpha(COL.bubbleFlush, 0.55),
         desc: 'A refill after a flush from a CSR write, a fence, an atomic commit or an exception '
           + 'entry.',
       },
     });
+    let BUBBLE_KINDS = bubbleKinds();
     /* Bubbles after a redirect from Execute or a flush, which count as Flush
      * stall. A predicted-taken bubble is a steering bubble. */
     const FLUSH_BUBBLE_KINDS = new Set(['unpred', 'mispred', 'flush']);
@@ -2066,7 +2363,7 @@
 
     /* In legend order. Each entry is listed only while the current fetch range
      * draws it. */
-    const LEGEND_ENTRIES = Object.freeze([
+    const legendEntries = () => Object.freeze([
       {
         key: 'preFetchWait', label: 'Pre-fetch wait', swatch: COL.preFetchWait,
         desc: `${LEGEND_SHARED.preFetchWait} It covers front-end queue backpressure plus I-cache `
@@ -2146,12 +2443,12 @@
       },
       {
         key: 'fwdWb', label: 'Forward via writeback', swatch: COL.fwdWb,
-        desc: 'Toolbar toggle "Forwarding". An operand forwarded from a producer\'s writeback in '
+        desc: 'View menu toggle "Forwarding". An operand forwarded from a producer\'s writeback in '
           + 'the same cycle. The arrow ends at the consumer\'s issue cycle.',
       },
       {
         key: 'fwdSb', label: 'Forward via scoreboard', swatch: COL.fwdSb,
-        desc: 'Toolbar toggle "Forwarding". An operand read from a producer\'s scoreboard slot, '
+        desc: 'View menu toggle "Forwarding". An operand read from a producer\'s scoreboard slot, '
           + 'written back earlier. The arrow ends at the consumer\'s issue cycle.',
       },
       {
@@ -2215,8 +2512,17 @@
         desc: LEGEND_SHARED.stallBand,
       },
     ]);
-    const LEGEND_BY_KEY = new Map(LEGEND_ENTRIES.map(entry => [entry.key, entry]));
-    const LEGEND_KEY_BY_LABEL = new Map(LEGEND_ENTRIES.map(entry => [entry.label, entry.key]));
+    let LEGEND_ENTRIES = legendEntries();
+    let LEGEND_BY_KEY = new Map(LEGEND_ENTRIES.map(entry => [entry.key, entry]));
+    let LEGEND_KEY_BY_LABEL = new Map(LEGEND_ENTRIES.map(entry => [entry.label, entry.key]));
+
+    /* The tables above hold stage colours, so a change of theme builds them again. */
+    function rebuildThemedTables() {
+      BUBBLE_KINDS = bubbleKinds();
+      LEGEND_ENTRIES = legendEntries();
+      LEGEND_BY_KEY = new Map(LEGEND_ENTRIES.map(entry => [entry.key, entry]));
+      LEGEND_KEY_BY_LABEL = new Map(LEGEND_ENTRIES.map(entry => [entry.label, entry.key]));
+    }
 
     /* The metric bar from Cycles to Stall in bar order, with the titles, the Copy
      * Metrics lines and the Extra Info rows. The markup repeats ids and labels for
@@ -2751,15 +3057,116 @@
 
     /* SHARED END hatch */
 
-    /* SHARED BEGIN legible-on-dark */
+    /* SHARED BEGIN theme */
 
-    /* Needs: none */
+    /* Needs: COL_DARK, COL_LIGHT, COL, INK, readInks, rebuildThemedTables, records, buildLegend,
+     * redraw, redrawStallDiagramIfOpen, tooltip, hideTip, cssToken, css-tokens-light */
 
-    /* Stage names take their cell's colour, but the darkest cells are unreadable as text on the
-     * dark tooltip. A colour under this Rec. 709 luminance is scaled up to reach it. */
+    /* Two looks, dark and light for print. The stylesheet holds the inks, and the stage colours are
+     * written for the dark ground, so the light look derives its own from them. */
+    const THEME_LIGHT = 'light';
+
+    function currentTheme() {
+      return document.documentElement.dataset.theme === THEME_LIGHT ? THEME_LIGHT : 'dark';
+    }
+
+    /* A colour as [r, g, b, alpha] from a hex, an rgb() or rgba(), or a bare "r,g,b" triple, the
+     * form of the colours drawn at more than one alpha. Null for anything else. */
+    function parseColour(colour) {
+      const text = String(colour).trim();
+      const hex = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(text);
+      if (hex) {
+        const digits = hex[1].length === 3 ? hex[1].replace(/./g, c => c + c) : hex[1];
+        return [0, 2, 4].map(i => parseInt(digits.slice(i, i + 2), 16)).concat(1);
+      }
+      const inner = /^rgba?\(([^)]*)\)$/.exec(text);
+      const parts = inner ? inner[1] : /^[\d\s,]+$/.test(text) ? text : null;
+      if (parts === null) return null;
+      const values = parts.split(',').map(Number);
+      if (values.length < 3 || values.length > 4 || values.some(v => !Number.isFinite(v))) {
+        return null;
+      }
+      return [values[0], values[1], values[2], values.length === 4 ? values[3] : 1];
+    }
+
+    function withAlpha(colour, alpha) {
+      const parsed = parseColour(colour);
+      return parsed ? `rgba(${parsed.slice(0, 3).join(',')},${alpha})` : colour;
+    }
+
+    const srgbToLinear = value => {
+      const c = value / 255;
+      return c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+    };
+
+    const linearToSrgb = value => Math.max(0, Math.min(255, Math.round(255
+      * (value <= 0.0031308 ? 12.92 * value : 1.055 * value ** (1 / 2.4) - 0.055))));
+
+    function toOklab([red, green, blue]) {
+      const [r, g, b] = [red, green, blue].map(srgbToLinear);
+      const l = Math.cbrt(0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b);
+      const m = Math.cbrt(0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b);
+      const s = Math.cbrt(0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b);
+      return [0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s,
+        1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s,
+        0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s];
+    }
+
+    /* Linear RGB, each channel in 0..1 when the colour is inside sRGB. */
+    function fromOklab([lightness, a, b]) {
+      const l = (lightness + 0.3963377774 * a + 0.2158037573 * b) ** 3;
+      const m = (lightness - 0.1055613458 * a - 0.0638541728 * b) ** 3;
+      const s = (lightness - 0.0894841775 * a - 1.2914855480 * b) ** 3;
+      return [4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s,
+        -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s,
+        -0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s];
+    }
+
+    /* A colour at or under MIRROR_SPLIT has its OKLab lightness mirrored, so a quiet dark wait
+     * becomes a quiet pale tint. A brighter one keeps its hue and drops at most to BRIGHT_CAP, so
+     * orange stays orange. Chroma shrinks only as far as sRGB needs. */
+    const MIRROR_SPLIT = 0.6;
+    const MIRROR_SUM = 1.21;
+    const MIRROR_CEILING = 0.97;
+    const BRIGHT_CAP = 0.78;
+    const CHROMA_BOOST = 1.15;
+    const CHROMA_STEP = 0.92;
+
+    function mirrorColour(colour) {
+      const parsed = parseColour(colour);
+      if (!parsed) return colour;
+      const [lightness, a, b] = toOklab(parsed);
+      if (lightness > MIRROR_SPLIT && lightness <= BRIGHT_CAP) return colour;
+      const dark = lightness <= MIRROR_SPLIT;
+      const target = dark ? Math.min(MIRROR_CEILING, MIRROR_SUM - lightness) : BRIGHT_CAP;
+      let chroma = dark ? CHROMA_BOOST : 1;
+      let linear = fromOklab([target, a * chroma, b * chroma]);
+      while (linear.some(v => v < -0.001 || v > 1.001) && chroma > 0.05) {
+        chroma *= CHROMA_STEP;
+        linear = fromOklab([target, a * chroma, b * chroma]);
+      }
+      const rgb = linear.map(linearToSrgb);
+      const text = String(colour).trim();
+      if (!text.startsWith('#') && !text.startsWith('rgb')) return rgb.join(',');
+      if (parsed[3] < 1) return `rgba(${rgb.join(',')},${parsed[3]})`;
+      return `#${rgb.map(v => v.toString(16).padStart(2, '0')).join('')}`;
+    }
+
+    /* The page's stage colours in the current look, with the page's own light choices on top. */
+    function stageColours() {
+      if (currentTheme() !== THEME_LIGHT) return COL_DARK;
+      const light = {};
+      for (const [key, value] of Object.entries(COL_DARK)) light[key] = mirrorColour(value);
+      return Object.freeze({ ...light, ...COL_LIGHT });
+    }
+
+    /* Stage names take their cell's colour, which can sit too close to the tooltip's ground to read
+     * as text. On dark a hex under the Rec. 709 luma floor is scaled up to it, and on light one over
+     * the ceiling is scaled down to it. */
     const LEGIBLE_MIN_LUMINANCE = 130;
+    const LEGIBLE_MAX_LUMINANCE = 100;
 
-    function legibleOnDark(hex) {
+    function legibleText(hex) {
       let digits = String(hex).replace('#', '');
       if (digits.length === 3) digits = digits.split('').map(c => c + c).join('');
       if (!/^[0-9a-fA-F]{6}$/.test(digits)) return hex;
@@ -2767,8 +3174,10 @@
       let g = parseInt(digits.slice(2, 4), 16);
       let b = parseInt(digits.slice(4, 6), 16);
       const luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b;
-      if (luminance < LEGIBLE_MIN_LUMINANCE) {
-        const scale = LEGIBLE_MIN_LUMINANCE / Math.max(luminance, 1);
+      const light = currentTheme() === THEME_LIGHT;
+      const bound = light ? LEGIBLE_MAX_LUMINANCE : LEGIBLE_MIN_LUMINANCE;
+      if (light ? luminance > bound : luminance < bound) {
+        const scale = bound / Math.max(luminance, 1);
         r = Math.min(255, Math.round(r * scale));
         g = Math.min(255, Math.round(g * scale));
         b = Math.min(255, Math.round(b * scale));
@@ -2776,7 +3185,97 @@
       return `rgb(${r}, ${g}, ${b})`;
     }
 
-    /* SHARED END legible-on-dark */
+    /* A cell's tag takes white or near-black ink, whichever stands out more from its fill, with a
+     * translucent fill laid over the rows' ground first. White keeps each lane's own alpha. */
+    const TAG_ALPHA = Object.freeze({ cell: 0.55, strip: 0.85, part: 0.92 });
+    const TAG_INK_DARK = '20,20,22';
+    const TAG_DARK_ALPHA_MIN = 0.82;
+    const tagInks = new Map();
+
+    function relativeLuminance(rgb) {
+      return 0.2126 * srgbToLinear(rgb[0]) + 0.7152 * srgbToLinear(rgb[1])
+        + 0.0722 * srgbToLinear(rgb[2]);
+    }
+
+    function layOver(top, under) {
+      return [0, 1, 2].map(i => top[i] * top[3] + under[i] * (1 - top[3])).concat(1);
+    }
+
+    function contrastRatio(first, second) {
+      const [hi, lo] = [relativeLuminance(first), relativeLuminance(second)].sort((x, y) => y - x);
+      return (hi + 0.05) / (lo + 0.05);
+    }
+
+    function tagInk(fill, alpha) {
+      const ground = INK.rowOdd;
+      const key = `${fill}@${alpha}@${ground}`;
+      let ink = tagInks.get(key);
+      if (!ink) {
+        const light = `rgba(255,255,255,${alpha})`;
+        const dark = `rgba(${TAG_INK_DARK},${Math.max(alpha, TAG_DARK_ALPHA_MIN)})`;
+        const base = parseColour(fill), floor = parseColour(ground);
+        if (!base || !floor) {
+          ink = light;
+        } else {
+          const under = layOver(base, floor);
+          const lightContrast = contrastRatio(layOver(parseColour(light), under), under);
+          ink = lightContrast >= contrastRatio(layOver(parseColour(dark), under), under) ? light
+            : dark;
+        }
+        tagInks.set(key, ink);
+      }
+      return ink;
+    }
+
+    /* Over a band the rows go this translucent, so the band stays visible beneath. */
+    const BANDED_ROW_ALPHA = 0.55;
+
+    /* The inks both pages draw with, read from the stylesheet in the current look. */
+    function commonInks() {
+      const rowAlternate = cssToken('--timeline-row-alternate');
+      const row = cssToken('--timeline-row');
+      return {
+        rowEven: rowAlternate,
+        rowOdd: row,
+        rowEvenBanded: withAlpha(rowAlternate, BANDED_ROW_ALPHA),
+        rowOddBanded: withAlpha(row, BANDED_ROW_ALPHA),
+        belowRows: cssToken('--bg'),
+        gridMinor: cssToken('--grid-minor'),
+        gridMajor: cssToken('--grid-major'),
+        gridSparse: cssToken('--grid-sparse'),
+        rulerGround: cssToken('--ruler-bg'),
+        rulerTick: cssToken('--ruler-tick'),
+        rulerTickMajor: cssToken('--ruler-tick-major'),
+        rulerText: cssToken('--ruler-text'),
+        emptyRange: cssToken('--empty-range'),
+        forwardArrival: cssToken('--forward-arrival'),
+        stallGround: cssToken('--stall-ground'),
+        stallLabel: cssToken('--stall-label'),
+        stallAxis: cssToken('--stall-axis'),
+      };
+    }
+
+    /* Every ink the canvases keep is read again and the tables built from the stage colours are
+     * built again, then whatever is on screen is drawn in the new look. */
+    function applyTheme(name) {
+      document.documentElement.dataset.theme = name === THEME_LIGHT ? THEME_LIGHT : 'dark';
+      COL = stageColours();
+      INK = readInks();
+      rebuildThemedTables();
+      hideTip(tooltip);
+      if (records.length) {
+        buildLegend();
+        redraw();
+      }
+      redrawStallDiagramIfOpen();
+    }
+
+    function wireTheme() {
+      const select = document.getElementById('theme-select');
+      select.addEventListener('change', () => applyTheme(select.value));
+    }
+
+    /* SHARED END theme */
 
     /* SHARED BEGIN size-canvas */
 
@@ -2934,9 +3433,10 @@
       return rec.flushed ? COL.flushed : COL[opClassKind(rec)];
     }
 
-    /* The mnemonic's colour in the label column, dimmed on a flushed record. */
-    function fuTextColour(rec) {
-      return rec.flushed ? INK.flushedMnemonic : INK.opText[opClassKind(rec)];
+    /* The mnemonic's class in the label column, which the stylesheet colours, dimmed on a flushed
+     * record. */
+    function fuTextClass(rec) {
+      return rec.flushed ? 'op-flushed' : `op-${opClassKind(rec)}`;
     }
 
     /* objdump's disassembly split into its mnemonic and operands, the compressed
@@ -3033,8 +3533,9 @@
      * extraViewSettings, restoreExtraViewSettings */
 
     /* Only the controls are remembered, never the JSON or the zoom, which every load replaces with
-     * Fit All. A checkbox is remembered when its markup carries data-remember. */
+     * Fit All. A checkbox or a select is remembered when its markup carries data-remember. */
     const REMEMBERED_CHECKBOXES = 'input[type=checkbox][data-remember]';
+    const REMEMBERED_SELECTS = 'select[data-remember]';
 
     /* Storage is best effort. A page opened from a file URL may have it blocked, and then the
      * defaults apply and nothing throws. */
@@ -3055,7 +3556,11 @@
       for (const box of document.querySelectorAll(REMEMBERED_CHECKBOXES)) {
         if (box.id && !box.disabled) checks[box.id] = box.checked;
       }
-      const settings = { checks, labelsHidden, metricBarHidden, ...extraViewSettings() };
+      const values = {};
+      for (const select of document.querySelectorAll(REMEMBERED_SELECTS)) {
+        if (select.id) values[select.id] = select.value;
+      }
+      const settings = { checks, values, labelsHidden, metricBarHidden, ...extraViewSettings() };
       try {
         localStorage.setItem(VIEW_SETTINGS_KEY, JSON.stringify(settings));
       } catch (err) {
@@ -3072,18 +3577,24 @@
       for (const box of document.querySelectorAll(REMEMBERED_CHECKBOXES)) {
         if (typeof checks[box.id] === 'boolean') box.checked = checks[box.id];
       }
+      const values = stored.values && typeof stored.values === 'object' ? stored.values : {};
+      for (const select of document.querySelectorAll(REMEMBERED_SELECTS)) {
+        const value = values[select.id];
+        if ([...select.options].some(option => option.value === value)) select.value = value;
+      }
       metricBarHidden = stored.metricBarHidden === true;
       applyMetricBar();
       applyLabelsHidden(stored.labelsHidden === true);
       restoreExtraViewSettings(stored);
     }
 
-    /* One delegated listener saves every remembered checkbox, so a new one needs only the
-     * attribute. The panel buttons are not checkboxes and save for themselves. */
+    /* One delegated listener saves every remembered checkbox and select, so a new one needs
+     * only the attribute. The panel buttons are neither and save for themselves. */
     function wireViewSettings() {
       document.addEventListener('change', ev => {
         const target = ev.target;
-        if (target instanceof Element && target.matches(REMEMBERED_CHECKBOXES)) saveViewSettings();
+        if (target instanceof Element && (target.matches(REMEMBERED_CHECKBOXES)
+          || target.matches(REMEMBERED_SELECTS))) saveViewSettings();
       });
     }
 
@@ -5145,16 +5656,19 @@
 
     /* Needs: waitMax, waitArgmax, escapeHtml */
 
-    /* The colours are the stylesheet's tokens, read once on first use, when the stylesheet has
-     * certainly applied. */
+    /* The colours are the stylesheet's tokens, read on first use, when the stylesheet has
+     * certainly applied, and again after every change of theme. */
     const waitColours = (() => {
       let tokens = null;
+      let theme = null;
       return () => {
-        if (!tokens) {
+        const now = document.documentElement.dataset.theme || '';
+        if (!tokens || theme !== now) {
           const style = getComputedStyle(document.documentElement);
           const token = name => style.getPropertyValue(name).trim();
           tokens = { zero: token('--text2'), dim: token('--text3'), mid: token('--warn'),
             high: token('--bad') };
+          theme = now;
         }
         return tokens;
       };
@@ -5653,7 +6167,7 @@
 
     /* SHARED BEGIN stall-diagram */
 
-    /* Needs: stallDiagram, stallSets, extent, FONT_MONO, sizeCanvas, cycDisp */
+    /* Needs: stallDiagram, stallSets, extent, INK, FONT_MONO, sizeCanvas, cycDisp */
 
     /* One track per stall category across the fetch range, filled at every cycle in that category.
      * The sets overlap, and only a picture of the cycles shows by how much. */
@@ -5675,7 +6189,6 @@
     const STALL_TRACK_MIN_H = 8;
     const STALL_TRACK_INSET = 1;
     const STALL_TRACK_GAP = 3;
-    const STALL_INK = Object.freeze({ ground: '#232326', label: '#909090', axis: '#505050' });
     /* What the readout says while the pointer is off the plot. */
     const STALL_READOUT_HINT = 'Hover a column for the cycle and what it holds.';
 
@@ -5724,7 +6237,7 @@
       });
       STALL_TRACKS.forEach((track, i) => {
         const y = i * slotH + STALL_TRACK_INSET;
-        ctx.fillStyle = STALL_INK.ground;
+        ctx.fillStyle = INK.stallGround;
         ctx.fillRect(labelW, y, plotW, barH);
         ctx.fillStyle = track.col;
         let runStart = -1;
@@ -5737,11 +6250,11 @@
             runStart = -1;
           }
         }
-        ctx.fillStyle = STALL_INK.label;
+        ctx.fillStyle = INK.stallLabel;
         ctx.textAlign = 'right';
         ctx.fillText(track.label, labelW - STALL_LABEL_GAP, i * slotH + slotH / 2);
       });
-      ctx.fillStyle = STALL_INK.axis;
+      ctx.fillStyle = INK.stallAxis;
       ctx.textAlign = 'left';
       ctx.fillText(String(cycDisp(lo)), labelW, height - STALL_AXIS_BASELINE);
       ctx.textAlign = 'right';
@@ -5906,8 +6419,9 @@
 
     /* SHARED BEGIN zoom */
 
-    /* Needs: MIN_CELL, MIN_CELL_FIT, MAX_CELL, records, rows, cellW, scrollX, scrollY,
-     * zoomAnchorCycle, zoomAnchorScrollX, geometry, typed-zoom, scroll, setupGeometry, redraw */
+    /* Needs: MIN_CELL, MIN_CELL_FIT, MAX_CELL, START_CYCLE_VIEW_FRACTION, records, rows, extent,
+     * cellW, scrollX, scrollY, zoomAnchorCycle, zoomAnchorScrollX, cellsOf, recordStartCycle,
+     * geometry, typed-zoom, scroll, setupGeometry, redraw */
 
     /* The zoom brought inside what the current range allows, with the slider and the zoom box
      * following it, so a long range cannot push the far end past the browser's limit. */
@@ -5925,19 +6439,36 @@
      * magnifying glass even when the row height steps. */
     function setZoom(cellWidth) {
       const visibleBefore = viewportWidth() / cellW;
-      const centre = zoomAnchorCycle !== null && scrollX === zoomAnchorScrollX ? zoomAnchorCycle
+      let centre = zoomAnchorCycle !== null && scrollX === zoomAnchorScrollX ? zoomAnchorCycle
         : scrollX + visibleBefore / 2;
       cellW = Math.min(cellWidth, maxSafeCellW());
       clampZoomToWindow();
       if (!rows.length) return;
       setupGeometry();
-      const x = Math.round(centre - viewportWidth() / cellW / 2);
-      scrollX = Math.max(0, Math.min(maxScrollX(), x));
+      const visible = viewportWidth() / cellW;
+      scrollX = Math.max(0, Math.min(maxScrollX(), Math.round(centre - visible / 2)));
       scrollY = Math.max(0, Math.min(maxScrollY(), scrollY));
+      /* A centre that misses every row on screen, as after Fit All on a diagonal, gives way to the
+       * top row's first cycle, placed where scrollToRow places it. */
+      const start = recordStartCycle(rows[scrollY]);
+      if (start != null && !rowsMeetCycles(firstVisibleCycle(), firstVisibleCycle() + visible)) {
+        scrollX = Math.max(0, Math.min(maxScrollX(),
+          Math.round(start - extent.renderLo - visible * START_CYCLE_VIEW_FRACTION)));
+        centre = scrollX + visible / 2;
+      }
       writeScroll();
       zoomAnchorCycle = centre;
       zoomAnchorScrollX = scrollX;
       redraw();
+    }
+
+    /* Whether any cell of the rows on screen falls between two cycles. */
+    function rowsMeetCycles(first, last) {
+      const bottom = Math.min(rows.length - 1, scrollY + Math.ceil(viewportHeight() / rowHeight()));
+      for (let row = scrollY; row <= bottom; row++) {
+        if (cellsOf(rows[row]).some(cell => cell.c1 > first && cell.c0 <= last)) return true;
+      }
+      return false;
     }
 
     /* From the zoom in force rather than the slider, which a Fit All below one pixel leaves at its
@@ -6163,8 +6694,20 @@
      * RULER_TEXT_INSET, RULER_TEXT_LIFT, FONT_MONO, INK, cellW, rulerCanvas, cycDisp,
      * firstVisibleCycle */
 
+    /* Past the table's last row the step keeps growing through 1, 2 and 5 times a power of ten, so
+     * at the widest zooms the labels stay RULER_LABEL_MIN_PX apart rather than merge. */
+    const RULER_LABEL_MIN_PX = 40;
+
     function rulerStep() {
-      return RULER_STEPS.find(entry => cellW >= entry.minCellW).step;
+      const entry = RULER_STEPS.find(row => cellW >= row.minCellW);
+      let step = entry.step;
+      if (entry !== RULER_STEPS[RULER_STEPS.length - 1]) return step;
+      while (step * cellW < RULER_LABEL_MIN_PX) {
+        const power = 10 ** Math.floor(Math.log10(step));
+        const lead = step / power;
+        step = (lead < 2 ? 2 : lead < 5 ? 5 : 10) * power;
+      }
+      return step;
     }
 
     /* Ticks and labels on multiples of the displayed cycle number, the columns the grid marks, so
@@ -6270,7 +6813,7 @@
     /* SHARED BEGIN label-list */
 
     /* Needs: rows, scrollY, pcFind, labelsHidden, labelSig, labelRowsBuiltFrom, labelList,
-     * LABEL_ROW_SLACK, rowHeight, viewportHeight, escapeHtml, dispMnem, fuTextColour,
+     * LABEL_ROW_SLACK, rowHeight, viewportHeight, escapeHtml, dispMnem, fuTextClass,
      * clampLabelWidthToContent */
 
     /* Label rows are DOM, so their text can be selected. They are rebuilt only when the rows in
@@ -6302,7 +6845,7 @@
             + `<span class="label-id" style="min-width:${digits}ch">${escapeHtml(rec.id)}</span>`
             + `<span class="label-pc">${escapeHtml(rec.pc)}</span>`
             + (marks ? `<span class="label-marks">${marks}</span>` : '')
-            + `<span class="label-mnemonic" style="color:${fuTextColour(rec)}">`
+            + `<span class="label-mnemonic ${fuTextClass(rec)}">`
             + `${escapeHtml(dispMnem(rec))}</span></div>`;
         }
         labelList.innerHTML = html;
@@ -6378,11 +6921,11 @@
       ctx.clip();
       if (box.strip) {
         ctx.font = `${Math.min(box.height, 11)}px ${FONT_SANS}`;
-        ctx.fillStyle = INK.stripTag;
+        ctx.fillStyle = tagInk(cell.colour, TAG_ALPHA.strip);
         ctx.fillText(cell.label, x + 2, box.y + box.height - 1);
       } else {
         ctx.font = `${Math.min(10, Math.max(8, box.height - 3))}px ${FONT_SANS}`;
-        ctx.fillStyle = INK.cellTag;
+        ctx.fillStyle = tagInk(cell.colour, TAG_ALPHA.cell);
         ctx.fillText(cell.label, x + 3, box.y + box.height - box.tagLift);
       }
       ctx.restore();
@@ -6537,7 +7080,7 @@
         if (ackEndX < gutter || allocX > width) continue;
         const queuedFrom = Math.max(gutter, allocX), queuedTo = Math.max(gutter, sendX);
         if (queuedTo > queuedFrom) {
-          ctx.fillStyle = INK.memWbQueued;
+          ctx.fillStyle = COL.memWbQueued;
           ctx.fillRect(queuedFrom, y, queuedTo - queuedFrom, h);
         }
         const writeFrom = Math.max(gutter, sendX);
@@ -6546,7 +7089,7 @@
         if (wb.is_linked && wb.evict_cycle != null) {
           const evictX = (wb.evict_cycle - firstCycle) * cellW + 0.5;
           if (evictX >= gutter && evictX <= width) {
-            ctx.strokeStyle = INK.memWbEviction;
+            ctx.strokeStyle = COL.memWbEviction;
             ctx.beginPath();
             ctx.moveTo(evictX, y - 1);
             ctx.lineTo(evictX, y + h + 1);
@@ -6554,7 +7097,7 @@
           }
         }
         if (cellW >= GRID_EVERY_CYCLE_FROM && ackEndX - sendX > MEM_WB_TAG_MIN_W) {
-          ctx.fillStyle = INK.memWbTag;
+          ctx.fillStyle = tagInk(COL.memReq, MEM_WB_TAG_ALPHA);
           ctx.fillText(String(wb.nline), writeFrom + 2, y + h / 2);
         }
         memWbRender.push({ wb, x0: Math.max(0, allocX), x1: ackEndX, y, h });
@@ -6615,7 +7158,7 @@
 
     /* Needs: rows, scrollY, cellW, tooltip, tooltipBox, crosshair, timelineScroll, tipRecordId,
      * tipTitle, rowHeight, firstVisibleCycle, cycDisp, cycTip, dispMnem, placeTip, hideTip,
-     * escapeHtml, legibleOnDark, fmtWait, gotoRefHtml, notObservedTitle, recordTipHtml */
+     * escapeHtml, legibleText, fmtWait, gotoRefHtml, notObservedTitle, recordTipHtml */
 
     function onTimelineMouseMove(ev) {
       if (!rows.length) return;
@@ -6681,14 +7224,14 @@
     /* The bold length, the kind in its legend colour and where it came from, with any note after
      * the reference. */
     function bubbleValueHtml(cycles, meta, reference, tail = '') {
-      return `<b>${escapeHtml(cycles)}c</b> <span style="color:${legibleOnDark(meta.swatch)}">`
+      return `<b>${escapeHtml(cycles)}c</b> <span style="color:${legibleText(meta.swatch)}">`
         + `${escapeHtml(meta.shortLabel)},</span> ${reference}${tail}`;
     }
 
     /* The names of the drawn cells under the cursor, each in its legend colour. */
     function stageIndicatorHtml(cycle, stages) {
       if (!stages.length) return '';
-      const names = stages.map(stage => `<span style="color:${legibleOnDark(stage.colour)}">`
+      const names = stages.map(stage => `<span style="color:${legibleText(stage.colour)}">`
         + `${escapeHtml(stage.name)}</span>`).join(' <span class="tip-dim">+</span> ');
       return `<div class="stage-indicator"><span class="tip-dim">At ${escapeHtml(cycTip(cycle))}`
         + `</span>&nbsp;&nbsp;${names}</div>`;
@@ -6928,7 +7471,7 @@
       html += tipRow('Producer', producer) + '</table>';
       const stages = [];
       if (wb.alloc_cycle != null && cycle >= wb.alloc_cycle && cycle < wb.send_cycle) {
-        stages.push({ name: 'Queued in its flush slot', colour: INK.memWbQueued });
+        stages.push({ name: 'Queued in its flush slot', colour: COL.memWbQueued });
       }
       if (cycle >= wb.send_cycle && cycle <= wb.ack_cycle) {
         stages.push({ name: 'Writing to memory', colour: COL.memReq });
@@ -7449,16 +7992,18 @@
 
     /* Needs: records, VIEWER_NAME, SCREENSHOT_SCALE, COPY_FLASH_MS, setupGeometry, redraw,
      * redrawStallDiagramIfOpen, flashButtonLabel, firstVisibleCycle, cycDisp, cellW,
-     * timelineCanvas, css-tokens */
+     * timelineCanvas, cssToken, css-tokens */
 
     /* Firefox leaves native controls out of an SVG image, so each is drawn as a plain box that looks
      * like it, a checkbox, a slider or a field's value, and null means it is not on screen. */
     function drawControl(node) {
       const style = getComputedStyle(node);
-      if (style.display === 'none' || node.type === 'hidden' || node.type === 'file') return null;
       const rect = node.getBoundingClientRect();
+      if (style.display === 'none' || node.type === 'hidden' || node.type === 'file'
+        || !rect.width) return null;
       const accent = style.accentColor && style.accentColor !== 'auto' ? style.accentColor
-        : getComputedStyle(document.documentElement).getPropertyValue('--accent').trim();
+        : cssToken('--accent');
+      const ground = cssToken('--bg');
       const box = document.createElement('span');
       Object.assign(box.style, {
         display: 'inline-block', position: 'relative', boxSizing: 'border-box', flexShrink: '0',
@@ -7474,7 +8019,7 @@
         if (node.checked) {
           box.innerHTML = '<svg viewBox="0 0 16 16" width="100%" height="100%" '
             + 'style="position:absolute;left:0;top:0"><path d="M3.5 8.5 L6.5 11.5 L12.5 4.5" '
-            + 'fill="none" stroke="#18181a" stroke-width="2.2" stroke-linecap="round" '
+            + `fill="none" stroke="${ground}" stroke-width="2.2" stroke-linecap="round" `
             + 'stroke-linejoin="round"/></svg>';
         }
       } else if (node.type === 'range') {
@@ -7483,11 +8028,12 @@
         const at = hi > lo ? Math.min(1, Math.max(0, (parseFloat(node.value) - lo) / (hi - lo))) : 0;
         const thumb = Math.min(14, rect.height);
         const bar = 'position:absolute;top:50%;height:4px;margin-top:-2px;border-radius:2px;';
-        box.innerHTML = `<span style="${bar}left:0;right:0;background:rgba(255,255,255,0.18)"></span>`
+        box.innerHTML = `<span style="${bar}left:0;right:0;background:${cssToken('--border2')}">`
+          + '</span>'
           + `<span style="${bar}left:0;width:${at * 100}%;background:${accent}"></span>`
           + `<span style="position:absolute;top:50%;left:${at * (rect.width - thumb)}px;`
           + `width:${thumb}px;height:${thumb}px;margin-top:${-thumb / 2}px;border-radius:50%;`
-          + `background:${accent};border:2px solid #18181a"></span>`;
+          + `background:${accent};border:2px solid ${ground}"></span>`;
       } else {
         const align = { right: 'flex-end', end: 'flex-end', center: 'center' }[style.textAlign];
         Object.assign(box.style, {
@@ -7546,16 +8092,19 @@
         else delete window.devicePixelRatio;
         redrawAll();
       }
-      /* What lies over a canvas: a box positioned out of the flow, after the canvas and on top of
-       * it, such as the tooltip, the crosshair or an open panel. */
+      /* What lies over a canvas: a box positioned out of the flow after the canvas and on top of
+       * it, such as the tooltip, the crosshair or an open panel, or one fixed to the window, such
+       * as an open menu, wherever it sits in the page. */
       const canvases = [...shots.keys()];
       const overlaps = (a, b) =>
         a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom;
       const isOver = node => {
-        if (!/absolute|fixed/.test(getComputedStyle(node).position)) return false;
+        const position = getComputedStyle(node).position;
+        if (!/absolute|fixed/.test(position)) return false;
         const box = node.getBoundingClientRect();
         return box.width > 0 && box.height > 0 && canvases.some(canvas => !node.contains(canvas)
-          && canvas.compareDocumentPosition(node) & Node.DOCUMENT_POSITION_FOLLOWING
+          && (position === 'fixed'
+            || canvas.compareDocumentPosition(node) & Node.DOCUMENT_POSITION_FOLLOWING)
           && overlaps(box, canvas.getBoundingClientRect()));
       };
       /* A copy of the page, walked beside the live one to carry over what the markup does not
@@ -7564,9 +8113,13 @@
       const copy = document.body.cloneNode(true);
       const live = document.body.querySelectorAll('*');
       const copied = copy.querySelectorAll('*');
-      const scrolled = [], over = [], painted = [];
+      const scrolled = [], over = [], painted = [], twins = new Map();
+      if (window.scrollX || window.scrollY) {
+        scrolled.push([copy, document.body, window.scrollX, window.scrollY]);
+      }
       live.forEach((node, i) => {
         const twin = copied[i];
+        twins.set(node, twin);
         if (node.tagName === 'CANVAS') {
           const lifted = over.some(([, shown]) => shown.contains(node));
           const stand = document.createElement(lifted && shots.has(node) ? 'img' : 'span');
@@ -7587,16 +8140,18 @@
           return;
         }
         if (!over.some(([, shown]) => shown.contains(node)) && isOver(node)) over.push([twin, node]);
-        if (node.scrollTop || node.scrollLeft) scrolled.push([twin, node]);
+        if (node.scrollTop || node.scrollLeft) {
+          scrolled.push([twin, node, node.scrollLeft, node.scrollTop]);
+        }
       });
-      copy.querySelectorAll('script').forEach(script => script.remove());
-      /* Each child moves, since a wrapper would take them out of a flex row such as the top bar's.
-       * An empty see-through child larger than its box, such as the timeline's spacer, only gives
-       * the scrollbars their range, and shrinks to nothing rather than become a huge layer. */
-      for (const [box, node] of scrolled) {
+      /* Each child moves, since a wrapper would take them out of a flex row such as the top bar's,
+       * except one fixed to the window. An empty see-through child larger than its box, such as the
+       * timeline's spacer, only gives the scrollbars their range, and shrinks to nothing. */
+      for (const [box, node, left, top] of scrolled) {
         [...box.children].forEach((child, k) => {
           const shown = node.children[k];
           const look = shown && getComputedStyle(shown);
+          if (look && look.position === 'fixed') return;
           if (look && !shown.childNodes.length && look.backgroundColor === 'rgba(0, 0, 0, 0)'
             && look.backgroundImage === 'none' && parseFloat(look.borderTopWidth) === 0
             && (shown.offsetWidth > node.clientWidth || shown.offsetHeight > node.clientHeight)) {
@@ -7605,9 +8160,28 @@
             return;
           }
           const own = child.style.transform;
-          child.style.transform = `translate(${-node.scrollLeft}px,${-node.scrollTop}px)`
-            + (own ? ` ${own}` : '');
+          child.style.transform = `translate(${-left}px,${-top}px)` + (own ? ` ${own}` : '');
         });
+      }
+      copy.querySelectorAll('script, #figure-hint').forEach(node => node.remove());
+      /* The copy's text can wrap a little differently, Firefox's most of all, so every box on the
+       * way down to a painted canvas keeps its height on screen, and the canvas painted in at its
+       * place on screen lands on its box. */
+      for (const canvas of painted) {
+        for (let node = canvas; node.parentElement && node !== document.body;
+          node = node.parentElement) {
+          const parent = getComputedStyle(node.parentElement);
+          const column = parent.display.includes('flex') && parent.flexDirection.startsWith('column');
+          for (const sibling of node.parentElement.children) {
+            const style = getComputedStyle(sibling);
+            if (/absolute|fixed/.test(style.position) || style.display === 'none'
+              || !twins.has(sibling)) continue;
+            Object.assign(twins.get(sibling).style, {
+              height: `${sibling.getBoundingClientRect().height}px`,
+              minHeight: '0', maxHeight: 'none', boxSizing: 'border-box' },
+            column ? { flex: '0 0 auto' } : {});
+          }
+        }
       }
       /* The page's own stylesheet, with the rules for the root and the body pointed at the two
        * boxes that stand in for them inside the SVG, and no scrollbars in a figure. */
@@ -7624,9 +8198,13 @@
         (match, value, unit) => `${parseFloat(value) * units[unit]}px`);
       const root = document.createElementNS(xhtml, 'div');
       root.className = `capture-root ${document.documentElement.className}`;
+      /* The root's data attributes carry the theme, and its inline style any colour set on it. */
+      for (const { name, value } of document.documentElement.attributes) {
+        if (name.startsWith('data-')) root.setAttribute(name, value);
+      }
       /* Scaled by zoom, since WebKit ignores the SVG's viewBox for foreignObject content. */
       root.setAttribute('style', `width:${width}px;height:${height}px;overflow:hidden;`
-        + `zoom:${scale}`);
+        + `zoom:${scale};${document.documentElement.getAttribute('style') || ''}`);
       const style = document.createElementNS(xhtml, 'style');
       style.textContent = pixels;
       const body = document.createElementNS(xhtml, 'div');
@@ -7705,6 +8283,8 @@
         const link = document.createElement('a');
         link.href = URL.createObjectURL(blob);
         link.download = screenshotName();
+        /* Its click must not reach the page, which would take it for a click outside a menu. */
+        link.addEventListener('click', ev => ev.stopPropagation());
         document.body.appendChild(link);
         link.click();
         link.remove();
@@ -7780,6 +8360,86 @@
 
     /* SHARED END view-toggles */
 
+    /* SHARED BEGIN menus */
+
+    /* Needs: css-menus */
+
+    function closeMenus(except) {
+      for (const menu of document.querySelectorAll('details.menu[open]')) {
+        if (menu !== except) menu.open = false;
+      }
+    }
+
+    /* Each open menu's panel under its button, right-aligned to it where the window allows, and no
+     * taller than the room below it. */
+    function placeMenus() {
+      for (const menu of document.querySelectorAll('details.menu[open]')) {
+        const button = menu.querySelector('summary').getBoundingClientRect();
+        const panel = menu.querySelector('.menu-panel');
+        const room = window.innerWidth - panel.offsetWidth - 16;
+        panel.style.left = `${Math.max(16, Math.min(room, button.right - panel.offsetWidth))}px`;
+        panel.style.top = `${button.bottom + 6}px`;
+        panel.style.maxHeight = `${Math.max(160, window.innerHeight - button.bottom - 22)}px`;
+      }
+    }
+
+    function wireMenus() {
+      for (const menu of document.querySelectorAll('details.menu')) {
+        menu.addEventListener('toggle', () => {
+          if (menu.open) closeMenus(menu);
+          placeMenus();
+        });
+      }
+      document.addEventListener('click', ev => {
+        if (!ev.target.closest('details.menu')) closeMenus();
+      });
+      window.addEventListener('resize', placeMenus);
+      window.addEventListener('scroll', placeMenus, { passive: true });
+    }
+
+    /* SHARED END menus */
+
+    /* SHARED BEGIN figure-mode */
+
+    /* Needs: closeMenus, hideTip, tooltip, css-figure-mode */
+
+    /* Figure mode is a class on the body, and the resize observer redraws the canvases into the room
+     * the hidden parts leave. The hint says how to come back, then goes. */
+    const FIGURE_HINT_MS = 2600;
+
+    function figureModeOn() {
+      return document.body.classList.contains('figure-mode');
+    }
+
+    function setFigureMode(on) {
+      document.body.classList.toggle('figure-mode', on);
+      closeMenus();
+      hideTip(tooltip);
+      const hint = document.getElementById('figure-hint');
+      clearTimeout(Number(hint.dataset.timer));
+      hint.hidden = !on;
+      if (on) hint.dataset.timer = String(setTimeout(() => { hint.hidden = true; }, FIGURE_HINT_MS));
+    }
+
+    /* F turns it on and off from anywhere but a field being typed into, as S saves a screenshot. */
+    function wireFigureMode() {
+      document.getElementById('figure-mode-button')
+        .addEventListener('click', () => setFigureMode(true));
+      document.addEventListener('keydown', ev => {
+        if (ev.key !== 'f' && ev.key !== 'F') return;
+        if (ev.ctrlKey || ev.metaKey || ev.altKey) return;
+        const active = document.activeElement;
+        const typing = active && (active.isContentEditable || active.tagName === 'TEXTAREA'
+          || active.tagName === 'SELECT'
+          || (active.tagName === 'INPUT' && !/^(range|checkbox|radio|button)$/.test(active.type)));
+        if (typing) return;
+        ev.preventDefault();
+        setFigureMode(!figureModeOn());
+      });
+    }
+
+    /* SHARED END figure-mode */
+
     function applyMemWbToggle() {
       const button = document.getElementById('mem-wb-toggle');
       button.disabled = memWritebacks.length === 0;
@@ -7805,18 +8465,28 @@
 
     /* SHARED BEGIN escape-key */
 
-    /* Needs: notice, pins, toggleExtraInfo */
+    /* Needs: notice, pins, toggleExtraInfo, menus, figure-mode */
 
-    /* The topmost thing first, and pins only when no modal is open, so closing
-     * a panel never throws a pinned comparison away. Works before a JSON is
-     * loaded, since the first notices come before one. */
+    /* The topmost thing first, an open menu, and pins only when nothing else is open, so closing
+     * a panel never throws a pinned comparison away. Works before a JSON is loaded, since the
+     * first notices come before one. */
     function handleEscape() {
+      const menu = document.querySelector('details.menu[open]');
+      if (menu) {
+        closeMenus();
+        menu.querySelector('summary').focus();
+        return true;
+      }
       if (noticeOpen()) {
         dismissNotice();
         return true;
       }
       if (document.getElementById('extra-info-backdrop').classList.contains('show')) {
         toggleExtraInfo();
+        return true;
+      }
+      if (figureModeOn()) {
+        setFigureMode(false);
         return true;
       }
       if (pins.length) {
@@ -7932,6 +8602,11 @@
       onClick('extra-info-close', toggleExtraInfo);
       onClick('copy-metrics', copyMetrics);
       onClick('save-screenshot', saveScreenshot);
+      /* From the View menu, once the menu has closed and left the picture. */
+      onClick('view-screenshot', () => {
+        closeMenus();
+        requestAnimationFrame(() => requestAnimationFrame(() => saveScreenshot()));
+      });
       const backdrop = document.getElementById('extra-info-backdrop');
       backdrop.addEventListener('click', ev => {
         if (ev.target === backdrop) toggleExtraInfo();
@@ -7967,8 +8642,12 @@
       wireWheelForwarding(WHEEL_PANEL_IDS);
       wireTimeline();
       document.addEventListener('keydown', onKeyDown);
+      wireMenus();
+      wireTheme();
+      wireFigureMode();
       observeResizes();
       restoreViewSettings();
+      applyTheme(document.getElementById('theme-select').value);
       initSamplePicker();
     }
 

@@ -218,9 +218,13 @@ The pre-fetch wait counts in Cycles, Time, IPC and every stall figure whatever t
 
 The viewer also has fit-to-viewport zoom, collapsible panels, a tooltip with per-instruction detail that `P` pins into a dock for side-by-side comparison, and a PC search box that matches anywhere in the address and steps through hits across the current fetch range rather than only the rows on screen. Every control has an in-app tooltip, so they are not repeated here.
 
-Keys: `+` and `-` to zoom, arrows to navigate, `Home` and `End` to jump, `Enter` and `Shift+Enter` to step through PC matches, `P` to pin the tooltip, `S` to save a screenshot, `Esc` to close panels and clear the pins.
+**View** holds what the diagram draws, Forwarding, Pre-fetch Wait and Stalls, the Hide Metrics, Hide Labels and Hide Writebacks buttons, the theme, Figure mode and Screenshot. The toggles and the theme are remembered in the browser.
 
-**Screenshots.** The Screenshot button beside Copy Metrics saves the whole window as a PNG at three times its resolution, into the browser's downloads, for figures that stay sharp in print. The canvases are redrawn at that scale and the rest of the page is drawn from a copy of itself, so text, controls and an open tooltip come out as sharp as the timeline. It works in Chrome, Firefox and Safari, tested on their engines, Chromium, Gecko and WebKit. The `S` key does the same without moving the pointer, so the tooltip under it is kept. The file is named after the JSON and the cycles and rows in view, for example `CVA6Flow_daxpy_c214-267_r65-98.png`, and `SCREENSHOT_SCALE` in the page sets the factor.
+**Themes and figures.** The light theme, chosen under View, suits printed figures. Every colour of the page and the diagram has a light counterpart, and the stage colours are mirrored in lightness, so the quiet stages stay quiet on white and each cell's tag stays readable. **Figure mode**, or the `F` key, leaves the diagram and its labels alone on the page for a screenshot, and `F` or `Esc` brings the rest back.
+
+Keys: `+` and `-` to zoom, arrows to navigate, `Home` and `End` to jump, `Enter` and `Shift+Enter` to step through PC matches, `P` to pin the tooltip, `S` to save a screenshot, `F` for figure mode, `Esc` to close menus and panels, clear the pins and leave figure mode.
+
+**Screenshots.** The Screenshot button beside Copy Metrics, or the one under View, saves the whole window as a PNG at three times its resolution, into the browser's downloads, for figures that stay sharp in print. The canvases are redrawn at that scale and the rest of the page is drawn from a copy of itself, so text, controls, an open tooltip or menu come out as sharp as the timeline, in the theme on screen. It works in Chrome, Firefox and Safari, tested on their engines, Chromium, Gecko and WebKit. The `S` key does the same without moving the pointer, so the tooltip under it is kept. The file is named after the JSON and the cycles and rows in view, for example `CVA6Flow_daxpy_c214-267_r65-98.png`, and `SCREENSHOT_SCALE` in the page sets the factor.
 
 ## Tested with
 
