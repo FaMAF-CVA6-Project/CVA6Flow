@@ -84,59 +84,59 @@
 
     /* Needs: css-tokens */
 
-    /* The light look, a palette of its own after macOS's: grey chrome, white controls and rows,
-     * near-black text and Apple's system hues. It restates every colour of css-tokens. */
+    /* The light look, a palette of its own after macOS's system greys: grey chrome and rows,
+     * lighter controls and cards, near-black text. It restates every colour of css-tokens. */
     html[data-theme="light"] {
-      --bg: #f2f2f5;
-      --bg2: #eaeaee;
-      --bg3: #ffffff;
-      --bg4: #e0e0e5;
-      --border: rgba(0, 0, 0, 0.08);
-      --border2: rgba(0, 0, 0, 0.14);
+      --bg: #d8d8dd;
+      --bg2: #d6d6db;
+      --bg3: #eaeaee;
+      --bg4: #c7c7cc;
+      --border: rgba(0, 0, 0, 0.10);
+      --border2: rgba(0, 0, 0, 0.17);
       --text: #1d1d1f;
-      --text2: #48484a;
-      --text3: #636366;
-      --text-id: #8e8e93;
-      --text-pc: #5f5e9c;
-      --text-hit: #7a4f00;
-      --accent: #13744f;
-      --warn: #c93400;
-      --bad: #d70015;
-      --compressed: #00788d;
-      --link: #0066cc;
+      --text2: #434346;
+      --text3: #58585c;
+      --text-id: #74747a;
+      --text-pc: #535297;
+      --text-hit: #6e4700;
+      --accent: #006743;
+      --warn: #b21700;
+      --bad: #b60000;
+      --compressed: #006276;
+      --link: #0055b9;
       --link-hover: #004f9e;
-      --link-dim: #6e7a8a;
-      --grip: rgba(0, 122, 255, 0.4);
-      --focus: rgba(0, 122, 255, 0.4);
-      --crosshair: rgba(0, 0, 0, 0.16);
-      --timeline-bg: #ffffff;
-      --scrollbar-thumb: #c7c7cc;
-      --scrollbar-thumb-hover: #aeaeb2;
-      --ruler-bg: #f6f6f8;
-      --label-row: #ffffff;
-      --label-row-alternate: #f6f6f8;
-      --label-row-hit: #fff1c2;
-      --scrim: rgba(0, 0, 0, 0.2);
-      --shadow: rgba(0, 0, 0, 0.12);
-      --timeline-row: #ffffff;
-      --timeline-row-alternate: #f6f6f8;
-      --grid-minor: rgba(0, 0, 0, 0.035);
-      --grid-major: rgba(0, 0, 0, 0.08);
-      --grid-sparse: rgba(0, 0, 0, 0.055);
-      --ruler-tick: #d8d8dc;
-      --ruler-tick-major: #aeaeb2;
-      --ruler-text: #636366;
-      --empty-range: #8e8e93;
-      --op-int: #1e7a34;
-      --op-fp: #0060c0;
-      --op-mem: #9a5a00;
-      --op-branch: #8944ab;
-      --op-flushed: #c0474f;
-      --forward-arrival: #6e7e7e;
-      --stall-ground: #f2f2f5;
-      --stall-label: #636366;
-      --stall-axis: #aeaeb2;
-      --swatch-edge: rgba(0, 0, 0, 0.16);
+      --link-dim: #4e5a69;
+      --grip: rgba(0, 110, 230, 0.45);
+      --focus: rgba(0, 110, 230, 0.45);
+      --crosshair: rgba(0, 0, 0, 0.20);
+      --timeline-bg: #e5e5ea;
+      --scrollbar-thumb: #b3b3b9;
+      --scrollbar-thumb-hover: #9a9aa1;
+      --ruler-bg: #dadadf;
+      --label-row: #e5e5ea;
+      --label-row-alternate: #dfdfe4;
+      --label-row-hit: #efdca0;
+      --scrim: rgba(0, 0, 0, 0.24);
+      --shadow: rgba(0, 0, 0, 0.18);
+      --timeline-row: #e5e5ea;
+      --timeline-row-alternate: #dfdfe4;
+      --grid-minor: rgba(0, 0, 0, 0.04);
+      --grid-major: rgba(0, 0, 0, 0.09);
+      --grid-sparse: rgba(0, 0, 0, 0.065);
+      --ruler-tick: #c3c3c9;
+      --ruler-tick-major: #9e9ea5;
+      --ruler-text: #48484c;
+      --empty-range: #76767c;
+      --op-int: #006822;
+      --op-fp: #0055b4;
+      --op-mem: #874900;
+      --op-branch: #7e39a0;
+      --op-flushed: #a32b38;
+      --forward-arrival: #4d5c5c;
+      --stall-ground: #dadadf;
+      --stall-label: #58585c;
+      --stall-axis: #9e9ea5;
+      --swatch-edge: rgba(0, 0, 0, 0.20);
       color-scheme: light;
     }
 
@@ -151,9 +151,9 @@
     }
 
     html[data-theme="light"] {
-      --mem-wb-title: #b25000;
-      --histogram-bar: #ffb340;
-      --mem-wb-lane-line: rgba(0, 0, 0, 0.06);
+      --mem-wb-title: #9b3b00;
+      --histogram-bar: #e39a2c;
+      --mem-wb-lane-line: rgba(0, 0, 0, 0.08);
     }
 
     /* SHARED BEGIN css-base */
@@ -2192,9 +2192,12 @@
     /* An arrow whose ends are this far off screen is still drawn, since its line
      * can cross the view. */
     const ARROW_CULL = 50;
-    const STALL_BAND_ALPHA = 0.42;
-    const STALL_BAND_RULER_ALPHA = 0.62;
-    const PC_FIND_ROW_ALPHA = 0.12;
+    /* The Stall texture and the Find PC row in each look, the light one finer, in a deeper ink. */
+    const BAND_LOOKS = Object.freeze({
+      dark: Object.freeze({ stall: 0.42, stallRuler: 0.62, pcFind: 0.12, line: 1.6 }),
+      light: Object.freeze({ stall: 0.22, stallRuler: 0.38, pcFind: 0.3, line: 1 }),
+    });
+    let BAND_LOOK = BAND_LOOKS.dark;
     const COPY_FLASH_MS = 1200;
     /* How many times the window's resolution a screenshot is saved at. */
     const SCREENSHOT_SCALE = 3;
@@ -2250,51 +2253,52 @@
       memWbQueued: '#352060',
       memWbEviction: '#40c0ff',
     });
-    /* The light look's own stage colours, not derived from the dark ones: Apple's system hues
-     * laid over white as tints, faint for a wait, soft for a stage and strong for an event. */
+    /* The light look's own stage colours, not derived from the dark ones: Apple's hue angles in
+     * OKLCH at a lightness and chroma per level, opaque on the grey rows, faint for a wait, soft
+     * for a stage and strong for an event. */
     const COL_LIGHT = Object.freeze({
-      preFetchWait: '#eeeefb',
-      bubblePredTaken: 'rgb(175,82,222)',
-      bubbleUnpred: 'rgb(230,170,0)',
-      bubbleMispred: 'rgb(255,149,0)',
-      bubbleFlush: 'rgb(48,176,199)',
-      fe1Req: '#b2d7ff',
+      preFetchWait: '#c8cce7',
+      bubblePredTaken: 'rgb(150,70,196)',
+      bubbleUnpred: 'rgb(212,160,32)',
+      bubbleMispred: 'rgb(226,128,0)',
+      bubbleFlush: 'rgb(40,150,172)',
+      fe1Req: '#91b8f1',
       feSynth: 'rgba(29,29,31,0.55)',
-      fe1ReqMiss: '#ffc4c1',
-      icStall: '#ffdcda',
-      fe2: '#d1e7ff',
-      hiLineWait: '#e6f2ff',
-      fe1ReqHi: '#c2e6f8',
-      fe1ReqMissHi: '#ffc0cc',
-      icStallHi: '#ffd9e0',
-      fe2Hi: '#daf0fb',
-      bpCorrect: '#6bc4ed',
-      feBuf: '#e6f2ff',
-      feOut: '#daf0fb',
-      decBuf: '#f7eefc',
-      decIs: '#cdccf3',
-      fwdWb: '#008299',
-      fwdSb: '#8944ab',
-      flushedFwd: '#c8424f',
-      int: '#c2eecd',
-      fp: '#c1e7ee',
-      mem: '#e3dacf',
-      branch: '#e7cbf5',
-      bpMispred: '#ff3b30',
-      bpUnpred: '#ffb347',
-      memReq: '#ffe88a',
-      dcMiss: '#ffa5a0',
-      dcStall: '#ffdcda',
-      refillOverlap: '#ffecd1',
-      coWait: '#daf1f5',
-      amo: '#ffc0cc',
-      fenceFlush: '#eee9e2',
-      co: '#a2e5b3',
-      flushed: '#ffebea',
-      pcFind: '255,204,0',
-      stallBand: '88,86,214',
-      memWbQueued: '#f7eefc',
-      memWbEviction: '#6bc4ed',
+      fe1ReqMiss: '#eba093',
+      icStall: '#eab9b1',
+      fe2: '#b0c8ed',
+      hiLineWait: '#c2d2ea',
+      fe1ReqHi: '#74c1e5',
+      fe1ReqMissHi: '#e89db1',
+      icStallHi: '#e8b8c4',
+      fe2Hi: '#a0cee5',
+      bpCorrect: '#0aa1d4',
+      feBuf: '#c2d2ea',
+      feOut: '#a0cee5',
+      decBuf: '#d9cae4',
+      decIs: '#aaa1e3',
+      fwdWb: '#00748a',
+      fwdSb: '#7a3c9c',
+      flushedFwd: '#b23a44',
+      int: '#93cb98',
+      fp: '#6dc5d5',
+      mem: '#c8ae90',
+      branch: '#cd95d6',
+      bpMispred: '#e5675a',
+      bpUnpred: '#d98939',
+      memReq: '#d7b856',
+      dcMiss: '#e48879',
+      dcStall: '#eab9b1',
+      refillOverlap: '#efcaac',
+      coWait: '#9dd1db',
+      amo: '#e89db1',
+      fenceFlush: '#d1c0ae',
+      co: '#5cb174',
+      flushed: '#e7d4d3',
+      pcFind: '255,184,0',
+      stallBand: '72,70,170',
+      memWbQueued: '#d9cae4',
+      memWbEviction: '#0aa1d4',
     });
     let COL = COL_DARK;
 
@@ -2558,6 +2562,7 @@
 
     /* The tables above hold stage colours, so a change of theme builds them again. */
     function rebuildThemedTables() {
+      BAND_LOOK = BAND_LOOKS[currentTheme()];
       BUBBLE_KINDS = bubbleKinds();
       LEGEND_ENTRIES = legendEntries();
       LEGEND_BY_KEY = new Map(LEGEND_ENTRIES.map(entry => [entry.key, entry]));
@@ -3056,9 +3061,10 @@
      * redraw paints two contexts. */
     const hatchTiles = new Map();
 
-    /* kind is 'dot', 'fwd' or 'back'. The strokes run past the tile edge so the repeat joins. */
-    function hatchStyle(ctx, rgb, alpha, kind) {
-      const key = rgb + '@' + alpha + '@' + kind;
+    /* kind is 'dot', 'fwd' or 'back', and line the strokes' width. The strokes run past the tile
+     * edge so the repeat joins. */
+    function hatchStyle(ctx, rgb, alpha, kind, line = 1.6) {
+      const key = rgb + '@' + alpha + '@' + kind + '@' + line;
       let tile = hatchTiles.get(key);
       if (!tile) {
         tile = document.createElement('canvas');
@@ -3067,7 +3073,7 @@
         const g = tile.getContext('2d');
         g.strokeStyle = `rgba(${rgb},${alpha})`;
         g.fillStyle = `rgba(${rgb},${alpha})`;
-        g.lineWidth = 1.6;
+        g.lineWidth = line;
         if (kind === 'dot') {
           g.fillRect(1, 1, 2, 2);
           g.fillRect(4, 4, 2, 2);
@@ -3169,8 +3175,8 @@
 
     /* On light, text in a stage's colour is that hue darkened in OKLab until it reads on its
      * ground, as a calendar writes an event in its own colour. A grey stays grey. */
-    const HUE_INK_LIGHTNESS = 0.42;
-    const HUE_INK_CHROMA = 0.13;
+    const HUE_INK_LIGHTNESS = 0.4;
+    const HUE_INK_CHROMA = 0.12;
     const hueInks = new Map();
 
     function hueInk(colour, ground) {
@@ -3231,7 +3237,7 @@
     const TAG_ALPHA = Object.freeze({ cell: 0.55, strip: 0.85, part: 0.92 });
     const TAG_INK_DARK = '20,20,22';
     const TAG_DARK_ALPHA_MIN = 0.82;
-    const TAG_WHITE_BELOW = 0.6;
+    const TAG_WHITE_BELOW = 0.58;
     const tagInks = new Map();
 
     function relativeLuminance(rgb) {
@@ -3274,7 +3280,7 @@
     }
 
     /* Over a band the rows go this translucent, so the band stays visible beneath. */
-    const BANDED_ROW_ALPHA = 0.55;
+    const BANDED_ROW_ALPHA = Object.freeze({ dark: 0.55, light: 0.6 });
 
     /* The inks both pages draw with, read from the stylesheet in the current look. */
     function commonInks() {
@@ -3283,8 +3289,8 @@
       return {
         rowEven: rowAlternate,
         rowOdd: row,
-        rowEvenBanded: withAlpha(rowAlternate, BANDED_ROW_ALPHA),
-        rowOddBanded: withAlpha(row, BANDED_ROW_ALPHA),
+        rowEvenBanded: withAlpha(rowAlternate, BANDED_ROW_ALPHA[currentTheme()]),
+        rowOddBanded: withAlpha(row, BANDED_ROW_ALPHA[currentTheme()]),
         belowRows: cssToken('--bg'),
         gridMinor: cssToken('--grid-minor'),
         gridMajor: cssToken('--grid-major'),
@@ -6709,7 +6715,7 @@
         return;
       }
       drawRuler();
-      drawBands(rulerCanvas.getContext('2d'), RULER_H, STALL_BAND_RULER_ALPHA);
+      drawBands(rulerCanvas.getContext('2d'), RULER_H, BAND_LOOK.stallRuler);
       drawTimeline();
       renderLabelList();
       if (memWbVisible()) drawMemWritebacks();
@@ -6816,7 +6822,7 @@
       if (band === null) return;
       const first = firstVisibleCycle();
       const last = first + Math.ceil(ctx.canvas.clientWidth / cellW) + 1;
-      ctx.fillStyle = hatchStyle(ctx, COL.stallBand, alpha, 'dot');
+      ctx.fillStyle = hatchStyle(ctx, COL.stallBand, alpha, 'dot', BAND_LOOK.line);
       for (let cycle = first; cycle <= last; cycle++) {
         if (band.has(cycle)) ctx.fillRect((cycle - first) * cellW, 0, cellW, height);
       }
@@ -6833,14 +6839,14 @@
       const lastCycle = firstCycle + Math.ceil(width / cellW) + 1;
       const banded = stallBandSet() !== null;
       /* Rows go translucent over a band, so the band stays visible beneath. */
-      drawBands(ctx, height, STALL_BAND_ALPHA);
+      drawBands(ctx, height, BAND_LOOK.stall);
       for (let row = firstRow; row <= lastRow; row++) {
         const top = (row - scrollY) * rh;
         if (banded) ctx.fillStyle = row % 2 === 0 ? INK.rowEvenBanded : INK.rowOddBanded;
         else ctx.fillStyle = row % 2 === 0 ? INK.rowEven : INK.rowOdd;
         ctx.fillRect(0, top, width, rh);
         if (row === pcFind.highlightRow) {
-          ctx.fillStyle = `rgba(${COL.pcFind},${PC_FIND_ROW_ALPHA})`;
+          ctx.fillStyle = `rgba(${COL.pcFind},${BAND_LOOK.pcFind})`;
           ctx.fillRect(0, top, width, rh);
         }
         drawBars(rows[row], row);
