@@ -18,7 +18,7 @@ unusual shape. metadata.stats keeps the seed's counters, apart from
 n_records.
 
     python3 scripts/make_CVA6Flow_oversized.py tests/daxpy.json
-    python3 scripts/make_CVA6Flow_oversized.py tests/daxpy.json -n 600000
+    python3 scripts/make_CVA6Flow_oversized.py tests/daxpy.json -i 600000
     python3 scripts/make_CVA6Flow_oversized.py tests/daxpy.json --mib 700
     python3 scripts/make_CVA6Flow_oversized.py tests/daxpy.json -o huge.json
 """
@@ -29,10 +29,8 @@ import os
 import re
 import sys
 
-TOOL = "cva6flow_tracer"
-SCHEMA_VERSION = 3
 
-# Without -n or --mib the JSON passes both of the page's limits by this
+# Without -i or --mib the JSON passes both of the page's limits by this
 # factor, so neither can be the one that did not fire.
 DEFAULT_LIMIT_FACTOR = 1.2
 
@@ -245,6 +243,29 @@ def read_page_limits():
 # SHARED END py-page-limits
 
 
+# SHARED BEGIN py-page-schema
+
+# Needs: os, re, PAGE, py-page-limits
+
+
+def read_page_schema():
+    """(TOOL, SCHEMA_VERSION) as PAGE declares them, the JSON the page reads,
+    or None when the page or either constant is missing. Read rather than
+    restated, so a schema change is made in one place."""
+    path = os.path.join(page_root(), PAGE)
+    if not os.path.isfile(path):
+        return None
+    with open(path, encoding="utf-8") as f:
+        text = f.read()
+    tool = re.search(r"\bconst TOOL = '([^']+)';", text)
+    version = re.search(r"\bconst SCHEMA_VERSION = (\d+);", text)
+    if not (tool and version):
+        return None
+    return tool.group(1), int(version.group(1))
+
+# SHARED END py-page-schema
+
+
 def seed_steps(data):
     """(cycle_step, id_step) for one repetition of the seed."""
     low, high = seed_cycle_bounds(data)
@@ -299,13 +320,13 @@ def closing_message(size, written, limits):
     if over_bytes:
         return (f"[INFO] Past MAX_JSON_BYTES ({human(max_bytes)}) only, so "
                 f"CVA6Flow.html counts the records and streams the JSON "
-                f"whole. Raise -n for the range.")
+                f"whole. Raise -i for the range.")
     if over_records:
         return (f"[INFO] Past MAX_STREAM_INSTRUCTIONS ({max_records:,}) "
                 f"only, so CVA6Flow.html reads the JSON whole and then offers "
                 f"the range. Raise --mib for the record count.")
     return ("[WARN] Under both limits, so the viewer will load it whole. "
-            "Raise -n or --mib.")
+            "Raise -i or --mib.")
 
 
 def write_oversized(out_path, data, steps, want_records, want_bytes):
@@ -366,18 +387,18 @@ def main():
                         metavar="PATH",
                         help="Where to write. Defaults to oversized.json in "
                              "the working directory")
-    parser.add_argument("-n", "--instructions", type=int, metavar="N",
+    parser.add_argument("-i", "--instructions", type=int, metavar="N",
                         help="How many records to write, at least 1. Without "
-                             "-n or --mib the JSON passes both the page's "
+                             "-i or --mib the JSON passes both the page's "
                              "MAX_STREAM_INSTRUCTIONS and its MAX_JSON_BYTES "
                              "by a fifth")
     parser.add_argument("--mib", type=int, metavar="N",
                         help="Keep writing until the JSON is at least this "
-                             "many MiB. Given with -n both must be reached")
+                             "many MiB. Given with -i both must be reached")
     args = parser.parse_args()
 
     if args.instructions is not None and args.instructions < 1:
-        print(f"[ERROR] -n {args.instructions} writes no record. Give 1 or "
+        print(f"[ERROR] -i {args.instructions} writes no record. Give 1 or "
               f"more.", file=sys.stderr)
         return 1
     if args.mib is not None and args.mib < 1:
@@ -388,6 +409,11 @@ def main():
         print(f"[ERROR] Could not read MAX_JSON_BYTES and "
               f"MAX_STREAM_INSTRUCTIONS from {PAGE} in {page_root()}.",
               file=sys.stderr)
+        return 1
+    schema = read_page_schema()
+    if schema is None:
+        print(f"[ERROR] Could not read TOOL and SCHEMA_VERSION from {PAGE} "
+              f"in {page_root()}.", file=sys.stderr)
         return 1
     want_records = args.instructions
     want_bytes = args.mib * 1024 * 1024 if args.mib is not None else 0
@@ -400,7 +426,7 @@ def main():
         return 1
     print(f"[INFO] Reading {args.seed} ({human(os.path.getsize(args.seed))})")
     try:
-        data = load_tracer_json(args.seed, TOOL, SCHEMA_VERSION)
+        data = load_tracer_json(args.seed, *schema)
     except ValueError as err:
         print(f"[ERROR] {err}", file=sys.stderr)
         return 1

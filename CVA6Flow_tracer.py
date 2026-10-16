@@ -3,8 +3,9 @@
 
 Reads a Verilator VCD of a cv64a6 simulation and follows every instruction
 from fetch through decode, issue, execute, writeback and commit, with the
-I-cache, D-cache, load-store unit, branch and forwarding events around it.
-Writes one JSON, schema 3, described under "The JSON" in README.md.
+I-cache, D-cache, load-store unit, branch, register dependence and forwarding
+events around it. Writes one JSON, schema 4, whose every key README.md
+describes under "The JSON".
 
 The instruction text comes from the objdump listing of the test, picked up
 beside the VCD as <name>.list or named with --disasm-list.
@@ -32,16 +33,16 @@ from dataclasses import dataclass, field
 
 # Carried in metadata.schema_version. Bump it with any key added, removed or
 # redefined.
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 TOOL = "cva6flow_tracer"
 
 # The field lists metadata carries, so the pages and the scripts clip, shift
 # and scan records and events without keeping their own copies.
 CYCLE_FIELDS = (
-    "fe1_lo_cycle", "fe1_hi_cycle", "fe2_lo_cycle", "fe2_hi_cycle",
-    "fe_out_cycle", "dec_cycle", "is_cycle", "ex_cycle", "wb_cycle",
-    "co_cycle", "flush_cycle", "lsu_admit_cycle", "lsu_release_cycle",
-    "bp_resolve_cycle",
+    "fe1_req_lo_cycle", "fe1_req_hi_cycle", "fe1_resp_lo_cycle",
+    "fe1_resp_hi_cycle", "fe_out_cycle", "dec_cycle", "is_cycle", "ex_cycle",
+    "wb_cycle", "co_cycle", "flush_cycle", "lsu_admit_cycle",
+    "lsu_release_cycle", "bp_resolve_cycle",
 )
 CYCLE_LIST_FIELDS = ()
 ID_FIELDS = (
@@ -49,11 +50,11 @@ ID_FIELDS = (
     "pre_fetch_wait_shared_id", "bubble_causer_id", "bubble_shared_id",
     "caused_bubble_recovery_id",
 )
-ID_LIST_FIELDS = ()
+ID_LIST_FIELDS = ("dep_producer_ids",)
 EVENT_FIELDS = {
     "ic_events.access_cycles": "cycle",
     "ic_events.miss_cycles": "cycle",
-    "ic_events.deliveries": ["fe1_cycle", "fe2_cycle"],
+    "ic_events.deliveries": ["fe1_req_cycle", "fe1_resp_cycle"],
     "dc_events.access_cycles": "cycle",
     "dc_events.allocs": ["cycle"],
     "mem_writebacks": ["alloc_cycle", "send_cycle", "ack_cycle",
@@ -77,8 +78,10 @@ TOP_LEVEL_ORDER = ("metadata", "config_params", "instructions", "ic_events",
 DIAGNOSTIC_ONLY_FIELDS = ("lsu_state_history", "dc_event_log")
 
 # Scoreboard slots the forwarding producers are resolved from after the
-# walk. A slot number is not a record, so they never reach the JSON.
-INTERNAL_ONLY_FIELDS = ("fwd_rs1_tid", "fwd_rs2_tid", "fwd_rs3_tid")
+# walk, and the register names the dependences are, which dep_producer_regs
+# carries. A slot number is not a record, so none of these reach the JSON.
+INTERNAL_ONLY_FIELDS = ("fwd_rs1_tid", "fwd_rs2_tid", "fwd_rs3_tid",
+                        "src_reg_names", "dest_reg_name")
 
 # RTL names kept although their suffix reads as a record reference, since
 # readers grep the RTL for them.
@@ -215,10 +218,34 @@ REFILL_FSM_IDLE = 0
 # On daxpy all 1,318 links share the cycle, so one cycle only absorbs skew.
 EVICTION_JOIN_WINDOW = 1
 
-# Synthesised fetch cycles sit this far below fe_out_cycle, one more for a
-# wrapping instruction's second fetch.
+# A correct taken prediction redirects the cycle after the delivery it read,
+# since bp_valid decodes the registered icache_data_q (frontend.sv:306), so
+# its bubble starts there.
+PREDICTION_DELAY = 1
+
+# A whole run commits its last instruction in the exit routine the test
+# harness spins in once it has written tohost (syscalls.c), so a last commit
+# anywhere else means the dump ended before the program did.
+EXIT_SYMBOLS = frozenset({"tohost_exit", "exit", "_exit"})
+
+# How the JSON names a register, as gem5 does: r for the integer file and f
+# for the floating-point one, so the two JSONs' dep_producer_regs compare.
+INT_REG_PREFIX = "r"
+FP_REG_PREFIX = "f"
+# The low bits of decoded_instr.result hold rs3 when rs3_fpr is high,
+# REG_ADDR_SIZE of them (ariane_pkg.sv:59, issue_read_operands.sv:510).
+RS3_MASK = 0x1F
+
+# Synthesised request cycles sit this far below fe_out_cycle, one more for
+# a wrapping instruction's second fetch.
 FETCH_SYNTH_DEPTH = 2
 FETCH_SYNTH_DEPTH_WRAP = 3
+
+# The record keys synthesised_stages names when a fetch is synthesised, in
+# record order.
+SYNTH_LO_KEYS = ("fe1_req_lo_cycle", "fe1_resp_lo_cycle")
+SYNTH_WRAP_KEYS = ("fe1_req_lo_cycle", "fe1_req_hi_cycle",
+                   "fe1_resp_lo_cycle", "fe1_resp_hi_cycle")
 
 # The progress line is offered one line in this many plus one, a mask so
 # the test stays cheap.
@@ -365,11 +392,21 @@ SIGNALS = {
     "idx_hzd_rs1": (READ_OPERANDS + "idx_hzd_rs1[0]", ("forwarding",)),
     "idx_hzd_rs2": (READ_OPERANDS + "idx_hzd_rs2[0]", ("forwarding",)),
     "idx_hzd_rs3": (READ_OPERANDS + "idx_hzd_rs3[0]", ("forwarding",)),
+    # Each operand's register file, which the RAW check compares with its
+    # index (issue_read_operands.sv:457-459, raw_checker.sv:49). An FP fused
+    # op's rs3 rides in result, and a zimm in rs1 reads no register (:487).
+    "rs1_fpr": (READ_OPERANDS + "rs1_fpr", ("dependences",)),
+    "rs2_fpr": (READ_OPERANDS + "rs2_fpr", ("dependences",)),
+    "rs3_fpr": (READ_OPERANDS + "rs3_fpr", ("dependences",)),
+    "decoded_instr.result": (SCOREBOARD + "decoded_instr_i[0].result",
+                             ("dependences",)),
+    "decoded_instr.use_zimm": (SCOREBOARD + "decoded_instr_i[0].use_zimm",
+                               ("dependences",)),
 }
 
-# The registered scoreboard entry, written at the decode and issue handshake
-# and stable until commit, bar the target DebugEn overwrites at writeback.
-# Generated per slot by signal_table.
+# The registered scoreboard entry, written at the issue handshake and stable
+# until commit, bar the target DebugEn overwrites at writeback. Generated per
+# slot by signal_table.
 MEM_Q_FIELDS = ("fu", "rs1", "rs2", "rd", "bp.cf", "bp.predict_address")
 
 # Build-size probes, over every header path, so a build larger than the
@@ -391,6 +428,8 @@ BIT_RANGE = re.compile(r"\[\d+:\d+\]$")
 # a colon, the word and the text. The indent keeps the address labels out, and
 # source lines practically never start with hex, a colon and hex.
 DISASM_LINE = re.compile(r"^\s+([0-9a-fA-F]+):\s+([0-9a-fA-F]+)\s+(.+)$")
+# A symbol line of the same listing, the address and the name in brackets.
+SYMBOL_LINE = re.compile(r"^([0-9a-fA-F]+) <([^>]+)>:$")
 
 
 # ============================================================================
@@ -563,6 +602,9 @@ def signal_table(nr_sb_entries, nr_commit_ports, nr_wb_ports):
         for name in MEM_Q_FIELDS:
             table[f"mem_q[{slot}].{name}"] = (
                 SCOREBOARD + f"mem_q[{slot}].sbe.{name}", CORE)
+        # The destination's register file, set at issue (scoreboard.sv:178).
+        table[f"mem_q[{slot}].is_rd_fpr_flag"] = (
+            SCOREBOARD + f"mem_q[{slot}].is_rd_fpr_flag", ("dependences",))
     return table
 
 
@@ -731,17 +773,20 @@ class InstructionRecord:
     # high half arrives in the next fetch. Set on flushed records too, since
     # the realigner combines the halves whether or not the instruction commits.
     wraps_line: bool = False
-    fe1_lo_cycle: int = None
-    fe1_hi_cycle: int = None
-    fe2_lo_cycle: int = None
-    fe2_hi_cycle: int = None
+    # The I-cache request and the delivery answering it, for the low fetch
+    # and a wrapping instruction's high one.
+    fe1_req_lo_cycle: int = None
+    fe1_req_hi_cycle: int = None
+    fe1_resp_lo_cycle: int = None
+    fe1_resp_hi_cycle: int = None
     # state_q == MISS at the delivery. Null when the fetch cycles were
     # synthesised, since nothing was observed.
     ic_miss_lo: bool = None
     ic_miss_hi: bool = None
     fe_out_cycle: int = None
-    # Decode and issue are one handshake (scoreboard.sv:151), so they share a
-    # cycle, and no dumped signal marks entry to execute, hence is_cycle + 1.
+    # ID decodes the fetch entry in the cycle of its handshake and registers
+    # it (id_stage.sv:433-444), so decode is fe_out_cycle. is_cycle is the
+    # scoreboard's issue handshake, and ex_cycle is is_cycle + 1, derived.
     dec_cycle: int = None
     is_cycle: int = None
     ex_cycle: int = None
@@ -753,8 +798,9 @@ class InstructionRecord:
     # The load or store FSM left IDLE for this record, usually is_cycle + 1
     # and later under stalls or a TLB miss.
     lsu_admit_cycle: int = None
-    # One cycle before the FSM returned to IDLE, so windows never share a
-    # cycle. A load's data arrives later through ldbuf, so this is a release.
+    # One cycle before the FSM went IDLE or took the next request, so windows
+    # never share a cycle. A flushed record's reaches its flush cycle, and a
+    # load's the WAIT_FLUSH drain after it. Load data comes later, via ldbuf.
     lsu_release_cycle: int = None
     dc_miss: bool = None
     dc_coalesced: bool = None
@@ -770,6 +816,10 @@ class InstructionRecord:
     fwd_rs3_used: bool = False
     fwd_rs3_via: str = None
     fwd_rs3_producer_id: int = None
+    # The latest earlier unflushed writer of each source register, committed
+    # or not, named r<n> or f<n> as gem5 names them.
+    dep_producer_ids: list = None
+    dep_producer_regs: list = None
     # Read from decoded_instr_i at issue, then from mem_q at writeback and
     # commit. cf_t names the predictor: Branch the BHT, JumpR the BTB, Return
     # the RAS, Jump the predecoder, NoCF none or not taken.
@@ -791,7 +841,6 @@ class InstructionRecord:
     bubble_causer_id: int = None
     n_bubble_cycles: int = None
     bubble_shared_id: int = None
-    n_bubble_gap_cycles: int = None
     caused_bubble_kind: str = None
     caused_bubble_recovery_id: int = None
     n_caused_bubble_cycles: int = None
@@ -799,6 +848,8 @@ class InstructionRecord:
     fwd_rs1_tid: int = None
     fwd_rs2_tid: int = None
     fwd_rs3_tid: int = None
+    src_reg_names: list = None
+    dest_reg_name: str = None
 
 
 class Run:
@@ -840,8 +891,8 @@ class EdgeSample:
 
 @dataclass
 class ICacheEvent:
-    fe1_cycle: int
-    fe2_cycle: int
+    req_cycle: int
+    resp_cycle: int
     vaddr_word: int
     is_miss: bool
 
@@ -875,7 +926,7 @@ class ICacheTimeline:
         start = (self.access_start_cycle
                  if self.access_start_cycle is not None else cycle)
         self.events.append(ICacheEvent(
-            fe1_cycle=max(0, start - 1), fe2_cycle=cycle,
+            req_cycle=max(0, start - 1), resp_cycle=cycle,
             vaddr_word=word & ~FETCH_OFFSET_MASK, is_miss=state == FSM_MISS))
 
 
@@ -912,6 +963,14 @@ class PerfCounterSamples:
         self.last_unaligned = unaligned
 
 
+def register_name(index, is_fpr):
+    """A register as the JSON names it, r<n> or f<n>, or None for x0, which
+    reads as zero and keeps nothing written to it, and for an unknown one."""
+    if index is None or (not is_fpr and index == 0):
+        return None
+    return f"{FP_REG_PREFIX if is_fpr else INT_REG_PREFIX}{index}"
+
+
 def spans_fetch_blocks(pc, is_compressed):
     """A 32-bit instruction at offset FETCH_BYTES - 2 of its fetch block has
     its high half in the next block, which instr_realign.sv combines and
@@ -928,13 +987,16 @@ class PipelineTracker:
     record, and completed collects every record that left the pipeline."""
 
     def __init__(self, nr_sb_entries, nr_commit_ports, nr_wb_ports,
-                 forwarding):
+                 forwarding, dependences):
         self.nr_sb_entries = nr_sb_entries
         self.nr_commit_ports = nr_commit_ports
         self.nr_wb_ports = nr_wb_ports
         self.forwarding = forwarding
+        self.dependences = dependences
         self.mem_q_names = [[f"mem_q[{slot}].{name}" for name in MEM_Q_FIELDS]
                             for slot in range(nr_sb_entries)]
+        self.rd_fpr_names = [f"mem_q[{slot}].is_rd_fpr_flag"
+                             for slot in range(nr_sb_entries)]
         self.fetched = deque()
         self.issued = {}
         self.completed = []
@@ -1003,6 +1065,9 @@ class PipelineTracker:
             # wrote back still holds its prediction here.
             self.apply_mem_q(rec, self.read_mem_q(sample, tid),
                              with_target=rec.wb_cycle is None)
+            if self.dependences and tid < self.nr_sb_entries:
+                rec.dest_reg_name = register_name(
+                    rec.rd, sample.get(self.rd_fpr_names[tid]) == "1")
             self.completed.append(rec)
             self.n_committed += 1
 
@@ -1047,10 +1112,11 @@ class PipelineTracker:
                              with_target=first)
 
     def on_issue_edge(self, cycle, sample):
-        """The decode and issue handshake, one event since issue_instr_o
-        passes decoded_instr_i straight through (scoreboard.sv:151). Every
-        field is read after the edge, like the handshake, which daxpy.vcd
-        confirms on all 42,842 issues against mem_q."""
+        """The scoreboard's issue handshake, where issue_instr_o passes
+        decoded_instr_i straight through (scoreboard.sv:151), so the issue
+        stage reads the same instruction's operands. Every field is read
+        after the edge, like the handshake, which daxpy.vcd confirms on all
+        42,842 issues against mem_q."""
         if (sample.get("decoded_instr_valid_i") != "1"
                 or sample.get("decoded_instr_ack_o") != "1"
                 or sample.get("flush_unissued_instr_i") == "1"):
@@ -1065,7 +1131,7 @@ class PipelineTracker:
         if self.wb_bus_tids:
             self.n_issue_cycles_with_any_wb += 1
         rec = self.fetched.popleft()
-        rec.dec_cycle = rec.is_cycle = cycle
+        rec.is_cycle = cycle
         rec.ex_cycle = cycle + 1
         rec.trans_id = tid
         fu = binary_to_int(sample.get("decoded_instr.fu"))
@@ -1082,7 +1148,26 @@ class PipelineTracker:
                 sample.get("decoded_instr.bp.predict_address"))
         if self.forwarding:
             self.capture_forwarding(rec, sample)
+        if self.dependences:
+            self.capture_sources(rec, sample)
         self.issued[tid] = rec
+
+    @staticmethod
+    def capture_sources(rec, sample):
+        """The registers the RAW check reads for this record: rs1 unless it
+        carries a zimm, rs2, and rs3 only for an FP fused op, each in the
+        file its rs*_fpr names, x0 left out."""
+        names = []
+        if sample.get("decoded_instr.use_zimm") != "1":
+            names.append(register_name(rec.rs1,
+                                       sample.get("rs1_fpr") == "1"))
+        names.append(register_name(rec.rs2, sample.get("rs2_fpr") == "1"))
+        if sample.get("rs3_fpr") == "1":
+            result = binary_to_int(sample.get("decoded_instr.result"))
+            names.append(register_name(
+                None if result is None else result & RS3_MASK, True))
+        rec.src_reg_names = list(dict.fromkeys(
+            name for name in names if name is not None))
 
     def capture_forwarding(self, rec, sample):
         # A producer writing back on this cycle forwards off the writeback
@@ -1110,6 +1195,8 @@ class PipelineTracker:
             self.completed.append(rec)
             self.n_flushed_fetched += 1
         else:
+            # Decoded in the cycle of the handshake and registered for issue.
+            rec.dec_cycle = cycle
             self.fetched.append(rec)
 
     def new_record(self, cycle, sample, dropped):
@@ -1343,7 +1430,8 @@ class Mechanisms:
         self.resolved = resolved
         self.perf = PerfCounterSamples(resolved["icache"])
         self.pipeline = PipelineTracker(nr_sb_entries, nr_commit_ports,
-                                        nr_wb_ports, resolved["forwarding"])
+                                        nr_wb_ports, resolved["forwarding"],
+                                        resolved["dependences"])
         self.icache = ICacheTimeline()
         self.load_fsm = LsuFsmTracker(LOAD_FSM_NAMES, LOAD_ADMIT_WHILE_BUSY)
         self.store_fsm = LsuFsmTracker(STORE_FSM_NAMES,
@@ -1355,6 +1443,7 @@ class Mechanisms:
         self.n_unknown_bit_reads = 0
         self.mem_wb_stats = None
         self.bubble_counts = None
+        self.unclaimed_allocs = {"LOAD": 0, "STORE": 0}
 
     def on_rising_edge(self, cycle, sample):
         """One rising edge. Commit runs before issue, so a slot released on
@@ -1467,62 +1556,61 @@ def stream_and_extract(f, mechanisms, sample, run):
 # ============================================================================
 
 def index_events(events):
-    """Deliveries per fetch-block address, sorted by fe2_cycle, with those
+    """Deliveries per fetch-block address, sorted by resp_cycle, with those
     cycles beside them for binary search, since a hot loop puts a delivery
     per iteration on one block."""
     by_word = defaultdict(list)
     for event in events:
         by_word[event.vaddr_word].append(event)
-    fe2_keys = {}
+    resp_keys = {}
     for word, word_events in by_word.items():
-        word_events.sort(key=lambda event: event.fe2_cycle)
-        fe2_keys[word] = [event.fe2_cycle for event in word_events]
-    return by_word, fe2_keys
+        word_events.sort(key=lambda event: event.resp_cycle)
+        resp_keys[word] = [event.resp_cycle for event in word_events]
+    return by_word, resp_keys
 
 
 def find_event(index, word, floor, top, latest):
-    """The latest delivery for word with fe2_cycle at most top, or the
-    earliest when latest is false, and with fe2_cycle and fe1_cycle at least
+    """The latest delivery for word with resp_cycle at most top, or the
+    earliest when latest is false, and with resp_cycle and req_cycle at least
     floor when floor is not None."""
-    by_word, fe2_keys = index
+    by_word, resp_keys = index
     events = by_word.get(word)
     if not events:
         return None
-    keys = fe2_keys[word]
+    keys = resp_keys[word]
     stop = bisect.bisect_right(keys, top)
     start = 0 if floor is None else bisect.bisect_left(keys, floor)
     order = range(stop - 1, start - 1, -1) if latest else range(start, stop)
     for i in order:
-        if floor is None or events[i].fe1_cycle >= floor:
+        if floor is None or events[i].req_cycle >= floor:
             return events[i]
     return None
 
 
 def last_fetch_cycle(rec):
-    """The delivery of a record's last fetch, the high one on a wrap, since a
-    redirect cannot come before it and counting from the request would take
-    in the record's own I-cache stall."""
-    if rec.wraps_line and rec.fe2_hi_cycle is not None:
-        return rec.fe2_hi_cycle
-    return rec.fe2_lo_cycle
+    """The delivery of a record's last fetch, the high one on a wrap, which
+    is what a taken prediction on the record reads."""
+    if rec.wraps_line and rec.fe1_resp_hi_cycle is not None:
+        return rec.fe1_resp_hi_cycle
+    return rec.fe1_resp_lo_cycle
 
 
 def last_request_cycle(rec):
     """The request of a record's last fetch, the high one on a wrap."""
-    if rec.wraps_line and rec.fe1_hi_cycle is not None:
-        return rec.fe1_hi_cycle
-    return rec.fe1_lo_cycle
+    if rec.wraps_line and rec.fe1_req_hi_cycle is not None:
+        return rec.fe1_req_hi_cycle
+    return rec.fe1_req_lo_cycle
 
 
 def set_low_fetch(rec, event):
-    rec.fe1_lo_cycle = event.fe1_cycle
-    rec.fe2_lo_cycle = event.fe2_cycle
+    rec.fe1_req_lo_cycle = event.req_cycle
+    rec.fe1_resp_lo_cycle = event.resp_cycle
     rec.ic_miss_lo = event.is_miss
 
 
 def set_high_fetch(rec, event):
-    rec.fe1_hi_cycle = event.fe1_cycle
-    rec.fe2_hi_cycle = event.fe2_cycle
+    rec.fe1_req_hi_cycle = event.req_cycle
+    rec.fe1_resp_hi_cycle = event.resp_cycle
     rec.ic_miss_hi = event.is_miss
 
 
@@ -1542,15 +1630,17 @@ def match_records_to_events(records, index):
         if low is not None:
             set_low_fetch(rec, low)
         elif rec.flushed:
-            rec.fe1_lo_cycle = max(0, rec.fe_out_cycle - FETCH_SYNTH_DEPTH)
-            rec.fe2_lo_cycle = max(0, rec.fe_out_cycle - FETCH_SYNTH_DEPTH
-                                   + 1)
-            rec.synthesised_stages = ["fe1", "fe2"]
+            rec.fe1_req_lo_cycle = max(0, rec.fe_out_cycle
+                                       - FETCH_SYNTH_DEPTH)
+            rec.fe1_resp_lo_cycle = max(0, rec.fe_out_cycle
+                                        - FETCH_SYNTH_DEPTH + 1)
+            rec.synthesised_stages = list(SYNTH_LO_KEYS)
             rec.ic_miss_lo = rec.ic_miss_hi = None
         if rec.wraps_line:
             # Without the floor a stale prefetch of the next block would win,
             # the front end not blocking on the high fetch.
-            floor = rec.fe1_lo_cycle if rec.fe1_lo_cycle is not None else 0
+            floor = (rec.fe1_req_lo_cycle if rec.fe1_req_lo_cycle is not None
+                     else 0)
             high = find_event(index, (pc + 2) & ~FETCH_OFFSET_MASK, floor,
                               rec.fe_out_cycle, latest=True)
             if high is not None:
@@ -1560,7 +1650,7 @@ def match_records_to_events(records, index):
 
 
 def repair_fetch_order(records, index):
-    """Keep fe1_lo_cycle monotonic in fetch order. The binding can give a
+    """Keep fe1_req_lo_cycle monotonic in fetch order. The binding can give a
     loop iteration the previous iteration's delivery, so such a record is
     rebound to a later delivery for its block, or, when the line stayed
     cached and the I-cache never answered again, synthesised off the record
@@ -1569,10 +1659,10 @@ def repair_fetch_order(records, index):
     last = None
     n_rebound = n_synthesised = 0
     for rec in records:
-        if rec.fe1_lo_cycle is None:
+        if rec.fe1_req_lo_cycle is None:
             continue
-        if rec.fe1_lo_cycle >= last_fe1:
-            last_fe1, last = rec.fe1_lo_cycle, rec
+        if rec.fe1_req_lo_cycle >= last_fe1:
+            last_fe1, last = rec.fe1_req_lo_cycle, rec
             continue
         pc = pc_value(rec)
         if pc is None:
@@ -1587,19 +1677,19 @@ def repair_fetch_order(records, index):
             n_rebound += 1
             if rec.wraps_line:
                 high = find_event(index, (pc + 2) & ~FETCH_OFFSET_MASK,
-                                  low.fe1_cycle, rec.fe_out_cycle,
+                                  low.req_cycle, rec.fe_out_cycle,
                                   latest=False)
                 if high is not None:
                     set_high_fetch(rec, high)
                 else:
                     # The old high fetch predates the new low one, which a
                     # wrap cannot do, so it is no longer observed.
-                    rec.fe1_hi_cycle = rec.fe2_hi_cycle = None
+                    rec.fe1_req_hi_cycle = rec.fe1_resp_hi_cycle = None
                     rec.ic_miss_hi = None
         else:
             synthesise_fetch(rec, last, last_fe1, block)
             n_synthesised += 1
-        last_fe1, last = rec.fe1_lo_cycle, rec
+        last_fe1, last = rec.fe1_req_lo_cycle, rec
     return n_rebound, n_synthesised
 
 
@@ -1615,14 +1705,14 @@ def synthesise_fetch(rec, last, last_fe1, block):
     if last_pc is not None:
         last_block = last_pc & ~FETCH_OFFSET_MASK
         if last_block == block:
-            fe1 = last.fe1_lo_cycle
+            fe1 = last.fe1_req_lo_cycle
         elif (last.wraps_line and last_block + FETCH_BYTES == block
-              and last.fe1_hi_cycle is not None):
-            fe1 = last.fe1_hi_cycle
-        elif last.wraps_line and last.fe1_hi_cycle is not None:
-            fe1 = last.fe1_hi_cycle + 1
+              and last.fe1_req_hi_cycle is not None):
+            fe1 = last.fe1_req_hi_cycle
+        elif last.wraps_line and last.fe1_req_hi_cycle is not None:
+            fe1 = last.fe1_req_hi_cycle + 1
         else:
-            fe1 = last.fe1_lo_cycle + 1
+            fe1 = last.fe1_req_lo_cycle + 1
     if fe1 is None:
         # With no record before it, anchoring on fe_out_cycle alone would
         # overstate the gap when issue stalled and the fetch sat queued.
@@ -1630,13 +1720,14 @@ def synthesise_fetch(rec, last, last_fe1, block):
     fe1 = max(fe1, last_fe1)
     if fe1 > ceiling:
         fe1 = max(last_fe1, ceiling)
-    rec.fe1_lo_cycle = fe1
-    rec.fe2_lo_cycle = fe1 + 1
+    rec.fe1_req_lo_cycle = fe1
+    rec.fe1_resp_lo_cycle = fe1 + 1
+    rec.synthesised_stages = list(SYNTH_LO_KEYS)
     if rec.wraps_line:
         # The high request shares the low delivery's cycle, pipelined.
-        rec.fe1_hi_cycle = rec.fe2_lo_cycle
-        rec.fe2_hi_cycle = rec.fe1_hi_cycle + 1
-    rec.synthesised_stages = ["fe1", "fe2"]
+        rec.fe1_req_hi_cycle = rec.fe1_resp_lo_cycle
+        rec.fe1_resp_hi_cycle = rec.fe1_req_hi_cycle + 1
+        rec.synthesised_stages = list(SYNTH_WRAP_KEYS)
     rec.ic_miss_lo = rec.ic_miss_hi = None
 
 
@@ -1647,16 +1738,16 @@ def pair_rvc_fetches(records):
     n_paired = 0
     for last, rec in zip(records, records[1:]):
         if (not (last.is_compressed and rec.is_compressed)
-                or last.fe1_lo_cycle is None
-                or rec.fe1_lo_cycle == last.fe1_lo_cycle):
+                or last.fe1_req_lo_cycle is None
+                or rec.fe1_req_lo_cycle == last.fe1_req_lo_cycle):
             continue
         last_pc, pc = pc_value(last), pc_value(rec)
         if (last_pc is None or pc is None or pc != last_pc + 2
                 or (pc & ~FETCH_OFFSET_MASK)
                 != (last_pc & ~FETCH_OFFSET_MASK)):
             continue
-        rec.fe1_lo_cycle = last.fe1_lo_cycle
-        rec.fe2_lo_cycle = last.fe2_lo_cycle
+        rec.fe1_req_lo_cycle = last.fe1_req_lo_cycle
+        rec.fe1_resp_lo_cycle = last.fe1_resp_lo_cycle
         rec.ic_miss_lo = last.ic_miss_lo
         # The timing is the first record's wholesale, so its provenance is.
         rec.synthesised_stages = list(last.synthesised_stages)
@@ -1669,7 +1760,8 @@ def attribute_dc_events(records, dc_log):
     admission to release plus the lookahead to the allocation. Each LSU FSM
     serves one request at a time, so an event in a window belongs to that
     access, and the first window to claim an event keeps it, which needs the
-    records in id order."""
+    records in id order. Returns the miss allocations of the load unit and
+    of the store port that no window claimed, which read as hits."""
     events = dc_log.events
     event_cycles = [event["cycle"] for event in events]
     refill = dc_log.refill_active_cycles
@@ -1707,6 +1799,11 @@ def attribute_dc_events(records, dc_log):
         if rec.fu == "LOAD":
             j = bisect.bisect_left(refill, admit)
             rec.dc_refill_overlap = j < len(refill) and refill[j] <= release
+    return {fu: sum(1 for i, event in enumerate(events)
+                    if event["type"] == "alloc" and event["sid"] == sid
+                    and event["is_prefetch"] is not True
+                    and i not in claimed[fu])
+            for fu, sid in miss_sid.items()}
 
 
 def pair_flush_channel(log):
@@ -1837,17 +1934,40 @@ def finalise_mem_writebacks(log, dc_sets):
 
 
 def parse_disasm_list(path):
-    """An objdump listing as a map from PC to its text, the mnemonic,
-    operands and objdump's symbol comment with whitespace collapsed so no tab
-    reaches the page. Lines that are not instructions are skipped."""
-    disasm = {}
+    """An objdump listing as (a map from PC to its text, the symbols as
+    sorted (address, name) pairs). The text is the mnemonic, operands and
+    objdump's symbol comment with whitespace collapsed so no tab reaches the
+    page. Lines that are neither are skipped."""
+    disasm, symbols = {}, []
     with open(path, encoding="utf-8", errors="replace") as f:
         for line in f:
-            match = DISASM_LINE.match(line.rstrip("\n"))
+            line = line.rstrip("\n")
+            match = DISASM_LINE.match(line)
             if match:
                 disasm[int(match.group(1), 16)] = " ".join(
                     match.group(3).split())
-    return disasm
+                continue
+            match = SYMBOL_LINE.match(line)
+            if match:
+                symbols.append((int(match.group(1), 16), match.group(2)))
+    return disasm, sorted(symbols)
+
+
+def last_commit_outside_exit(records, symbols):
+    """(PC, symbol) of the last committed record when it lies outside every
+    EXIT_SYMBOLS routine, which a dump that ends before the program does
+    leaves, else None. None too without a listing's symbols to tell by."""
+    committed = [rec for rec in records
+                 if not rec.flushed and rec.co_cycle is not None]
+    if not symbols or not committed:
+        return None
+    last = max(committed, key=lambda rec: (rec.co_cycle, rec.id))
+    pc = pc_value(last)
+    if pc is None:
+        return None
+    at = bisect.bisect_right(symbols, (pc, chr(0x10FFFF))) - 1
+    symbol = symbols[at][1] if at >= 0 else None
+    return None if symbol in EXIT_SYMBOLS else (last.pc, symbol)
 
 
 def apply_disasm(records, disasm):
@@ -1912,7 +2032,28 @@ def branch_outcomes(records):
             rec.bp_outcome, rec.bp_decided_at = "mispred", "ex"
 
 
-def mark_bubble(causer, recovery, kind, n_flushed, n_cycles, n_gap):
+def register_dependences(records):
+    """dep_producer_ids and dep_producer_regs: for each register a record's
+    RAW check reads, the latest earlier unflushed record writing it,
+    committed or not, in program order. A record never issued has none, and
+    neither does any record when the dependences mechanism did not
+    resolve."""
+    last_writer = {}
+    for rec in sorted(records, key=lambda rec: rec.id):
+        if rec.src_reg_names:
+            ids, regs = [], []
+            for name in rec.src_reg_names:
+                producer = last_writer.get(name)
+                if producer is not None:
+                    ids.append(producer)
+                    regs.append(name)
+            rec.dep_producer_ids = ids or None
+            rec.dep_producer_regs = regs or None
+        if not rec.flushed and rec.dest_reg_name is not None:
+            last_writer[rec.dest_reg_name] = rec.id
+
+
+def mark_bubble(causer, recovery, kind, n_flushed, n_cycles):
     causer.caused_bubble_kind = kind
     causer.caused_bubble_recovery_id = recovery.id
     causer.n_caused_bubble_cycles = n_cycles
@@ -1920,31 +2061,51 @@ def mark_bubble(causer, recovery, kind, n_flushed, n_cycles, n_gap):
     recovery.bubble_kind = kind
     recovery.bubble_causer_id = causer.id
     recovery.n_bubble_cycles = n_cycles
-    recovery.n_bubble_gap_cycles = n_gap
 
 
-def bubble_gap(causer, recovery):
-    """Idle cycles between the causer's last delivery and the recovery's
-    first request, exclusive at both ends, None when either is missing."""
-    end = last_fetch_cycle(causer)
-    if end is None or recovery.fe1_lo_cycle is None:
+def redirect_cycle(causer, kind):
+    """The cycle the causer redirected the front end: a mispredict's
+    resolution, which picks the next PC at once (frontend.sv:387), a correct
+    taken prediction's PREDICTION_DELAY after the delivery it read, or a
+    flush causer's commit, or its flush when it flushed itself. None when
+    that was not observed."""
+    if kind in ("mispred", "unpred"):
+        return causer.bp_resolve_cycle
+    if kind == "pred_taken":
+        end = last_fetch_cycle(causer)
+        return None if end is None else end + PREDICTION_DELAY
+    if causer.co_cycle is not None:
+        return causer.co_cycle
+    return causer.flush_cycle
+
+
+def bubble_cycles(causer, recovery, kind):
+    """The measured redirect-to-refetch gap, from the causer's redirect to
+    the recovery's first request, or None when either end is missing."""
+    start = redirect_cycle(causer, kind)
+    if start is None or recovery.fe1_req_lo_cycle is None:
         return None
-    return max(0, recovery.fe1_lo_cycle - end - 1)
+    return max(0, recovery.fe1_req_lo_cycle - start)
+
+
+def mispredict_kind(causer):
+    """The rule branch_outcomes uses, so bp_outcome and the bubble agree."""
+    return ("unpred" if causer.bp_predicted_cf in (None, "NoCF")
+            else "mispred")
 
 
 def flush_causer(ordered, i, j):
     """The causer of a flush bubble between ordered[i] and the recovery
-    ordered[j], and the flushed records it leaves between them."""
+    ordered[j], and the flushed records it leaves between them. A committing
+    CSR write flushes itself, leaving a wb_cycle and no co_cycle, and it is
+    the oldest instruction in flight, so only the first record of the
+    flushed run can be one."""
     causer = ordered[i]
     n_flushed = j - i - 1
-    # A committing CSR write flushes itself, leaving a wb_cycle and no
-    # co_cycle, so the first such record in the run is the cause.
-    if causer.fu != "CSR":
-        for k in range(i + 1, j):
-            candidate = ordered[k]
-            if (candidate.fu == "CSR" and candidate.flushed
-                    and candidate.wb_cycle is not None):
-                return candidate, n_flushed - 1
+    first = ordered[i + 1]
+    if (causer.fu != "CSR" and first.fu == "CSR" and first.flushed
+            and first.wb_cycle is not None):
+        return first, n_flushed - 1
     return causer, n_flushed
 
 
@@ -1952,8 +2113,9 @@ def tag_bubbles(records):
     """Tag every bubble on its causer and its recovery. The first pass finds
     [not flushed][flushed run][not flushed] in id order, the second a gap
     after taken control flow with nothing flushed, and the recovery's bubble
-    is then copied to the records sharing its fetch. Returns the causer
-    counts by kind."""
+    is then copied to the records sharing its fetch. A bubble that cannot be
+    measured, or measures 0 cycles, is not tagged, since a null
+    n_bubble_cycles means no bubble. Returns the causer counts by kind."""
     counts = {"pred_taken": 0, "unpred": 0, "mispred": 0, "flush": 0}
     ordered = sorted(records, key=lambda rec: rec.id)
     n = len(ordered)
@@ -1971,18 +2133,14 @@ def tag_bubbles(records):
             continue
         causer, recovery = ordered[i], ordered[j]
         n_flushed = j - i - 1
-        # The rule branch_outcomes uses, so bp_outcome and the bubble agree.
         if causer.fu == "CTRL_FLOW" and causer.bp_mispredict:
-            kind = ("unpred" if causer.bp_predicted_cf in (None, "NoCF")
-                    else "mispred")
+            kind = mispredict_kind(causer)
         else:
             kind = "flush"
             causer, n_flushed = flush_causer(ordered, i, j)
-        gap = bubble_gap(causer, recovery)
-        # A bubble whose length cannot be measured is not tagged, since a
-        # null n_bubble_cycles means no bubble.
-        if gap is not None:
-            mark_bubble(causer, recovery, kind, n_flushed, gap, gap)
+        n_cycles = bubble_cycles(causer, recovery, kind)
+        if n_cycles:
+            mark_bubble(causer, recovery, kind, n_flushed, n_cycles)
             counts[kind] += 1
         # The recovery may cause the next bubble in turn.
         i = j
@@ -1993,43 +2151,33 @@ def tag_bubbles(records):
         # bound to the record.
         if (causer.flushed or causer.fu != "CTRL_FLOW"
                 or causer.caused_bubble_kind is not None
+                or causer.fe1_req_lo_cycle is None
                 or not (causer.bp_resolved_taken is True
                         or causer.bp_predicted_cf in ("Jump", "Return"))):
             continue
-        end = last_fetch_cycle(causer)
-        if causer.fe1_lo_cycle is None or end is None:
-            continue
         recovery = None
         for k in range(i + 1, n):
-            if not ordered[k].flushed and ordered[k].fe1_lo_cycle is not None:
+            if (not ordered[k].flushed
+                    and ordered[k].fe1_req_lo_cycle is not None):
                 recovery = ordered[k]
                 break
         if recovery is None or recovery.bubble_causer_id is not None:
             continue
-        gap = recovery.fe1_lo_cycle - end - 1
-        if gap < 1:
-            continue
-        if causer.bp_mispredict and causer.bp_predicted_cf in (None, "NoCF"):
-            kind, n_cycles = "unpred", gap
-        elif causer.bp_mispredict:
-            kind, n_cycles = "mispred", gap
-        else:
-            # The predecoder redirects in FE2, so a correct taken prediction
-            # costs one cycle and the rest is queue backpressure.
-            kind, n_cycles = "pred_taken", min(gap, 1)
-        mark_bubble(causer, recovery, kind, 0, n_cycles, gap)
-        counts[kind] += 1
+        kind = (mispredict_kind(causer) if causer.bp_mispredict
+                else "pred_taken")
+        n_cycles = bubble_cycles(causer, recovery, kind)
+        if n_cycles:
+            mark_bubble(causer, recovery, kind, 0, n_cycles)
+            counts[kind] += 1
 
     for last, rec in zip(ordered, ordered[1:]):
-        if (rec.bubble_causer_id is not None or rec.fe1_lo_cycle is None
-                or rec.fe1_lo_cycle != last.fe1_lo_cycle
-                or last.bubble_causer_id is None
-                or not last.n_bubble_cycles):
+        if (rec.bubble_causer_id is not None or rec.fe1_req_lo_cycle is None
+                or rec.fe1_req_lo_cycle != last.fe1_req_lo_cycle
+                or last.bubble_causer_id is None):
             continue
         rec.bubble_kind = last.bubble_kind
         rec.bubble_causer_id = last.bubble_causer_id
         rec.n_bubble_cycles = last.n_bubble_cycles
-        rec.n_bubble_gap_cycles = last.n_bubble_gap_cycles
         rec.bubble_shared_id = (last.bubble_shared_id
                                 if last.bubble_shared_id is not None
                                 else last.id)
@@ -2045,24 +2193,24 @@ def pre_fetch_waits(records):
     twice."""
     last = None
     for rec in records:
-        if rec.fe1_lo_cycle is None:
+        if rec.fe1_req_lo_cycle is None:
             if not rec.flushed:
                 last = rec
             continue
         if rec.flushed:
             rec.n_pre_fetch_wait_cycles = 0
             continue
-        if (last is not None and last.fe1_lo_cycle is not None
-                and rec.fe1_lo_cycle == last.fe1_lo_cycle):
+        if (last is not None and last.fe1_req_lo_cycle is not None
+                and rec.fe1_req_lo_cycle == last.fe1_req_lo_cycle):
             rec.n_pre_fetch_wait_cycles = last.n_pre_fetch_wait_cycles or 0
             rec.pre_fetch_wait_shared_id = (
                 last.pre_fetch_wait_shared_id
                 if last.pre_fetch_wait_shared_id is not None else last.id)
-        elif last is None or last.fe1_lo_cycle is None:
+        elif last is None or last.fe1_req_lo_cycle is None:
             rec.n_pre_fetch_wait_cycles = 0
         else:
             rec.n_pre_fetch_wait_cycles = max(
-                0, rec.fe1_lo_cycle - last_request_cycle(last) - 1)
+                0, rec.fe1_req_lo_cycle - last_request_cycle(last) - 1)
         last = rec
 
 
@@ -2119,10 +2267,10 @@ def exit_status(degraded, strict, input_noun):
 # The mechanisms that may be absent, in the order metadata.degraded lists
 # them, with the keys each one leaves null or empty.
 MECHANISM_EFFECTS = {
-    "icache": "fe1_lo_cycle, fe1_hi_cycle, fe2_lo_cycle and fe2_hi_cycle are "
-              "null except on synthesised flushed records, ic_miss_lo and "
-              "ic_miss_hi are null, and ic_events.miss_cycles and "
-              "ic_events.deliveries are empty.",
+    "icache": "fe1_req_lo_cycle, fe1_req_hi_cycle, fe1_resp_lo_cycle and "
+              "fe1_resp_hi_cycle are null except on synthesised flushed "
+              "records, ic_miss_lo and ic_miss_hi are null, and "
+              "ic_events.miss_cycles and ic_events.deliveries are empty.",
     "lsu_fsm": "lsu_admit_cycle and lsu_release_cycle are null, and so are "
                "dc_miss, dc_coalesced and dc_refill_overlap, which need the "
                "access window.",
@@ -2134,21 +2282,31 @@ MECHANISM_EFFECTS = {
                      "bp_decided_at are null.",
     "forwarding": "fwd_rs1_used, fwd_rs2_used and fwd_rs3_used are false and "
                   "every fwd_rs*_via and fwd_rs*_producer_id is null.",
+    "dependences": "dep_producer_ids and dep_producer_regs are null, since "
+                   "no operand's register file is known.",
 }
 
 
-def build_degraded(resolved, run, pipeline):
+def build_degraded(resolved, run, pipeline, early_end):
     """metadata.degraded: every mechanism that did not resolve, then what
     the body of the VCD shows. The mechanisms are decided from the header,
-    so a cut VCD degrades like a whole one, and the last six read the body."""
+    so a cut VCD degrades like a whole one, and the checks after them read
+    the body. early_end is what last_commit_outside_exit returned."""
     census = DegradedCensus()
     for mechanism, effect in MECHANISM_EFFECTS.items():
         census.require(resolved[mechanism], mechanism, effect)
+    cut = ("The VCD's last line has no newline, so the file was cut "
+           "mid-record")
+    if run.ends_cleanly and early_end is not None:
+        pc, symbol = early_end
+        cut = (f"The last instruction committed at {pc}, in "
+               f"{symbol or 'no symbol of the listing'}, not in the exit "
+               f"routine a whole run ends in, so the dump stops before the "
+               f"program did, cut or windowed with an early vcd_end")
     census.require(
-        run.ends_cleanly, "truncated",
-        "The VCD's last line has no newline, so the file was cut mid-record: "
-        "instructions stops early and every count in metadata.stats is a "
-        "lower bound.")
+        run.ends_cleanly and early_end is None, "truncated",
+        f"{cut}: instructions stops early and every count in metadata.stats "
+        f"is a lower bound.")
     census.require(
         run.n_changes > 0, "no_value_changes",
         "The VCD holds a header and no value changes, so instructions and "
@@ -2172,9 +2330,12 @@ def build_degraded(resolved, run, pipeline):
     census.require(
         not period or period <= 0 or first <= 2 * period, "windowed",
         f"The VCD's first rising edge is at timestamp {first:,}, so the dump "
-        f"starts part way through the run: cycle 1 is its first edge, not "
-        f"the core's, the instructions in flight there lack their earlier "
-        f"stages, and metadata.stats covers the window only.")
+        f"starts part way through the run: cycle 0 is its first edge, not "
+        f"the core's, an instruction then waiting in the instruction queue "
+        f"lacks its fetch stages, one already in ID or the scoreboard has no "
+        f"record and is counted in n_unmatched_decodes, "
+        f"n_unmatched_writebacks or n_unmatched_commits, and metadata.stats "
+        f"covers the window only.")
     # A misidentified clock, where the edge count and the elapsed time
     # disagree. The margin is wide, so only the gross case trips.
     census.require(
@@ -2228,9 +2389,9 @@ def build_stats(records, mechanisms, table_size, n_missing, bindings,
     return {
         "n_records": len(records),
         "n_committed": pipeline.n_committed,
-        "n_flushed": (pipeline.n_flushed_fetched + pipeline.n_flushed_issued
-                      + pipeline.n_drained_fetched
-                      + pipeline.n_drained_issued),
+        # Flushed by the core only. The records still in flight when the
+        # VCD ended are flushed in the JSON too, counted in n_drained_*.
+        "n_flushed": pipeline.n_flushed_fetched + pipeline.n_flushed_issued,
         "n_flushed_fetched": pipeline.n_flushed_fetched,
         "n_flushed_issued": pipeline.n_flushed_issued,
         "n_drained_fetched": pipeline.n_drained_fetched,
@@ -2247,14 +2408,16 @@ def build_stats(records, mechanisms, table_size, n_missing, bindings,
         "n_ic_delivery_hits": sum(1 for e in deliveries if not e.is_miss),
         "n_ic_delivery_misses": sum(1 for e in deliveries if e.is_miss),
         "n_ic_miss_pulses": len(mechanisms.perf.ic_miss_cycles),
-        "n_ic_records_matched": count(lambda rec: rec.fe1_lo_cycle is not None
-                                      and not rec.synthesised_stages),
+        "n_ic_records_matched": count(
+            lambda rec: rec.fe1_req_lo_cycle is not None
+            and not rec.synthesised_stages),
         "n_ic_records_synthesised": count(
             lambda rec: bool(rec.synthesised_stages)),
         "n_ic_records_synthesised_monotonic": n_synthesised,
         "n_ic_records_rvc_paired": n_paired,
         "n_ic_records_rebound": n_rebound,
-        "n_ic_records_unmatched": count(lambda rec: rec.fe1_lo_cycle is None),
+        "n_ic_records_unmatched": count(
+            lambda rec: rec.fe1_req_lo_cycle is None),
         "n_disasm_annotated": n_annotated,
         "n_disasm_unmapped": n_unmapped,
         "n_disasm_no_pc": n_no_pc,
@@ -2288,6 +2451,10 @@ def build_stats(records, mechanisms, table_size, n_missing, bindings,
             "n_miss_events_other": sum(
                 1 for e in misses
                 if e["sid"] not in (LOAD_UNIT_SID, STORE_PORT_SID)),
+            # Miss allocations no access window took, so the access that
+            # missed reads as a hit.
+            "n_unclaimed_allocs_loads": mechanisms.unclaimed_allocs["LOAD"],
+            "n_unclaimed_allocs_stores": mechanisms.unclaimed_allocs["STORE"],
         },
         "bp": {
             "n_control": len(control),
@@ -2387,7 +2554,8 @@ def event_objects(mechanisms):
         "access_cycles": perf.ic_access_cycles,
         "miss_cycles": perf.ic_miss_cycles,
         "deliveries": [
-            {"fe1_cycle": event.fe1_cycle, "fe2_cycle": event.fe2_cycle,
+            {"fe1_req_cycle": event.req_cycle,
+             "fe1_resp_cycle": event.resp_cycle,
              "is_miss": event.is_miss, "vaddr": f"0x{event.vaddr_word:x}"}
             for event in mechanisms.icache.events],
     }
@@ -2556,10 +2724,11 @@ def build_parser():
              "did not resolve, or the VCD was cut, holds no value changes, "
              "no rising edge, no instruction or no commit, starts part way "
              "through the run, or ends at a timestamp that disagrees with "
-             "its cycle count. The JSON is "
-             "still written. A cut exactly at a line boundary leaves no mark "
-             "and can still pass. Use this in batch runs so a degraded VCD "
-             "is not mistaken for a complete one")
+             "its cycle count. The JSON is still written. A VCD that ends "
+             "on a whole line but before the program does is caught by its "
+             "last commit falling outside the exit routine, which needs the "
+             "listing. Use this in batch runs so a degraded VCD is not "
+             "mistaken for a complete one")
     parser.add_argument(
         "--scope-prefix", default=DEFAULT_SCOPE_PREFIX, metavar="SCOPE",
         help=f"The hierarchy the signal table is looked up under. Defaults "
@@ -2693,8 +2862,9 @@ def describe_vcd_clock(run, timescale):
 
 def mispredict_census(records):
     """Where each bp_mispredict record went, once each: flushed, the causer
-    of a bubble, resumed by the next record with no bubble, or cut by the end
-    of the VCD. Anything left over fell through tag_bubbles."""
+    of a bubble, resumed by the next record with no bubble, refetched with
+    no cycle lost, or cut by the end of the VCD. Anything left over fell
+    through tag_bubbles."""
     ordered = sorted(records, key=lambda rec: rec.id)
     last_unflushed = max((i for i, rec in enumerate(ordered)
                           if not rec.flushed), default=-1)
@@ -2711,6 +2881,9 @@ def mispredict_census(records):
             census["ended with the VCD"] += 1
         elif not ordered[i + 1].flushed:
             census["resumed at once"] += 1
+        elif bubble_cycles(rec, next(later for later in ordered[i + 1:]
+                                     if not later.flushed), "mispred") == 0:
+            census["lost no cycle"] += 1
         else:
             census["unaccounted"] += 1
     return census
@@ -2776,6 +2949,12 @@ def print_verbose(run, mechanisms, records, n_high_bound, bindings,
 
 def print_warnings(mechanisms, records):
     pipeline = mechanisms.pipeline
+    unclaimed = mechanisms.unclaimed_allocs
+    if unclaimed["LOAD"] or unclaimed["STORE"]:
+        log_warn(f"{unclaimed['LOAD']:,} load-unit and "
+                 f"{unclaimed['STORE']:,} store-port miss allocation(s) fell "
+                 f"in no access window, so the accesses that missed read as "
+                 f"hits. metadata.stats.dc counts them.")
     if mechanisms.n_unknown_bit_reads:
         log_warn(f"{mechanisms.n_unknown_bit_reads:,} bit reads hit x or z "
                  f"in the VCD. The commit or writeback strobes they carried "
@@ -2879,8 +3058,9 @@ def print_summary(args, out, run, records, mechanisms, metadata,
         if first.disasm:
             rows.append(("First record text", first.disasm))
         rows.append(("First record cycles", (
-            f"fe out {first.fe_out_cycle}, dec {first.dec_cycle}, ex "
-            f"{first.ex_cycle}, wb {first.wb_cycle}, co {first.co_cycle}")))
+            f"fe out {first.fe_out_cycle}, dec {first.dec_cycle}, is "
+            f"{first.is_cycle}, ex {first.ex_cycle}, wb {first.wb_cycle}, co "
+            f"{first.co_cycle}")))
         committed = [rec for rec in records if not rec.flushed and rec.fu]
         categories = Counter(rec.fu_category for rec in committed)
         units = Counter(rec.fu for rec in committed)
@@ -2939,20 +3119,24 @@ def main(argv=None):
     n_rebound, n_synthesised = repair_fetch_order(records, index)
     bindings = (n_rebound, n_synthesised, pair_rvc_fetches(records))
     if resolved["lsu_fsm"] and resolved["dcache"]:
-        attribute_dc_events(records, mechanisms.dcache)
+        mechanisms.unclaimed_allocs = attribute_dc_events(records,
+                                                          mechanisms.dcache)
     mem_writebacks, mechanisms.mem_wb_stats = finalise_mem_writebacks(
         mechanisms.mem_wb, dc_sets)
     disasm_list_path = find_disasm_list(args)
-    disasm = parse_disasm_list(disasm_list_path) if disasm_list_path else {}
+    disasm, symbols = (parse_disasm_list(disasm_list_path)
+                       if disasm_list_path else ({}, []))
     disasm_counts = apply_disasm(records, disasm)
     n_unresolved_producers = forwarding_producers(records)
+    register_dependences(records)
     branch_outcomes(records)
     mechanisms.bubble_counts = tag_bubbles(records)
     pre_fetch_waits(records)
 
     stats = build_stats(records, mechanisms, len(table), len(missing),
                         bindings, disasm_counts)
-    degraded = build_degraded(resolved, run, mechanisms.pipeline)
+    degraded = build_degraded(resolved, run, mechanisms.pipeline,
+                              last_commit_outside_exit(records, symbols))
     ic_events, dc_events = event_objects(mechanisms)
     try:
         data = {

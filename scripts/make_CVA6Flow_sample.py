@@ -10,8 +10,8 @@ tests/. The samples in tests/ are committed, so the button works in a
 fresh clone.
 
     python3 scripts/make_CVA6Flow_sample.py tests/daxpy.json
-    python3 scripts/make_CVA6Flow_sample.py tests/daxpy.json -n 1500
-    python3 scripts/make_CVA6Flow_sample.py daxpy.json --from 4000 -n 2000
+    python3 scripts/make_CVA6Flow_sample.py tests/daxpy.json -i 1500
+    python3 scripts/make_CVA6Flow_sample.py daxpy.json --from 4000 -i 2000
     python3 scripts/make_CVA6Flow_sample.py daxpy.json -o tests/daxpy.loop
 """
 import argparse
@@ -20,8 +20,6 @@ import os
 import re
 import sys
 
-TOOL = "cva6flow_tracer"
-SCHEMA_VERSION = 3
 
 # Small enough to open at once, long enough to show a miss and a mispredict.
 DEFAULT_COUNT = 3000
@@ -232,6 +230,29 @@ def read_page_limits():
 # SHARED END py-page-limits
 
 
+# SHARED BEGIN py-page-schema
+
+# Needs: os, re, PAGE, py-page-limits
+
+
+def read_page_schema():
+    """(TOOL, SCHEMA_VERSION) as PAGE declares them, the JSON the page reads,
+    or None when the page or either constant is missing. Read rather than
+    restated, so a schema change is made in one place."""
+    path = os.path.join(page_root(), PAGE)
+    if not os.path.isfile(path):
+        return None
+    with open(path, encoding="utf-8") as f:
+        text = f.read()
+    tool = re.search(r"\bconst TOOL = '([^']+)';", text)
+    version = re.search(r"\bconst SCHEMA_VERSION = (\d+);", text)
+    if not (tool and version):
+        return None
+    return tool.group(1), int(version.group(1))
+
+# SHARED END py-page-schema
+
+
 # SHARED BEGIN py-sample-manifest
 
 # Needs: json, os
@@ -319,7 +340,7 @@ def main():
         help="Output path without its extension. Defaults to "
              "tests/<source name>.sample beside the page")
     parser.add_argument(
-        "-n", "--instructions", type=int, default=DEFAULT_COUNT, metavar="N",
+        "-i", "--instructions", type=int, default=DEFAULT_COUNT, metavar="N",
         help=f"How many records to keep. Defaults to {DEFAULT_COUNT}, and 0 "
              f"keeps every record from --from on. At most the page's "
              f"MAX_STREAM_INSTRUCTIONS, what the viewer renders at once")
@@ -331,7 +352,7 @@ def main():
     args = parser.parse_args()
 
     if args.instructions < 0:
-        print(f"[ERROR] -n {args.instructions} is negative. Give a count, "
+        print(f"[ERROR] -i {args.instructions} is negative. Give a count, "
               f"or 0 for every record.", file=sys.stderr)
         return 1
     limits = read_page_limits()
@@ -340,13 +361,18 @@ def main():
               f"{page_root()}.", file=sys.stderr)
         return 1
     max_records = limits[1]
+    schema = read_page_schema()
+    if schema is None:
+        print(f"[ERROR] Could not read TOOL and SCHEMA_VERSION from {PAGE} "
+              f"in {page_root()}.", file=sys.stderr)
+        return 1
     if not os.path.isfile(args.source):
         print(f"[ERROR] {args.source} does not exist.", file=sys.stderr)
         return 1
     print(f"[INFO] Reading {args.source} "
           f"({human(os.path.getsize(args.source))})")
     try:
-        data = load_tracer_json(args.source, TOOL, SCHEMA_VERSION)
+        data = load_tracer_json(args.source, *schema)
     except ValueError as err:
         print(f"[ERROR] {err}", file=sys.stderr)
         return 1
@@ -361,7 +387,7 @@ def main():
     if last - args.start + 1 > max_records:
         print(f"[ERROR] That keeps {last - args.start + 1:,} records, more "
               f"than the {max_records:,} the viewer renders at once. Give a "
-              f"smaller -n.", file=sys.stderr)
+              f"smaller -i.", file=sys.stderr)
         return 1
 
     span, _sliced = clip_json(data, args.start, last,
@@ -385,7 +411,7 @@ def main():
               f"does not offer a sample listed in {manifest}.")
     if size > MAX_SAMPLE_BYTES:
         print(f"[WARN] {human(size)} is past {human(MAX_SAMPLE_BYTES)}, and "
-              f"a sample is meant to open at once. Try a smaller -n.")
+              f"a sample is meant to open at once. Try a smaller -i.")
     return 0
 
 
