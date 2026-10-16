@@ -41,6 +41,11 @@ REPO = _check.REPO
 PY_COLS = _check.MAX_COLS
 
 
+# SHARED BEGIN py-format-passes
+
+# Needs: os, re, shutil, subprocess, sys, REPO, PY_COLS, _check
+
+
 def python_files():
     return [r for r in _check.owned() if r.endswith(".py")]
 
@@ -93,8 +98,8 @@ def format_c(text):
 
 def run_benchmarks(files, check, verbose):
     """Whitespace and a final newline on every benchmark, plus operand
-    alignment on the assembly. The parent repository's .editorconfig asks
-    for the first two."""
+    alignment on the assembly. The CVA6 fork's .editorconfig asks for the
+    first two."""
     changed = []
     for rel in files:
         path = os.path.join(REPO, rel)
@@ -166,7 +171,8 @@ def prettier_base():
 
 
 def run_python(files, check, verbose):
-    """Returns the files that changed, or that would change under --check."""
+    """(files that changed or would change under --check, the reason the
+    pass was skipped or None)."""
     if not files:
         return [], None
     have = toolchain()
@@ -201,6 +207,8 @@ def run_python(files, check, verbose):
 
 
 def run_markdown(files, check, verbose):
+    """(files that changed or would change under --check, the reason the
+    pass was skipped or None)."""
     if not files:
         return [], None
     base = prettier_base()
@@ -226,6 +234,8 @@ def run_markdown(files, check, verbose):
         if wrote.returncode != 0:
             return [], f"prettier failed: {wrote.stderr.strip()[:100]}"
     return listed, None
+
+# SHARED END py-format-passes
 
 
 def main():

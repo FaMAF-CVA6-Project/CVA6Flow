@@ -412,7 +412,7 @@ def main():
                              "setting are the same for the whole batch")
     parser.add_argument("-r", "--recursive", action="store_true",
                         help="Also pick up tests in subfolders")
-    parser.add_argument("--dry-run", action="store_true",
+    parser.add_argument("-n", "--dry-run", action="store_true",
                         help="List what would run, and the name clashes, "
                              "without running anything")
     args = parser.parse_args()
@@ -536,7 +536,10 @@ def main():
          f"CVA6 root : {root}",
          f"Suite     : {args.suite or '(run_CVA6.py default)'}",
          f"Runs      : {len(results)}, {len(results) - failed} passed"],
-        metrics_filename([args.target, args.suite]))
+        # The folder is in the name, so a batch of each suite into one
+        # --out-dir keeps both tables.
+        metrics_filename([args.target, os.path.basename(folder),
+                          args.suite]))
 
     print(f"[INFO] Results in {out_dir}")
     if failed:

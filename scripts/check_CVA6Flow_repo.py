@@ -810,11 +810,104 @@ def check_formatter():
 # SHARED END py-check-formatter
 
 
+# SHARED BEGIN py-check-palette
+
+# Needs: re, owned, read
+
+# A page's stage colour tables, one per look, and how far apart in OKLab two
+# light fills must sit on a white row, so a printed figure keeps every legend
+# entry apart. The dark look is held to distinct values only.
+PALETTE_TABLES = ("COL_DARK", "COL_LIGHT")
+PALETTE_LIGHT_MIN_DISTANCE = 0.02
+PALETTE_TABLE = re.compile(r"const (COL_DARK|COL_LIGHT) = Object\.freeze\(\{"
+                           r"(.*?)\n\s*\}\);", re.S)
+PALETTE_ENTRY = re.compile(r"^\s*(\w+): '([^']*)',", re.M)
+
+
+def palette_rgba(text):
+    """A colour as (r, g, b, alpha) from a hex, an rgb() or rgba(), or the
+    bare "r,g,b" triple of a band, or None for anything else."""
+    text = text.strip()
+    hexa = re.fullmatch(r"#([0-9a-fA-F]{6})", text)
+    if hexa:
+        digits = hexa.group(1)
+        return tuple(int(digits[i:i + 2], 16) for i in (0, 2, 4)) + (1.0,)
+    inner = re.fullmatch(r"rgba?\(([^)]*)\)", text)
+    parts = inner.group(1) if inner else text
+    try:
+        values = [float(v) for v in parts.split(",")]
+    except ValueError:
+        return None
+    if len(values) not in (3, 4):
+        return None
+    return tuple(values[:3]) + (values[3] if len(values) == 4 else 1.0,)
+
+
+def palette_oklab(rgba):
+    """OKLab of a colour laid over a white row."""
+    def linear(channel):
+        c = (channel * rgba[3] + 255 * (1 - rgba[3])) / 255
+        return c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4
+    r, g, b = (linear(c) for c in rgba[:3])
+    l_ = (0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b) ** (1 / 3)
+    m_ = (0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b) ** (1 / 3)
+    s_ = (0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b) ** (1 / 3)
+    return (0.2104542553 * l_ + 0.7936177850 * m_ - 0.0040720468 * s_,
+            1.9779984951 * l_ - 2.4285922050 * m_ + 0.4505937099 * s_,
+            0.0259040371 * l_ + 0.7827717662 * m_ - 0.8086757660 * s_)
+
+
+def check_palette():
+    """No two entries of a stage colour table share a colour.
+
+    Each viewer page keeps one table per look, COL_DARK and COL_LIGHT, keyed
+    like its legend. A repeated value draws two legend entries alike, so it
+    fails in either look. The light look is printed in the thesis, so its
+    fills must also sit PALETTE_LIGHT_MIN_DISTANCE apart in OKLab."""
+    bad = []
+    for rel in owned(".html"):
+        text = read(rel)
+        tables = {name: body for name, body in PALETTE_TABLE.findall(text)}
+        if not tables:
+            continue
+        for name in PALETTE_TABLES:
+            if name not in tables:
+                bad.append(f"{rel}: no {name} table")
+                continue
+            colours, seen = {}, {}
+            for key, value in PALETTE_ENTRY.findall(tables[name]):
+                rgba = palette_rgba(value)
+                if rgba is None:
+                    bad.append(f"{rel}: {name}.{key} is not a colour, {value}")
+                    continue
+                if rgba in seen:
+                    bad.append(f"{rel}: {name}.{key} repeats {seen[rgba]}, "
+                               f"{value}")
+                colours[key] = rgba
+                seen.setdefault(rgba, key)
+            if name != "COL_LIGHT":
+                continue
+            keys = list(colours)
+            labs = {key: palette_oklab(colours[key]) for key in keys}
+            for i, first in enumerate(keys):
+                for second in keys[i + 1:]:
+                    gap = sum((a - b) ** 2 for a, b in
+                              zip(labs[first], labs[second])) ** 0.5
+                    if 0 < gap < PALETTE_LIGHT_MIN_DISTANCE:
+                        bad.append(f"{rel}: {name}.{first} and {second} are "
+                                   f"{gap:.3f} apart in OKLab, under "
+                                   f"{PALETTE_LIGHT_MIN_DISTANCE}")
+    return bad
+
+# SHARED END py-check-palette
+
+
 CHECKS = (
     ("compiles", check_compiles),
     ("pyflakes", check_pyflakes),
     ("help", check_help),
     ("viewer-js", check_viewer_js),
+    ("palette", check_palette),
     ("shared-blocks", check_shared_blocks),
     ("script-names", check_script_names),
     ("links", check_links),

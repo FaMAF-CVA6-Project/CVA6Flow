@@ -22,8 +22,9 @@ import time
 # The CVA6 root run_CVA6.py picks without --cva6-root, when it exists.
 IMAGE_CVA6_ROOT = "/CVA6"
 
-# The package the build actually reads, relative to the CVA6 root.
-LIVE_CONFIG_PKG = "core/include/cv64a6_imafdc_sv39_hpdcache_wb_config_pkg.sv"
+# The package the build actually reads, relative to the CVA6 root, for the
+# target being swept.
+LIVE_CONFIG_PKG = os.path.join("core", "include", "{target}_config_pkg.sv")
 # Beside the live package while a sweep runs, the copy it restores from.
 BACKUP_SUFFIX = ".sweep_backup"
 
@@ -282,6 +283,43 @@ def clear_stale_outputs(results_dir, test_name):
 # SHARED END py-cva6-run-dirs
 
 
+class SweepRefused(Exception):
+    """The sweep cannot start, for the reason in the message."""
+
+
+class Terminated(Exception):
+    """SIGTERM arrived, so the sweep stops as it does on Ctrl-C."""
+
+    def __init__(self, signum):
+        super().__init__(signum)
+        self.signum = signum
+
+
+def on_sigterm(signum, frame):
+    raise Terminated(signum)
+
+
+def run_child(cmd):
+    """Run cmd in a process group of its own and return its exit code. On
+    Ctrl-C or SIGTERM the signal goes to the whole group, and the sweep waits
+    for it, so no build or simulation outlives the sweep or runs on against
+    the package it is about to put back."""
+    child = subprocess.Popen(cmd, start_new_session=True)
+    try:
+        return child.wait()
+    except (KeyboardInterrupt, Terminated) as stop:
+        signum = getattr(stop, "signum", signal.SIGINT)
+        try:
+            os.killpg(child.pid, signum)
+            child.wait(timeout=60)
+        except subprocess.TimeoutExpired:
+            os.killpg(child.pid, signal.SIGKILL)
+            child.wait()
+        except ProcessLookupError:
+            pass
+        raise
+
+
 def find_source_pkg(explicit, root):
     """Locate the swept config package, or None after saying why."""
     if explicit:
@@ -343,6 +381,46 @@ def resolve_all(table):
     return sorted(named)
 
 
+# SHARED BEGIN py-sweep-common
+
+# Needs: os, EXT_PRIORITY, SEP, SweepRefused, py-run-helpers
+
+
+def parse_config_selection(spec, table, groups=None, default=None):
+    """Parse '1,4-6' into a sorted list of configuration ids. groups maps a
+    name to the ids it stands for, and an empty spec selects default, or
+    every id. Raises SweepRefused on a malformed, backward or unknown id."""
+    groups = groups or {}
+    if not spec:
+        return sorted(table if default is None else default)
+
+    selected = set()
+    for chunk in spec.split(","):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        if chunk.lower() in groups:
+            selected.update(groups[chunk.lower()])
+            continue
+        low, dash, high = chunk.partition("-")
+        try:
+            first, last = int(low), int(high if dash else low)
+        except ValueError:
+            raise SweepRefused(f"Bad configuration {'range' if dash else 'id'}"
+                               f": '{chunk}'")
+        if first > last:
+            raise SweepRefused(f"The range '{chunk}' runs backwards, so it "
+                               f"selects nothing. Write {last}-{first}.")
+        selected.update(range(first, last + 1))
+
+    unknown = sorted(selected - set(table))
+    if unknown:
+        raise SweepRefused(f"No such configuration(s): "
+                           f"{', '.join(str(u) for u in unknown)}. "
+                           f"The table has {min(table)}-{max(table)}.")
+    return sorted(selected)
+
+
 def suggest(name, tests_dir):
     """Files that look close to a workload name that did not resolve."""
     try:
@@ -386,40 +464,34 @@ def resolve_test_file(name, tests_dir):
     return matches[0]
 
 
-def parse_config_selection(spec, table):
-    """Parse '1,4-6' into a sorted list of configuration ids, or None after
-    saying why."""
-    if not spec:
-        return sorted(table)
+def print_summary(results, total_elapsed):
+    """The pass and fail table, in plan order, from (config id, test, exit
+    code, seconds) rows. Returns how many failed."""
+    print("\n" + SEP)
+    print("SWEEP SUMMARY")
+    print(SEP)
+    print(f"{'CONFIG':>8} | {'TEST':<28} | {'STATUS':>10} | {'TIME':>9}")
+    print(SEP)
 
-    selected = set()
-    for chunk in spec.split(","):
-        chunk = chunk.strip()
-        if not chunk:
-            continue
-        if "-" in chunk:
-            low, _, high = chunk.partition("-")
-            try:
-                selected.update(range(int(low), int(high) + 1))
-            except ValueError:
-                print(f"[ERROR] Bad configuration range: '{chunk}'",
-                      file=sys.stderr)
-                return None
-        else:
-            try:
-                selected.add(int(chunk))
-            except ValueError:
-                print(f"[ERROR] Bad configuration id: '{chunk}'",
-                      file=sys.stderr)
-                return None
+    for config_id, name, code, elapsed in results:
+        status = "OK" if code == 0 else f"FAILED ({code})"
+        print(f"{('config' + str(config_id)):>8} | {name[:28]:<28} | "
+              f"{status:>10} | {format_duration(elapsed):>9}")
 
-    unknown = sorted(selected - set(table))
-    if unknown:
-        print(f"[ERROR] No such configuration(s): "
-              f"{', '.join(str(u) for u in unknown)}. "
-              f"The table has {min(table)}-{max(table)}.", file=sys.stderr)
-        return None
-    return sorted(selected)
+    passed = sum(1 for _, _, code, _ in results if code == 0)
+    failed = len(results) - passed
+
+    print(SEP)
+    print(f"{len(results)} run, {passed} passed, {failed} failed, "
+          f"total {format_duration(total_elapsed)}")
+    print(SEP + "\n")
+
+    if failed:
+        print("[WARN] Failed: " + ", ".join(
+            f"config{c}/{n}" for c, n, code, _ in results if code != 0))
+    return failed
+
+# SHARED END py-sweep-common
 
 
 def build_plan(table, config_ids, tests_dir, override_tests):
@@ -474,6 +546,17 @@ def install_config(source_text, cfg_name, live_path):
         f.write(text)
 
 
+def check_target(source_pkg, target, live_given):
+    """Refuse a swept package cut for another target, since the live package
+    it is written over is the target's own. --live-config-pkg overrides."""
+    name = os.path.basename(source_pkg)
+    if not live_given and not name.startswith(target + "_"):
+        raise SweepRefused(
+            f"{name} is not a package for {target}, so it would be written "
+            f"over that target's live package. Pass --config-pkg with one "
+            f"made for it, or --live-config-pkg to say where it goes.")
+
+
 def collect(results_dir, test_name, config_id, out_dir, want_vcd):
     """Move this run's three files out under their .config<N> names."""
     produced = output_paths(results_dir, test_name)
@@ -503,6 +586,8 @@ def collect(results_dir, test_name, config_id, out_dir, want_vcd):
 
 
 def print_plan(plan, all_tests):
+    """Every configuration with the tests it will run. Returns the number of
+    runs."""
     print(f"[INFO] 'all' resolves to {len(all_tests)} workload(s): " +
           (", ".join(all_tests) if all_tests else "nothing") + "\n")
     total = 0
@@ -516,38 +601,9 @@ def print_plan(plan, all_tests):
     return total
 
 
-def print_summary(results, total_elapsed):
-    print("\n" + SEP)
-    print("SWEEP SUMMARY")
-    print(SEP)
-    print(f"{'CONFIG':>8} | {'TEST':<28} | {'STATUS':>10} | {'TIME':>9}")
-    print(SEP)
-
-    for config_id, name, code, elapsed in results:
-        status = "OK" if code == 0 else f"FAILED ({code})"
-        print(f"{('config' + str(config_id)):>8} | {name[:28]:<28} | "
-              f"{status:>10} | {format_duration(elapsed):>9}")
-
-    passed = sum(1 for _, _, code, _ in results if code == 0)
-    failed = len(results) - passed
-
-    print(SEP)
-    print(f"{len(results)} run, {passed} passed, {failed} failed, "
-          f"total {format_duration(total_elapsed)}")
-    print(SEP + "\n")
-
-    if failed:
-        print("[WARN] Failed: " + ", ".join(
-            f"config{c}/{n}" for c, n, code, _ in results if code != 0))
-    return failed
-
-
-def main():
-    runner = find_runner()
-    if runner is None:
-        return 2
-    driver = load_runner(runner)
-
+def build_parser(driver):
+    """The sweep's command line, whose --suite choices are the driver's own
+    tables."""
     parser = argparse.ArgumentParser(
         description="Run the CVA6Flow configuration sweep: each configuration "
                     "in the config package, with the workloads it was cut "
@@ -557,7 +613,8 @@ def main():
                "named\nin the table. Outputs are collected as "
                "<test>.config<N>.<ext>.")
     parser.add_argument("--target", default=DEFAULT_TARGET,
-                        help=f"Architecture target. Defaults to "
+                        help=f"Architecture target, whose live package the "
+                             f"sweep writes over. Defaults to "
                              f"{DEFAULT_TARGET}")
     parser.add_argument("--configs", default="",
                         help="Which configurations to run, e.g. '1,4-6'. "
@@ -581,10 +638,11 @@ def main():
                              f"../configs/ or in CVA6_configs/ under the "
                              f"CVA6 root")
     parser.add_argument("--live-config-pkg", default=None,
-                        help=f"The package the build reads, overwritten per "
-                             f"configuration and restored at the end. "
-                             f"Defaults to {LIVE_CONFIG_PKG} under the CVA6 "
-                             f"root")
+                        help="The package the build reads, overwritten per "
+                             "configuration and restored at the end. "
+                             "Defaults to the target's "
+                             + LIVE_CONFIG_PKG.format(target="<target>")
+                             + " under the CVA6 root")
     parser.add_argument("--suite", choices=sorted(driver.OVERHEAD_SUITES),
                         default=None,
                         help="Forwarded to run_CVA6.py: which overhead table "
@@ -599,97 +657,18 @@ def main():
     parser.add_argument("--no-vcd", action="store_true",
                         help="Forwarded to run_CVA6.py: no VCD, "
                              "metrics only")
-    parser.add_argument("--dry-run", action="store_true",
+    parser.add_argument("-n", "--dry-run", action="store_true",
                         help="Print the plan and exit, touching nothing")
-    args = parser.parse_args()
+    return parser
 
-    # Keep our output interleaved correctly with each run_CVA6.py run.
-    if hasattr(sys.stdout, "reconfigure"):
-        sys.stdout.reconfigure(line_buffering=True)
 
-    root = os.path.abspath(args.cva6_root or default_cva6_root(runner))
-    if args.tests_dir is None:
-        args.tests_dir = default_tests_dir(root)
-    if args.live_config_pkg is None:
-        args.live_config_pkg = os.path.join(root, LIVE_CONFIG_PKG)
-    source_pkg = find_source_pkg(args.config_pkg, root)
-    if source_pkg is None:
-        return 2
-    with open(source_pkg) as f:
-        source_text = f.read()
-
-    table = parse_table(source_text)
-    if not table:
-        print(f"[ERROR] No configuration table found in {source_pkg}. "
-              f"Expected lines like "
-              f"'localparam int CFG_X = 1; // description : workload'.",
-              file=sys.stderr)
-        return 2
-    if not SELECTOR_RE.search(source_text):
-        print(f"[ERROR] CVA6_CONFIG_SEL not found in {source_pkg}, so no "
-              f"configuration can be selected.", file=sys.stderr)
-        return 2
-
-    config_ids = parse_config_selection(args.configs, table)
-    if config_ids is None:
-        return 2
-    override_tests = [t.strip() for t in args.tests.split(",") if t.strip()]
-    all_tests = override_tests if override_tests else resolve_all(table)
-
-    print(SEP)
-    print("CVA6FLOW SWEEP")
-    print(SEP)
-    print(f"CVA6 root : {root}")
-    print(f"Swept pkg : {source_pkg}")
-    print(f"Live pkg  : {args.live_config_pkg}")
-    print(f"Target    : {args.target}")
-    print(f"Tests dir : {args.tests_dir}")
-    print(f"Out dir   : {os.path.abspath(args.out_dir)}")
-    vcd = "disabled (--no-vcd)" if args.no_vcd else "enabled"
-    print(f"VCD       : {vcd}")
-    print(SEP + "\n")
-
-    if not os.path.isdir(args.tests_dir):
-        print(f"[ERROR] Folder not found: {args.tests_dir}", file=sys.stderr)
-        return 2
-
-    plan = build_plan(table, config_ids, args.tests_dir, override_tests)
-    total_runs = print_plan(plan, all_tests)
-
-    if args.dry_run:
-        print("[INFO] Dry run, nothing executed.")
-        return 0
-    if not total_runs:
-        print("[ERROR] Nothing to run.", file=sys.stderr)
-        return 2
-
+def run_plan(args, runner, root, source_text, plan, live_pkg):
+    """Install each configuration, run its tests and collect them. Returns
+    (results, folders used, the signal that stopped the sweep or None), with
+    results as (config id, CFG name, test, exit code, seconds)."""
     results_dir = driver_results_dir(root)
-    live_pkg = args.live_config_pkg
-    if not os.path.isfile(live_pkg):
-        print(f"[ERROR] The live config package {live_pkg} does not exist",
-              file=sys.stderr)
-        return 2
-    os.makedirs(args.out_dir, exist_ok=True)
-
-    # A copy on disk as well as in memory, so a sweep killed before it can
-    # restore leaves the production package for the next sweep to put back.
-    backup = live_pkg + BACKUP_SUFFIX
-    if os.path.isfile(backup):
-        shutil.copyfile(backup, live_pkg)
-        print(f"[WARN] {backup} was left by a sweep that was killed, so "
-              f"{live_pkg} has been put back from it first.")
-    with open(live_pkg) as f:
-        original_live = f.read()
-    shutil.copyfile(live_pkg, backup)
-    print(f"\n[INFO] Backed up {live_pkg}, restored when the sweep ends.")
-    # A plain kill runs the restore too. Only SIGKILL skips it.
-    signal.signal(signal.SIGTERM, lambda signum, frame: sys.exit(128 + signum))
-
-    results = []
-    used_folders = set()
-    sweep_start = time.time()
+    results, used_folders, stopped = [], set(), None
     test_name = None
-
     try:
         for config_id, cfg_name, description, paths in plan:
             if not paths:
@@ -715,7 +694,8 @@ def main():
                 # driver must not carry it off to results/ first. The root is
                 # always passed, so the driver writes where this collects.
                 cmd = [sys.executable, runner, args.target, path,
-                       "--no-keep-sim-output", "--cva6-root", root]
+                       "--no-keep-sim-output", "--cva6-root", root,
+                       "--swept-config", cfg_name]
                 if args.suite:
                     cmd.extend(["--suite", args.suite])
                 if args.no_vcd:
@@ -727,12 +707,13 @@ def main():
 
                 start = time.time()
                 try:
-                    code = subprocess.run(cmd).returncode
-                except KeyboardInterrupt:
-                    # A failure with the shell's code for an interrupt, so its
+                    code = run_child(cmd)
+                except (KeyboardInterrupt, Terminated) as stop:
+                    # A failure with the shell's code for the signal, so its
                     # output and the dated folders are kept, as in the batch.
-                    results.append((config_id, test_name, 130,
-                                    time.time() - start))
+                    stopped = getattr(stop, "signum", signal.SIGINT)
+                    results.append((config_id, cfg_name, test_name,
+                                    128 + stopped, time.time() - start))
                     raise
                 elapsed = time.time() - start
 
@@ -749,32 +730,133 @@ def main():
                             not args.no_vcd)
                     used_folders.update(discard_run(
                         root, results_dir, test_name, args.target))
-                results.append((config_id, test_name, code, elapsed))
-
-    except KeyboardInterrupt:
+                results.append((config_id, cfg_name, test_name, code,
+                                elapsed))
+    except (KeyboardInterrupt, Terminated) as stop:
+        stopped = getattr(stop, "signum", signal.SIGINT)
         during = f" during '{test_name}'" if test_name else ""
-        print(f"\n[WARN] Interrupted{during}. Stopping the sweep.")
+        print(f"\n[WARN] Stopped{during} by {signal.Signals(stopped).name}. "
+              f"Ending the sweep.")
+    return results, used_folders, stopped
+
+
+def run_sweep():
+    """Plan, run and gather the sweep. Returns the exit code, and raises
+    SweepRefused when the sweep cannot start."""
+    runner = find_runner()
+    if runner is None:
+        return 2
+    driver = load_runner(runner)
+    args = build_parser(driver).parse_args()
+
+    # Keep our output interleaved correctly with each run_CVA6.py run.
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(line_buffering=True)
+
+    root = os.path.abspath(args.cva6_root or default_cva6_root(runner))
+    if args.tests_dir is None:
+        args.tests_dir = default_tests_dir(root)
+    live_given = args.live_config_pkg is not None
+    if not live_given:
+        args.live_config_pkg = os.path.join(
+            root, LIVE_CONFIG_PKG.format(target=args.target))
+    source_pkg = find_source_pkg(args.config_pkg, root)
+    if source_pkg is None:
+        return 2
+    check_target(source_pkg, args.target, live_given)
+    with open(source_pkg) as f:
+        source_text = f.read()
+
+    table = parse_table(source_text)
+    if not table:
+        raise SweepRefused(
+            f"No configuration table found in {source_pkg}. Expected lines "
+            f"like 'localparam int CFG_X = 1; // description : workload'.")
+    if not SELECTOR_RE.search(source_text):
+        raise SweepRefused(f"CVA6_CONFIG_SEL not found in {source_pkg}, so "
+                           f"no configuration can be selected.")
+
+    config_ids = parse_config_selection(args.configs, table)
+    override_tests = [t.strip() for t in args.tests.split(",") if t.strip()]
+    all_tests = override_tests if override_tests else resolve_all(table)
+
+    print(SEP)
+    print("CVA6FLOW SWEEP")
+    print(SEP)
+    print(f"CVA6 root : {root}")
+    print(f"Swept pkg : {source_pkg}")
+    print(f"Live pkg  : {args.live_config_pkg}")
+    print(f"Target    : {args.target}")
+    print(f"Tests dir : {args.tests_dir}")
+    print(f"Out dir   : {os.path.abspath(args.out_dir)}")
+    vcd = "disabled (--no-vcd)" if args.no_vcd else "enabled"
+    print(f"VCD       : {vcd}")
+    print(SEP + "\n")
+
+    if not os.path.isdir(args.tests_dir):
+        raise SweepRefused(f"Folder not found: {args.tests_dir}")
+
+    plan = build_plan(table, config_ids, args.tests_dir, override_tests)
+    total_runs = print_plan(plan, all_tests)
+
+    if args.dry_run:
+        print("[INFO] Dry run, nothing executed.")
+        return 0
+    if not total_runs:
+        raise SweepRefused("Nothing to run.")
+
+    live_pkg = args.live_config_pkg
+    if not os.path.isfile(live_pkg):
+        raise SweepRefused(f"The live config package {live_pkg} does not "
+                           f"exist")
+    os.makedirs(args.out_dir, exist_ok=True)
+
+    # A copy on disk as well as in memory, so a sweep killed before it can
+    # restore leaves the production package for the next sweep to put back.
+    backup = live_pkg + BACKUP_SUFFIX
+    if os.path.isfile(backup):
+        shutil.copyfile(backup, live_pkg)
+        print(f"[WARN] {backup} was left by a sweep that was killed, so "
+              f"{live_pkg} has been put back from it first.")
+    with open(live_pkg) as f:
+        original_live = f.read()
+    shutil.copyfile(live_pkg, backup)
+    print(f"\n[INFO] Backed up {live_pkg}, restored when the sweep ends.")
+    # A plain kill stops the run in progress and restores too. Only SIGKILL
+    # skips it.
+    signal.signal(signal.SIGTERM, on_sigterm)
+
+    sweep_start = time.time()
+    try:
+        results, used_folders, stopped = run_plan(
+            args, runner, root, source_text, plan, live_pkg)
     finally:
         with open(live_pkg, "w") as f:
             f.write(original_live)
         os.remove(backup)
         print(f"\n[INFO] Restored {live_pkg}")
 
-    failed = print_summary(results, time.time() - sweep_start)
+    failed = print_summary([(cid, name, code, seconds)
+                            for cid, _, name, code, seconds in results],
+                           time.time() - sweep_start)
 
     out_dir = os.path.abspath(args.out_dir)
-    # Only a run that passed left a table behind to gather.
+    # Only a run that passed left a table behind to gather. Each label names
+    # the configuration, and the selection is in the file name, so a second
+    # sweep of other ids beside it keeps both.
     write_metrics_file(
         out_dir,
-        [(f"config{cid} / {name}",
+        [(f"config{cid} {cfg} / {name}",
           os.path.join(out_dir, f"{name}_report.config{cid}.txt"))
-         for cid, name, code, _ in results if code == 0],
+         for cid, cfg, name, code, _ in results if code == 0],
         [f"Target    : {args.target}",
+         f"Swept pkg : {source_pkg}",
+         f"Selection : {args.configs or '(all)'}",
          f"CVA6 root : {root}",
          f"Suite     : {args.suite or '(run_CVA6.py default)'}",
          f"Tests dir : {os.path.abspath(args.tests_dir)}",
          f"Runs      : {len(results)}, {len(results) - failed} passed"],
-        metrics_filename([args.target, args.suite]))
+        metrics_filename([args.target, args.configs, args.suite]))
 
     print(f"[INFO] Results in {out_dir}")
     if failed:
@@ -783,7 +865,21 @@ def main():
     else:
         # Nothing in those is worth keeping now, so take the trees with it.
         discard_sim_trees(used_folders)
+    if stopped:
+        return 128 + stopped
     return 1 if failed else 0
+
+
+def main():
+    """Run the sweep, turning a refusal into one [ERROR] line and exit 2, and
+    a SIGTERM outside the runs into the shell's code for it."""
+    try:
+        return run_sweep()
+    except SweepRefused as refusal:
+        print(f"[ERROR] {refusal}", file=sys.stderr)
+        return 2
+    except Terminated as stop:
+        return 128 + stop.signum
 
 
 if __name__ == "__main__":

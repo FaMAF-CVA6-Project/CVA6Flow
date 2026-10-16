@@ -144,7 +144,7 @@ def main():
                     "__pycache__ folders in this viewer repository.")
     parser.add_argument("-y", "--yes", action="store_true",
                         help="Delete without asking for confirmation")
-    parser.add_argument("--dry-run", action="store_true",
+    parser.add_argument("-n", "--dry-run", action="store_true",
                         help="List what would be deleted and stop")
     parser.add_argument("-v", "--verbose", action="store_true",
                         help="List every path instead of one row per folder")

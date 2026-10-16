@@ -6,10 +6,14 @@ detected from the extension and can be forced with --lang. The overhead
 table subtracted comes from the .overhead_suite beside the test, or --suite:
 
     python3 scripts/run_CVA6.py benchmarks/daxpy.S
+
+One run at a time per CVA6 root, since every run builds and reads the same
+work-ver/, and a second one started meanwhile is refused.
 """
 import argparse
 import ast
 import datetime
+import fcntl
 import glob
 import operator
 import os
@@ -22,6 +26,20 @@ import sys
 # The target the overhead tables below were measured on, and the one the
 # calibration runs against.
 DEFAULT_TARGET = "cv64a6_imafdc_sv39_hpdcache_wb"
+
+# What a swept config package selects when it runs the production core. A
+# package with no selector at all is the unmodified upstream one.
+PRODUCTION_CONFIG = "CFG_BASELINE"
+
+# Left beside the live package by a sweep while it runs, and by a sweep that
+# was killed before it could put the production package back.
+SWEEP_BACKUP_SUFFIX = ".sweep_backup"
+
+# Where a bare test name is looked for under the CVA6 root, the image's two
+# suites and this fork's calibration programs, after the folder of this
+# repository's own benchmarks.
+TEST_FOLDERS = ("benchmarks/config", "benchmarks/viewer",
+                "gem5_config_CVA6/CVA6/benchmarks")
 
 # =============================================================================
 # OVERHEAD PROFILES (DEFAULT_TARGET)
@@ -436,6 +454,83 @@ def read_cache_geometry(cva6_root, target):
     return geometry
 
 
+def live_config(cva6_root, target):
+    """(package path, CVA6_CONFIG_SEL) of the target's live config package,
+    the name None for a package that selects nothing, or (None, None) with
+    no package."""
+    path = find_config_pkg(cva6_root, target)
+    if not path:
+        return None, None
+    try:
+        with open(path) as f:
+            text = f.read()
+    except OSError:
+        return path, None
+    match = re.search(r"localparam\s+int\s+CVA6_CONFIG_SEL\s*=\s*(\w+)", text)
+    return path, (match.group(1) if match else None)
+
+
+def check_live_config(path, chosen, swept):
+    """Warn when the live package is a swept one nobody asked for, which is
+    what a killed sweep leaves, or what a sweep running now has installed.
+    swept is what the sweep driving this run says it installed."""
+    if swept:
+        if chosen != swept:
+            print(f"[WARN] The sweep installed {swept}, but {path} selects "
+                  f"{chosen or 'nothing'}.")
+        else:
+            print(f"[INFO] Config package: {chosen}, installed by the sweep")
+        return
+    if chosen and chosen != PRODUCTION_CONFIG:
+        print(f"[WARN] {path} selects {chosen}, a swept configuration, not "
+              f"{PRODUCTION_CONFIG}. A sweep is running or was killed, so "
+              f"this run does not measure the production core.")
+    if path and os.path.isfile(path + SWEEP_BACKUP_SUFFIX):
+        print(f"[WARN] {path + SWEEP_BACKUP_SUFFIX} exists, so a sweep is "
+              f"running or was killed. The next sweep puts the production "
+              f"package back from it.")
+
+
+def find_test(src_file, cva6_root):
+    """The test a command line names: a path as given, else a bare name in
+    this repository's benchmarks/ or TEST_FOLDERS under the CVA6 root. When
+    several folders hold it the first is taken and named. None when none
+    does."""
+    if os.path.exists(src_file):
+        return os.path.abspath(src_file)
+    if os.path.basename(src_file) != src_file:
+        return None
+    here = os.path.dirname(os.path.abspath(__file__))
+    folders = [os.path.join(os.path.dirname(here), "benchmarks")]
+    folders += [os.path.join(cva6_root, sub) for sub in TEST_FOLDERS]
+    found = []
+    for folder in folders:
+        candidate = os.path.join(folder, src_file)
+        if (os.path.isfile(candidate) and os.path.realpath(candidate)
+                not in {os.path.realpath(f) for f in found}):
+            found.append(candidate)
+    if len(found) > 1:
+        print(f"[WARN] '{src_file}' is in more than one folder: "
+              f"{', '.join(found)}. Using {found[0]}. Give its path to run "
+              f"another.")
+    return os.path.abspath(found[0]) if found else None
+
+
+def lock_root(cva6_root):
+    """Hold the CVA6 root for this run. False when another run holds it, and
+    True otherwise, even where the filesystem cannot lock, which is only
+    warned about. The lock is on verif/sim, so no file is left behind, and the
+    kernel drops it when this process ends, however it ends."""
+    try:
+        handle = os.open(os.path.join(cva6_root, "verif", "sim"), os.O_RDONLY)
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return False
+    except OSError as e:
+        print(f"[WARN] Could not lock {cva6_root} against a second run: {e}")
+    return True
+
+
 def build_table_header(engine, core, program, geometry, build=""):
     """The table title, over three lines. What was measured goes on the first,
     the core on the second and the checkout on the third, a target name being
@@ -720,9 +815,16 @@ def build_parser():
                         help="Reuse the existing work-ver Verilator build "
                              "instead of deleting it first. The model does "
                              "not depend on the test, so this saves a full "
-                             "rebuild per run. Use it only when the target "
-                             "and the VCD setting are unchanged since the "
-                             "build was made")
+                             "rebuild per run. Use it only when the target, "
+                             "the VCD setting, the config package and the "
+                             "testbench changes are all unchanged since the "
+                             "build was made. A sweep leaves work-ver built "
+                             "for its last configuration")
+    parser.add_argument("--swept-config", default=None, metavar="CFG",
+                        help="The configuration a sweep installed in the live "
+                             "package, which the sweeps pass. Without it, a "
+                             "package selecting anything but "
+                             f"{PRODUCTION_CONFIG} is warned about")
     return parser
 
 
@@ -889,8 +991,9 @@ def main():
     sim_dir = os.path.join(cva6_root, "verif", "sim")
     setup_script = os.path.join(sim_dir, "setup-env.sh")
 
-    abs_src_path = os.path.abspath(args.src_file)
-    if not os.path.exists(abs_src_path):
+    found = find_test(args.src_file, cva6_root)
+    abs_src_path = found or os.path.abspath(args.src_file)
+    if found is None:
         print(f"[ERROR] Test not found: {abs_src_path}", file=sys.stderr)
         pkg = os.path.join(cva6_root, "core", "include",
                            f"{args.src_file}_config_pkg.sv")
@@ -903,6 +1006,18 @@ def main():
     # reads the test's path.
     suite = args.suite or default_suite(abs_src_path)
     if suite is None:
+        return 1
+    if args.target != DEFAULT_TARGET:
+        print(f"[WARN] The overhead tables were measured on {DEFAULT_TARGET}, "
+              f"so NET on {args.target} takes off another core's "
+              f"scaffolding.")
+    pkg_path, chosen = live_config(cva6_root, args.target)
+    check_live_config(pkg_path, chosen, args.swept_config)
+    # Held to the end of the run, released by the kernel when it exits.
+    if not lock_root(cva6_root):
+        print(f"[ERROR] Another run_CVA6.py is running in {cva6_root}. Every "
+              f"run builds and reads its work-ver/, so wait for it to end.",
+              file=sys.stderr)
         return 1
     prepare_build(cva6_root, args.keep_build)
 
@@ -954,6 +1069,12 @@ def main():
 
     report_path = generate_codelist(
         os.path.join(binary_dir, f"{test_name}.o"), CODELIST_PROFILES[lang])
+    # Without the _report.txt a batch would count the run as passed and have
+    # no table to gather.
+    if report_path is None:
+        print("[ERROR] No _report.txt written, so the run is not counted.",
+              file=sys.stderr)
+        return 1
     log_path = os.path.join(log_dir, log_main)
     if not os.path.exists(log_path):
         print(f"[ERROR] Simulation log not found: {log_path}",
@@ -962,11 +1083,23 @@ def main():
     values = read_register_values(log_path)
     if values is None:
         return 1
+    # The test writes every counter, so a log without the cycles or the
+    # instructions is a run that never reached its final snapshot. A table
+    # of zeros would read as a result.
+    missing = [METRICS_MAP[key] for key in ("x18", "x19") if key not in values]
+    if missing:
+        print(f"[ERROR] {log_path} holds no {' and no '.join(missing)} "
+              f"register, so there is no table to report. Did the test end "
+              f"with its final snapshot?", file=sys.stderr)
+        return 1
 
     print("[INFO] Extracting statistics\n")
     geometry = read_cache_geometry(cva6_root, args.target)
+    # A swept package's selection rides on the core line, so a gathered
+    # metrics file says which configuration was measured.
+    core = f"{args.target}  ({chosen})" if chosen else args.target
     header = build_table_header(
-        "CVA6", args.target, os.path.basename(abs_src_path), geometry,
+        "CVA6", core, os.path.basename(abs_src_path), geometry,
         f"{cva6_root}  (overhead: {suite}/{lang})")
     lines = metrics_table(values, overhead, abs_src_path, header)
     for line in lines:

@@ -212,7 +212,7 @@ def main():
                              "batch or sweep given --out-dir")
     parser.add_argument("-y", "--yes", action="store_true",
                         help="Delete without asking for confirmation")
-    parser.add_argument("--dry-run", action="store_true",
+    parser.add_argument("-n", "--dry-run", action="store_true",
                         help="List what would be deleted and stop")
     parser.add_argument("--keep-build", action="store_true",
                         help="Spare work-ver/, so the next run can reuse it "

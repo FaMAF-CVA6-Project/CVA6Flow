@@ -110,7 +110,10 @@ def main():
                         default="all", help="Which suite. Defaults to both")
     parser.add_argument("--keep-build", action="store_true",
                         help="Reuse work-ver for the first run too, when it "
-                             "was built for the default target without a VCD")
+                             "was built for the default target without a VCD, "
+                             "from the production config package and the "
+                             "upstream testbench. A sweep leaves it built "
+                             "for its last configuration")
     parser.add_argument("--write", action="store_true",
                         help="Put the measured profiles into run_CVA6.py "
                              "beside this script")
