@@ -84,23 +84,24 @@
 
     /* Needs: css-tokens */
 
-    /* The light look, as social apps draw it: white diagram rows on a light grey page, grey bars
-     * and panels, near-black text and quiet hairlines. It restates every colour of css-tokens. */
+    /* The light look, as social apps draw it a step deeper: soft grey diagram rows with a quiet
+     * alternate band on a darker grey page, grey bars and panels, near-black text and crisp
+     * hairlines. It restates every colour of css-tokens. */
     html[data-theme="light"] {
-      --bg: #eef0f3;
-      --bg2: #f3f4f6;
-      --bg3: #fbfbfc;
-      --bg4: #e2e5e9;
-      --border: rgba(0, 0, 0, 0.08);
-      --border2: rgba(0, 0, 0, 0.15);
+      --bg: #d7dade;
+      --bg2: #dfe1e5;
+      --bg3: #e7eaee;
+      --bg4: #cfd2d6;
+      --border: rgba(0, 0, 0, 0.1);
+      --border2: rgba(0, 0, 0, 0.18);
       --text: #15181c;
       --text2: #373d45;
-      --text3: #575e67;
-      --text-id: #686f78;
+      --text3: #50575f;
+      --text-id: #59606a;
       --text-pc: #4c4a93;
       --text-hit: #6e4700;
       --accent: #006743;
-      --warn: #9a5b00;
+      --warn: #844e00;
       --bad: #b60000;
       --compressed: #006276;
       --link: #0055b9;
@@ -108,35 +109,35 @@
       --link-dim: #4e5a69;
       --grip: rgba(0, 110, 230, 0.45);
       --focus: rgba(0, 110, 230, 0.45);
-      --crosshair: rgba(0, 0, 0, 0.22);
-      --timeline-bg: #ffffff;
-      --scrollbar-thumb: #c2c7ce;
-      --scrollbar-thumb-hover: #a6adb5;
-      --ruler-bg: #f8f9fa;
-      --label-row: #ffffff;
-      --label-row-alternate: #f5f6f8;
-      --label-row-hit: #fbe2a0;
-      --scrim: rgba(16, 22, 32, 0.24);
-      --shadow: rgba(16, 22, 32, 0.16);
-      --timeline-row: #ffffff;
-      --timeline-row-alternate: #f5f6f8;
-      --grid-minor: rgba(0, 0, 0, 0.045);
-      --grid-major: rgba(0, 0, 0, 0.12);
-      --grid-sparse: rgba(0, 0, 0, 0.075);
-      --ruler-tick: #d5d9de;
-      --ruler-tick-major: #98a0a9;
+      --crosshair: rgba(0, 0, 0, 0.24);
+      --timeline-bg: #e5e8ec;
+      --scrollbar-thumb: #a9b0b9;
+      --scrollbar-thumb-hover: #8f97a1;
+      --ruler-bg: #e0e3e7;
+      --label-row: #e5e8ec;
+      --label-row-alternate: #dde0e4;
+      --label-row-hit: #f0cd6e;
+      --scrim: rgba(16, 22, 32, 0.28);
+      --shadow: rgba(16, 22, 32, 0.2);
+      --timeline-row: #e5e8ec;
+      --timeline-row-alternate: #dde0e4;
+      --grid-minor: rgba(0, 0, 0, 0.05);
+      --grid-major: rgba(0, 0, 0, 0.13);
+      --grid-sparse: rgba(0, 0, 0, 0.085);
+      --ruler-tick: #c3c8ce;
+      --ruler-tick-major: #8a929b;
       --ruler-text: #434951;
-      --empty-range: #6a717a;
+      --empty-range: #59606a;
       --op-int: #006822;
       --op-fp: #0055b4;
       --op-mem: #874900;
       --op-branch: #7e39a0;
       --op-flushed: #a32b38;
       --forward-arrival: #4d5c5c;
-      --stall-ground: #ffffff;
-      --stall-label: #575e67;
-      --stall-axis: #a3aab2;
-      --swatch-edge: rgba(0, 0, 0, 0.18);
+      --stall-ground: #e5e8ec;
+      --stall-label: #50575f;
+      --stall-axis: #959ca5;
+      --swatch-edge: rgba(0, 0, 0, 0.2);
       color-scheme: light;
     }
 
@@ -151,9 +152,9 @@
     }
 
     html[data-theme="light"] {
-      --mem-wb-title: #9b3b00;
-      --histogram-bar: #e39a2c;
-      --mem-wb-lane-line: rgba(0, 0, 0, 0.08);
+      --mem-wb-title: #933800;
+      --histogram-bar: #ad6800;
+      --mem-wb-lane-line: rgba(0, 0, 0, 0.1);
     }
 
     /* SHARED BEGIN css-base */
@@ -519,7 +520,7 @@
 
     /* Needs: css-tokens */
 
-    /* Figure mode leaves the diagram alone on the page, for a screenshot. The Find PC row keeps its
+    /* Figure Mode leaves the diagram alone on the page, for a screenshot. The Find PC row keeps its
      * height, so the labels stay level with their rows. */
     body.figure-mode #top-bar,
     body.figure-mode #degraded-banner,
@@ -1095,6 +1096,7 @@
     }
 
     #mem-wb-head {
+      position: relative;
       width: var(--label-w);
       min-width: var(--label-w);
       flex-shrink: 0;
@@ -1106,6 +1108,7 @@
     }
 
     .mem-wb-title {
+      margin-right: 40px;
       color: var(--mem-wb-title);
       font-size: 11px;
       font-weight: 500;
@@ -1113,8 +1116,29 @@
     }
 
     .mem-wb-subtitle {
-      margin-top: 4px;
+      margin: 4px 40px 0 0;
       line-height: 1.5;
+    }
+
+    /* The flush slots' names, at the header's right edge level with their lanes, as the label
+     * column names its rows, so no name covers the start of a bar. */
+    #mem-wb-lanes {
+      position: absolute;
+      top: 0;
+      right: 0;
+      bottom: 0;
+      width: 52px;
+      overflow: hidden;
+      pointer-events: none;
+    }
+
+    .mem-wb-lane {
+      position: absolute;
+      right: 10px;
+      transform: translateY(-50%);
+      font-family: var(--font-mono);
+      color: var(--text3);
+      white-space: nowrap;
     }
 
     .mem-wb-number {
@@ -1321,6 +1345,15 @@
     .pin-body .max-ref:hover,
     .pin-body .goto-ref:hover {
       text-decoration: underline;
+    }
+
+    /* A reference to an instruction outside the current fetch range cannot be followed, so it reads
+     * as plain text. */
+    .pin-card .pin-go.goto-off,
+    .pin-card .goto-ref.goto-off {
+      color: var(--text2);
+      cursor: default;
+      text-decoration: none;
     }
 
     /* SHARED END css-pins */
@@ -1885,6 +1918,306 @@
       font-style: normal;
       font-family: var(--font-mono);
     }
+
+    /* ==========================================================================
+     * 9. File browser and Help
+     * ======================================================================== */
+
+    /* SHARED BEGIN css-json-browser */
+
+    /* Needs: css-tokens, css-modals */
+
+    /* Load JSON's panel: a folder's JSONs by subfolder, in a list that holds only the rows in view,
+     * each row JSON_ROW_H tall in the script. */
+    #json-browser-backdrop {
+      padding-top: 60px;
+    }
+
+    #json-browser {
+      width: 700px;
+      max-width: 95vw;
+      height: min(640px, calc(100vh - 90px));
+    }
+
+    #json-browser-body {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      min-height: 0;
+      overflow: hidden;
+    }
+
+    .json-browser-bar {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 6px;
+    }
+
+    #json-browser-filter {
+      flex: 1;
+      min-width: 150px;
+      padding: 3px 8px;
+      background: var(--bg);
+      border: 0.5px solid var(--border2);
+      border-radius: 5px;
+      color: var(--text);
+      font-size: 12px;
+      outline: none;
+    }
+
+    #json-browser-filter:focus {
+      border-color: var(--focus);
+    }
+
+    #json-browser-filter:disabled {
+      opacity: 0.5;
+    }
+
+    #json-browser-list {
+      position: relative;
+      flex: 1;
+      min-height: 96px;
+      overflow-y: auto;
+      background: var(--bg);
+      border: 0.5px solid var(--border2);
+      border-radius: 5px;
+      scrollbar-color: var(--scrollbar-thumb) var(--bg);
+    }
+
+    #json-browser-spacer {
+      width: 1px;
+    }
+
+    .json-row {
+      position: absolute;
+      left: 0;
+      right: 0;
+      height: 24px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 0 10px 0 22px;
+      white-space: nowrap;
+      cursor: pointer;
+    }
+
+    .json-row:hover {
+      background: var(--bg3);
+    }
+
+    .json-row.selected {
+      background: var(--bg4);
+      box-shadow: inset 3px 0 0 var(--accent);
+    }
+
+    .json-row.json-dir {
+      padding-left: 10px;
+      background: var(--bg2);
+      border-top: 0.5px solid var(--border);
+      color: var(--text3);
+      font-size: 11px;
+      cursor: default;
+    }
+
+    .json-dir-name,
+    .json-name {
+      flex: 1;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      font-family: var(--font-mono);
+    }
+
+    .json-dir-name {
+      color: var(--text2);
+    }
+
+    .json-name {
+      color: var(--text);
+      font-size: 12px;
+    }
+
+    .json-date,
+    .json-size {
+      flex-shrink: 0;
+      color: var(--text3);
+      font-size: 11px;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .json-size {
+      width: 68px;
+      text-align: right;
+      color: var(--text2);
+    }
+
+    .json-tag {
+      flex-shrink: 0;
+      padding: 0 5px;
+      border: 0.5px solid currentColor;
+      border-radius: 3px;
+      font-size: 10px;
+    }
+
+    .json-row.json-big .json-size,
+    .json-big .json-tag {
+      color: var(--warn);
+    }
+
+    .json-last .json-tag {
+      color: var(--accent);
+    }
+
+    #json-browser-empty {
+      padding: 22px 26px;
+      color: var(--text3);
+      font-size: 12px;
+      line-height: 1.6;
+    }
+
+    #json-browser-empty b {
+      color: var(--text2);
+      font-weight: 500;
+    }
+
+    #json-browser-note {
+      flex-shrink: 0;
+      margin: 0;
+      color: var(--text3);
+      font-size: 11px;
+      line-height: 1.5;
+    }
+
+    /* SHARED END css-json-browser */
+
+    /* SHARED BEGIN css-help */
+
+    /* Needs: css-tokens */
+
+    /* The Help, in FlowCompare's look: one scrolling box over a scrim, above Extra Info and below a
+     * notice. Its pictures follow the theme and keep their place only once they load. */
+    #help {
+      position: fixed;
+      inset: 0;
+      z-index: 350;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: var(--scrim);
+    }
+
+    #help[hidden] {
+      display: none;
+    }
+
+    #help-box {
+      width: min(760px, 92vw);
+      max-height: 86vh;
+      overflow: auto;
+      padding: 18px 22px;
+      background: var(--bg2);
+      border: 0.5px solid var(--border2);
+      border-radius: 8px;
+      box-shadow: 0 12px 40px var(--shadow);
+      line-height: 1.6;
+      color: var(--text2);
+      font-size: 12.5px;
+      outline: none;
+      scrollbar-color: var(--scrollbar-thumb) var(--bg2);
+    }
+
+    #help-box h2 {
+      margin: 0 0 8px;
+      font-size: 16px;
+      font-weight: 500;
+      color: var(--text);
+    }
+
+    #help-box h3 {
+      margin: 18px 0 4px;
+      font-size: 12.5px;
+      color: var(--text);
+    }
+
+    #help-box p {
+      margin: 0 0 6px;
+    }
+
+    #help-box b {
+      color: var(--text);
+      font-weight: 600;
+    }
+
+    #help-box kbd {
+      padding: 0 5px;
+      border: 0.5px solid var(--border2);
+      border-radius: 3px;
+      background: var(--bg3);
+      font-family: var(--font-mono);
+      font-size: 11px;
+      white-space: nowrap;
+    }
+
+    #help-close {
+      float: right;
+    }
+
+    #help-contents {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 2px 14px;
+      margin: 0 0 4px;
+      font-size: 11.5px;
+    }
+
+    #help-contents a {
+      color: var(--link);
+      text-decoration: none;
+      cursor: pointer;
+    }
+
+    #help-contents a:hover {
+      color: var(--link-hover);
+      text-decoration: underline;
+    }
+
+    .help-shot {
+      margin: 8px 0 10px;
+    }
+
+    .help-shot[hidden] {
+      display: none;
+    }
+
+    .help-shot img {
+      display: block;
+      max-width: 100%;
+      height: auto;
+      border: 0.5px solid var(--border2);
+      border-radius: 6px;
+    }
+
+    .help-shot figcaption {
+      margin-top: 4px;
+      color: var(--text3);
+      font-size: 11px;
+      line-height: 1.5;
+    }
+
+    /* The keys as a two-column list, each key beside what it does. */
+    .help-keys {
+      display: grid;
+      grid-template-columns: max-content 1fr;
+      gap: 3px 14px;
+      margin: 4px 0 6px;
+    }
+
+    .help-keys dt {
+      text-align: right;
+    }
+
+    /* SHARED END css-help */
   </style>
 </head>
 
@@ -1923,7 +2256,8 @@
     <span class="scope-badge"
       title="Built and tested against JSONs the tracer wrote from Verilator VCDs of the cv64a6 configurations in configs/. After a load the title names the JSON's configuration.">cv64a6 / RISC-V</span>
     <span class="toolbar-separator">│</span>
-    <button class="tool-button" id="load-json-button" title="Load a CVA6Flow JSON from disk.">📂 Load JSON</button>
+    <button class="tool-button" id="load-json-button"
+      title="Load a CVA6Flow JSON, from the list of a folder chosen once or as a single file.">📂 Load JSON</button>
     <input type="file" id="file-input" accept=".json,application/json">
     <span id="json-name"></span>
     <span class="toolbar-separator">│</span>
@@ -1934,7 +2268,7 @@
       title="Pixels per cycle. Type a value and press Enter, with up to two decimals, from as small as Fit All needs up to this range's maximum.">
     <span id="zoom-note">px</span>
     <button class="tool-button" id="fit-all-button"
-      title="Fit the current fetch range to the width of the timeline, keeping the row at the top. A range too long to fit at 0.05 px per cycle stays wider, and the zoom says (min).">Fit All</button>
+      title="Fit the current fetch range to the width of the timeline, keeping the row at the top. A range too long to fit at 0.05 px per cycle stays wider, and the zoom says (min). Key: 0.">Fit All</button>
     <span class="toolbar-separator">│</span>
     <span class="toolbar-label">Fetch Range</span>
     <input type="number" id="range-from" class="range-input" placeholder="from"
@@ -1945,16 +2279,16 @@
     <button class="tool-button" id="range-reset-button"
       title="Show every instruction in the loaded JSON.">Reset</button>
     <button class="tool-button" id="main-code-button"
-      title="Show the measured part of the program, between its two statistics markers: the MAIN PROGRAM region of the test templates.">Main Code</button>
+      title="Show the measured part of the program, between its two statistics markers: the MAIN PROGRAM region of the test templates. Key: G.">Main Code</button>
     <span class="toolbar-separator">│</span>
     <label class="toolbar-check"
-      title="Show a detailed information panel as the cursor hovers over an instruction.">
+      title="Show a detailed information panel as the cursor hovers over an instruction. Key: T.">
       <input type="checkbox" id="tooltip-on" data-remember checked>
       Tooltip
     </label>
     <details class="menu" id="view-menu">
       <summary class="tool-button"
-        title="What the diagram draws, which panels show and how the page looks, for screenshots and figures.">View ▾</summary>
+        title="What the diagram draws, which panels show and how the page looks, for screenshots and figures. Key: V.">View ▾</summary>
       <div class="menu-panel">
         <div class="menu-section">Draw</div>
         <div class="menu-checks">
@@ -1962,11 +2296,6 @@
             title="Draw an arrow from each producer to its consumer, ending at the consumer's issue cycle. Teal is a same-cycle forward from writeback, purple a value read from the scoreboard.">
             <input type="checkbox" id="forwarding-on" data-remember>
             Forwarding
-          </label>
-          <label class="toolbar-check"
-            title="The wait before this fetch could start, measured from the previous fetch request. It covers front-end queue backpressure plus I-cache busy time inherited from the fetch before it. Only its cell follows this toggle, since Cycles and every stall figure count the wait either way.">
-            <input type="checkbox" id="pre-fetch-wait-on" checked data-remember>
-            Pre-fetch wait
           </label>
           <label class="toolbar-check"
             title="Tint every cycle in which some instruction waited, the very cycles the Stall metric counts for the current fetch range. An instruction queued in the front end counts too.">
@@ -1977,27 +2306,27 @@
         <div class="menu-section">Panels</div>
         <div class="menu-buttons">
           <button class="tool-button" id="metric-bar-toggle"
-            title="Hide the metric bar along the bottom to give the timeline more height.">▼ Hide Metrics</button>
+            title="Hide the metric bar along the bottom to give the timeline more height. Key: M.">▼ Hide Metrics</button>
           <button class="tool-button" id="labels-toggle"
-            title="Collapse the label column to give the timeline more room.">◀ Hide Labels</button>
+            title="Collapse the label column to give the timeline more room. Key: H.">◀ Hide Labels</button>
           <button class="tool-button" id="mem-wb-toggle"
-            title="Show or hide the memory writeback track. Each bar is a dirty D-cache line written back to memory, with the eviction that caused it.">▼ Hide Writebacks</button>
+            title="Show or hide the memory writeback track. Each bar is a dirty D-cache line written back to memory, with the eviction that caused it. Key: W.">▼ Hide Writebacks</button>
         </div>
         <div class="menu-section">Look</div>
         <label class="menu-row">Theme
           <select class="tool-select" id="theme-select" data-remember
-            title="Light suits a printed page. The choice is remembered, like the toggles.">
+            title="Light suits a printed page. The choice is remembered, like the toggles. Key: L.">
             <option value="dark">Dark</option>
             <option value="light">Light</option>
           </select>
         </label>
         <div class="menu-buttons">
           <button class="tool-button" id="figure-mode-button"
-            title="Leave the diagram alone on the page, for a screenshot. Key: F, and F or Esc brings the page back.">Figure mode</button>
+            title="Leave the diagram alone on the page, for a screenshot. Key: F, and F or Esc brings the page back.">Figure Mode</button>
           <button class="tool-button" id="view-screenshot"
             title="Save the window as a PNG at three times its resolution, into the browser's downloads. The S key does the same.">Screenshot</button>
           <button class="tool-button" id="reset-view"
-            title="Every choice in this menu back to its default but the theme, the metric bar, the labels and the writeback track shown, the panels at their default sizes, and the view fitted from the first row. The JSON, the fetch range and the pins stay.">Reset view</button>
+            title="Every choice in this menu back to its default but the theme, the metric bar, the labels and the writeback track shown, the panels at their default sizes, and the view fitted from the first row. The JSON, the fetch range and the pins stay. Key: R.">Reset View</button>
         </div>
       </div>
     </details>
@@ -2037,7 +2366,9 @@
     <!-- SHARED END markup-export-menu -->
     <span class="toolbar-separator">│</span>
     <button class="tool-button" id="extra-info-toggle"
-      title="Configuration of the whole JSON, and statistics for the current fetch range.">⚙ Extra Info</button>
+      title="Configuration of the whole JSON, and statistics for the current fetch range. Key: I.">⚙ Extra Info</button>
+    <button class="tool-button" id="help-button"
+      title="How to use CVA6Flow, from loading a JSON to every key, with pictures. Key: ?.">? Help</button>
   </div>
 
   <!-- ======================== 2. Degraded banner ======================== -->
@@ -2088,11 +2419,12 @@
     <h2>Drag a CVA6Flow JSON here, or click to browse</h2>
     <p>Written by CVA6Flow_tracer.py from a Verilator VCD of CVA6.</p>
     <p>Run the tracer with the objdump listing beside the VCD, which fills the instruction column.</p>
-    <p>Keys: + and - to zoom, arrows to navigate, Page Up and Page Down for a screen of rows, Home and End to jump, Enter and Shift+Enter to step through PC matches, P to pin the tooltip, S to save a screenshot, E to save the diagram as a PNG, F for figure mode, Esc to close menus and panels, leave figure mode and hide the pins. Drag the diagram to move it.</p>
+    <p>New here? Help, or the ? key, explains every part of the page with pictures.</p>
+    <p>Keys: ? for Help, + and - to zoom, 0 to fit all, arrows to navigate, Page Up and Page Down for a screen of rows, Home and End to jump, Enter and Shift+Enter to step through PC matches, G for Main Code, I for Extra Info, V for the View menu, R for Reset View, L to switch between dark and light, T to turn the tooltip on or off, M to show or hide the metric bar, H the labels, W the writeback track, C to copy the metrics, P to pin the tooltip, S to save a screenshot, E to save the diagram as a PNG, F for Figure Mode, Esc to close menus and panels, leave Figure Mode and hide the pins. Drag the diagram to move it.</p>
     <div id="sample-picker">
       <select id="sample-select" title="Which sample JSON in tests/ to load." hidden></select>
       <button id="sample-load-button" hidden
-        title="Load a sample JSON from tests/, written by scripts/make_CVA6Flow_sample.py.">Load sample</button>
+        title="Load a sample JSON from tests/, written by scripts/make_CVA6Flow_sample.py.">Load Sample</button>
     </div>
   </div>
 
@@ -2138,6 +2470,7 @@
       <div id="mem-wb-head">
         <div class="mem-wb-title">Memory writebacks</div>
         <div class="mem-wb-subtitle" id="mem-wb-stat">Dirty D-cache lines written back to memory</div>
+        <div id="mem-wb-lanes"></div>
       </div>
       <div id="mem-wb-wrap"><canvas id="mem-wb-canvas"></canvas></div>
     </div>
@@ -2155,7 +2488,7 @@
       <span id="pin-count">Pins</span>
       <button class="tool-button" id="pin-collapse"
         title="Hide the pinned tooltips and keep them. Esc hides them too, and pinning another shows them again.">▾ Hide</button>
-      <button class="tool-button" id="pin-clear" title="Unpin every tooltip.">Clear all</button>
+      <button class="tool-button" id="pin-clear" title="Unpin every tooltip.">Clear All</button>
     </div>
     <div id="pin-row"></div>
   </div>
@@ -2165,12 +2498,12 @@
   <!-- ========================== 6. Metric bar =========================== -->
 
   <div id="metric-bar" hidden>
-    <span title="Cycle the cursor is over, counted from 1 at the first cycle of the current fetch range.">Cycle: <span class="metric-value" id="metric-cycle">-</span></span>
-    <span title="Instruction at the row under the cursor.">Instruction: <span class="metric-value"
+    <span title="The cycle under the cursor, counted from 1 at the range's first cycle.">Cycle: <span class="metric-value" id="metric-cycle">-</span></span>
+    <span title="The instruction on the row under the cursor.">Instruction: <span class="metric-value"
         id="metric-instruction">-</span></span>
-    <span title="Functional-unit class that handled the instruction.">FU: <span class="metric-value"
+    <span title="The functional unit class of the instruction under the cursor.">FU: <span class="metric-value"
         id="metric-fu">-</span></span>
-    <span title="Program counter.">PC: <span class="metric-value" id="metric-pc">-</span></span>
+    <span title="The address of the instruction under the cursor.">PC: <span class="metric-value" id="metric-pc">-</span></span>
     <span class="toolbar-separator">│</span>
     <span>Cycles: <span class="metric-value" id="metric-cycles">-</span></span>
     <span>Fetched: <span class="metric-value" id="metric-fetched">-</span></span>
@@ -2193,11 +2526,11 @@
     <span>Data-memory stall: <span class="metric-value" id="metric-data-mem-stall">-</span></span>
     <span>Stall: <span class="metric-value" id="metric-stall">-</span></span>
     <span
-      title="Fetch numbers of the rows on screen, over the fetch number of the last instruction in the current fetch range.">Visible:
+      title="The fetch numbers of the rows on screen, over the range's last one.">Visible:
       <span class="metric-value" id="metric-visible">-</span> / <span class="metric-value"
         id="metric-total">-</span></span>
     <button id="copy-metrics" class="tool-button"
-      title="Copy every metric from Cycles to Stall to the clipboard, one per line.">Copy Metrics</button>
+      title="Copy every metric from Cycles to Stall to the clipboard, one per line. Key: C.">Copy Metrics</button>
     <button id="save-screenshot" class="tool-button"
       title="Save the window as a PNG at three times its resolution, into the browser's downloads. The S key does the same and keeps the tooltip under the pointer.">Screenshot</button>
   </div>
@@ -2205,7 +2538,7 @@
   <!-- ============================ 7. Tooltip ============================ -->
 
   <div id="tooltip"></div>
-  <div id="figure-hint" hidden>Figure mode. F or Esc brings the page back.</div>
+  <div id="figure-hint" hidden>Figure Mode. F or Esc brings the page back.</div>
 
   <!-- ========================== 8. Extra Info =========================== -->
 
@@ -2214,8 +2547,7 @@
       <div id="extra-info-head" class="modal-head">
         <div>
           <h2>Extra Info</h2>
-          <div class="modal-subtitle">Configuration sections come first and describe the whole JSON. Every other
-            section describes the current fetch range, so its figures move with the range. Each title says which.</div>
+          <div class="modal-subtitle">The configuration sections describe the whole JSON, and every other section the current fetch range, as each title says.</div>
         </div>
         <button id="extra-info-close" class="modal-close" title="Close">×</button>
       </div>
@@ -2258,6 +2590,199 @@
   </div>
 
   <!-- SHARED END markup-loading -->
+
+  <!-- ======================== 11. Load JSON panel ======================= -->
+
+  <!-- SHARED BEGIN markup-json-browser -->
+
+  <!-- Needs: css-modals, css-json-browser -->
+
+  <div id="json-browser-backdrop" class="modal-backdrop">
+    <div id="json-browser" class="modal" role="dialog" aria-modal="true"
+      aria-labelledby="json-browser-title">
+      <div class="modal-head">
+        <div>
+          <h2 id="json-browser-title">Load JSON</h2>
+          <div class="modal-subtitle" id="json-browser-where"></div>
+        </div>
+        <button id="json-browser-close" class="modal-close" title="Close. Key: Esc.">×</button>
+      </div>
+      <div id="json-browser-body" class="modal-body">
+        <div class="json-browser-bar">
+          <button class="tool-button" id="json-browser-folder"
+            title="Choose a folder once, and every JSON under it is listed here by subfolder until the page is reloaded.">Choose a Folder…</button>
+          <button class="tool-button" id="json-browser-file"
+            title="The browser's own file dialog, for one JSON anywhere on disk.">Open a Single File…</button>
+          <input type="file" id="folder-input" webkitdirectory>
+          <input id="json-browser-filter" type="search" placeholder="Filter by folder or name"
+            spellcheck="false" autocomplete="off" role="combobox" aria-controls="json-browser-list"
+            aria-expanded="true"
+            title="Only the JSONs whose folder and name hold every word typed, for example: ddr3 daxpy.">
+        </div>
+        <div id="json-browser-list" role="listbox" aria-label="JSONs in the chosen folder">
+          <div id="json-browser-spacer"></div>
+        </div>
+        <p id="json-browser-note">↑ and ↓ choose, Enter loads, Esc closes. The browser lets this page read the chosen folder only until the page is reloaded, so choose it again after a reload, or to list a JSON written since. Nothing is uploaded, whatever the browser's own prompt says: the page reads only the JSON you click.</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- SHARED END markup-json-browser -->
+
+  <!-- ============================= 12. Help ============================= -->
+
+  <div id="help" hidden>
+    <div id="help-box" role="dialog" aria-modal="true" aria-labelledby="help-title" tabindex="-1">
+      <button class="tool-button" id="help-close" title="Close. Key: Esc or ?.">Close</button>
+      <h2 id="help-title">How to use CVA6Flow</h2>
+      <nav id="help-contents">
+        <a href="#help-intro">What it shows</a>
+        <a href="#help-load">Loading a JSON</a>
+        <a href="#help-move">Moving around</a>
+        <a href="#help-read">Reading the diagram</a>
+        <a href="#help-tip">The tooltip and pins</a>
+        <a href="#help-metrics">Metrics and Extra Info</a>
+        <a href="#help-writebacks">Memory writebacks</a>
+        <a href="#help-view">View and Export</a>
+        <a href="#help-keys">Keys</a>
+      </nav>
+
+      <h3 id="help-intro">What it shows</h3>
+      <p>CVA6Flow draws how the CVA6 core ran a RISC-V program, cycle by cycle. It reads a JSON that CVA6Flow_tracer.py writes from a Verilator VCD of the core. Each row is one instruction, in the order it was fetched, and each column is one cycle, so a row runs left to right through the pipeline: fetch, decode, issue, execute and commit. A long row is an instruction that waited, and its colours say what for.</p>
+      <figure class="help-shot">
+        <img data-shot="overview" alt="CVA6Flow with the daxpy sample loaded, its parts labelled">
+        <figcaption>The daxpy sample loaded: the toolbar, the legend of what the diagram draws, the label column, the ruler of cycles, the diagram, the memory writeback track and the metric bar.</figcaption>
+      </figure>
+
+      <!-- SHARED BEGIN markup-help-load -->
+
+      <!-- Needs: css-help -->
+
+      <h3 id="help-load">Loading a JSON</h3>
+      <p><b>Load JSON</b> opens a panel that lists the JSONs of a folder. Click <b>Choose a Folder…</b> once and pick the folder that holds your runs: every JSON under it is listed by subfolder, with its date and size, and a click loads one. The filter box keeps the JSONs whose folder and name hold every word you type, so <i>ddr3 daxpy</i> finds daxpy in every folder with ddr3 in its name. <kbd>↑</kbd> and <kbd>↓</kbd> choose, <kbd>Enter</kbd> loads and <kbd>Esc</kbd> closes.</p>
+      <p>The next Load JSON opens the list where the last JSON came from, until the page is reloaded. A browser lets a page read a folder only while the page stays open, so after a reload you choose the folder again, which also lists any JSON written since. Nothing is uploaded, even where the browser asks as if it were: the page reads only the JSON you click. A JSON past the whole-file limit is marked, since the viewer counts its instructions first and may ask for a range of them.</p>
+      <figure class="help-shot">
+        <img data-shot="load" alt="The Load JSON panel listing a folder of runs by subfolder">
+        <figcaption>A folder of runs listed by subfolder, with the JSON last loaded marked and one past the whole-file limit.</figcaption>
+      </figure>
+      <p><b>Open a Single File…</b> in the panel is the browser's own dialog, and a JSON dropped anywhere on the page loads too. Before anything is loaded, the start page also offers the sample JSONs that come with the viewer.</p>
+
+      <!-- SHARED END markup-help-load -->
+
+      <!-- SHARED BEGIN markup-help-move -->
+
+      <!-- Needs: css-help -->
+
+      <h3 id="help-move">Moving around</h3>
+      <p>Drag the diagram to move it, or use the scrollbars and the wheel, with Shift for sideways. <kbd>←</kbd> and <kbd>→</kbd> move one cycle, <kbd>↑</kbd> and <kbd>↓</kbd> one row, <kbd>Page Up</kbd> and <kbd>Page Down</kbd> a screen of rows, and <kbd>Home</kbd> and <kbd>End</kbd> jump to the first and the last cycle.</p>
+      <p><b>Zoom X</b> sets how many pixels wide a cycle is: drag its slider, type a number in the box and press Enter, or press <kbd>+</kbd> and <kbd>-</kbd>. <b>Fit All</b>, or <kbd>0</kbd>, fits the fetch range to the window's width and keeps the row at the top. Zoomed in far enough, each cell is tagged with its stage.</p>
+      <figure class="help-shot">
+        <img data-shot="toolbar" alt="The zoom and fetch range controls of the toolbar">
+        <figcaption>The toolbar's zoom and fetch range controls.</figcaption>
+      </figure>
+      <p><b>Fetch Range</b> shows only the instructions from one fetch number to another, and <b>Reset</b> shows them all again. <b>Main Code</b>, or <kbd>G</kbd>, shows the measured part of the program, between the two statistics markers of the test templates, leaving out the start-up code. The ruler counts cycles from 1 at the first cycle of the range shown. <b>Find PC</b>, above the labels, finds instructions by address, and <kbd>Enter</kbd> and <kbd>Shift+Enter</kbd> step through the matches.</p>
+
+      <!-- SHARED END markup-help-move -->
+
+      <h3 id="help-read">Reading the diagram</h3>
+      <p>Each cell covers the cycles the instruction spent in one stage or one wait, and cells grow taller towards commit. From the left: the Fetch1 request to the I-cache, the Fetch2 response that brings the line, Decode, Issue into the scoreboard, Execute in the colour of the unit that runs the instruction, and Commit. A lighter cell between them is a wait: in the front-end FIFO, in the decode register before issue, tagged <b>(mem)</b> while an operand is still coming from a load and <b>(reg)</b> from another instruction, or finished and waiting to commit behind an older instruction. The legend above the diagram lists every colour the range draws, and holding the pointer over an entry says what it is.</p>
+      <figure class="help-shot">
+        <img data-shot="stages" alt="One instruction's cells labelled by stage">
+        <figcaption>One instruction's cells, labelled by stage, with the waits between them.</figcaption>
+      </figure>
+      <p>A badge on a cell says how a branch went. On Fetch2, <b>T✓</b> or <b>N✓</b> is a prediction that stood, taken or not taken. On Execute, <b>T✗</b> or <b>N✗</b> is a mispredicted branch and <b>T!</b> a taken branch the predictor made no prediction for. Either redirects the front end, and the younger instructions fetched on the wrong path are flushed: drawn in a faded red, with a red tick and a ✗ at the end of the cycle they were thrown away in. The instruction fetched next first waits through a bubble, the refetch, in the colour of its cause: blue after a predicted taken branch, amber after an unpredicted one, red after a misprediction and teal after a flush, such as a fence's or a CSR write's.</p>
+      <figure class="help-shot">
+        <img data-shot="branch" alt="A mispredicted branch, the instructions it flushed and the bubble after it">
+        <figcaption>A mispredicted branch, the wrong-path instructions it flushed, and the bubble before the right path.</figcaption>
+      </figure>
+      <p><b>Forwarding</b>, under View, draws an arrow from an instruction's writeback to the issue of one that used its result: teal when the value came straight from writeback in that cycle, purple when it was read from the scoreboard, written back earlier. <b>Stalls</b>, also under View, tints every cycle in which some instruction waited. A load or store shows a strip over its Execute cell for its time in the load-store unit, <b>ld✗</b> or <b>st✗</b> when it missed the D-cache, then its D-cache stall. An atomic does its memory access at the head of commit, and a fence holds commit while the D-cache is flushed, each in a cell of its own before Commit. A dashed outline marks fetch cycles the tracer filled in because the I-cache never answered.</p>
+      <figure class="help-shot">
+        <img data-shot="forwarding" alt="Forwarding arrows between the instructions of the loop">
+        <figcaption>Forwarding arrows around one turn of the loop, teal from writeback and purple from the scoreboard.</figcaption>
+      </figure>
+      <!-- SHARED BEGIN markup-help-labels -->
+
+      <!-- Needs: css-help -->
+
+      <p>The label column gives each row its fetch number, its address and the instruction, coloured by what runs it: green for integer, blue for floating point, amber for memory, violet for branches and a dim red once flushed. <b>▪</b> marks a compressed instruction and <b>↪</b> one whose bytes span two fetch lines. Drag the column's right edge to widen it.</p>
+
+      <!-- SHARED END markup-help-labels -->
+
+      <!-- SHARED BEGIN markup-help-tip -->
+
+      <!-- Needs: css-help -->
+
+      <h3 id="help-tip">The tooltip and pins</h3>
+      <p>Hold the pointer over a row for its tooltip: the cycle of each stage, every wait with its length, the stall it adds, how a branch went and what a load or store did. A <b>(max N)</b> beside a wait is the longest of that wait in the range, and at the bottom the stage indicator names the cell under the pointer. <b>Tooltip</b> in the toolbar, or <kbd>T</kbd>, turns it on and off.</p>
+      <figure class="help-shot">
+        <img data-shot="tooltip" alt="The tooltip of an instruction beside the pointer">
+        <figcaption>The tooltip of the instruction under the pointer, its stage indicator at the bottom.</figcaption>
+      </figure>
+      <p><kbd>P</kbd> pins the tooltip into the dock along the bottom, beside those pinned before, so two instructions can be read side by side. A card's title, every <b>#</b> number and every <b>(max N)</b> in it go to their instruction. <b>Hide</b> keeps the cards out of the way, as <kbd>Esc</kbd> does, <b>Clear All</b> removes them, and dragging the dock's top edge resizes it.</p>
+      <figure class="help-shot">
+        <img data-shot="pins" alt="Two pinned tooltips side by side in the dock">
+        <figcaption>Two pinned tooltips in the dock, read side by side.</figcaption>
+      </figure>
+
+      <!-- SHARED END markup-help-tip -->
+
+      <h3 id="help-metrics">Metrics and Extra Info</h3>
+      <p>The metric bar along the bottom counts the current fetch range: its cycles, the instructions fetched, committed and flushed, the cache misses and accesses, the branches and how they went, the time at an assumed 50 MHz clock, the IPC and the stalls. Hold the pointer over a figure for what it counts. Its first fields follow the pointer, the cycle, the instruction, its unit and its address. <b>Copy Metrics</b>, or <kbd>C</kbd>, copies every figure, one per line.</p>
+      <figure class="help-shot">
+        <img data-shot="metrics" alt="The metric bar with its stall figures">
+        <figcaption>The metric bar, the fields that follow the pointer and the stall figures framed.</figcaption>
+      </figure>
+      <p>The stall figures count cycles in which some instruction waited, each cycle once however many waited in it. <b>Flush stall</b> is the refetch after a mispredicted or unpredicted branch or a flush: the bubble and the wait before the next fetch. <b>Fetch stall</b> is an instruction waiting in the front end: for the I-cache, in the front-end FIFO, or in the decode register only for its turn to issue. <b>Data stall</b> is an instruction held in the decode register for an operand, or a load or store waiting for the load-store unit to take it. <b>Data-memory stall</b> is a load waiting on a D-cache miss for data a later instruction in the range reads. <b>Stall</b> counts a cycle when any of them does, so it is never more than their sum.</p>
+      <p><b>Extra Info</b>, or <kbd>I</kbd>, describes the configuration the JSON was run with and the range in more detail: the statistics, the functional units, the caches, the branches, the memory writebacks and how long their AXI writes took. Its <b>Where to look</b> section links the instruction that waited longest for each wait and those of each rare event, such as a mispredicted branch, and a link closes the panel and goes to its row. Its stall diagram draws when each kind of stall happened across the range.</p>
+      <figure class="help-shot">
+        <img data-shot="extra" alt="Extra Info's stall diagram">
+        <figcaption>Extra Info's stall diagram, one track per kind of stall across the range.</figcaption>
+      </figure>
+
+      <h3 id="help-writebacks">Memory writebacks</h3>
+      <p>The track under the diagram draws each dirty D-cache line written back to memory, one lane per flush slot: a light bar while the line waits to be sent, a full bar from the AXI write to its acknowledgement, numbered with the line, and a thin line where the eviction that caused it happened. Hold the pointer over a bar for its details. <b>Hide Writebacks</b> under View, or <kbd>W</kbd>, hides the track, and dragging its top edge makes the lanes taller.</p>
+      <figure class="help-shot">
+        <img data-shot="writebacks" alt="The memory writeback track with its lanes and bars">
+        <figcaption>The memory writeback track, one lane per flush slot.</figcaption>
+      </figure>
+
+      <h3 id="help-view">View and Export</h3>
+      <p><b>View</b>, or <kbd>V</kbd>, holds what the diagram draws, Forwarding and Stalls. It hides the metric bar, the labels and the writeback track, switches between the dark and light themes, as <kbd>L</kbd> does, and has <b>Figure Mode</b>, <kbd>F</kbd>, which leaves the diagram alone on the page for a screenshot, and <b>Reset View</b>, <kbd>R</kbd>, which puts every choice back but the theme. The page remembers these choices in this browser.</p>
+      <figure class="help-shot">
+        <img data-shot="view" alt="The View menu open">
+        <figcaption>The View menu.</figcaption>
+      </figure>
+      <p><b>Screenshot</b>, or <kbd>S</kbd>, saves the window as a PNG at three times its resolution, and the key keeps the tooltip under the pointer in it. <b>Export</b> saves the diagram alone as a PNG, as <kbd>E</kbd> does, with the metric bar or a see-through ground if you ask, or every instruction of the range as CSV for a spreadsheet or pgfplots.</p>
+
+      <h3 id="help-keys">Keys</h3>
+      <dl class="help-keys">
+        <dt><kbd>?</kbd></dt><dd>Open and close this Help</dd>
+        <dt><kbd>Esc</kbd></dt><dd>Close the topmost menu or panel, then leave Figure Mode, then hide the pins</dd>
+        <dt><kbd>+</kbd> <kbd>-</kbd></dt><dd>Zoom in and out</dd>
+        <dt><kbd>0</kbd></dt><dd>Fit All</dd>
+        <dt><kbd>←</kbd> <kbd>→</kbd></dt><dd>One cycle sideways</dd>
+        <dt><kbd>↑</kbd> <kbd>↓</kbd></dt><dd>One row up or down</dd>
+        <dt><kbd>Page Up</kbd> <kbd>Page Down</kbd></dt><dd>A screen of rows</dd>
+        <dt><kbd>Home</kbd> <kbd>End</kbd></dt><dd>The first or the last cycle</dd>
+        <dt><kbd>Enter</kbd> <kbd>Shift+Enter</kbd></dt><dd>The next or the previous Find PC match</dd>
+        <dt><kbd>G</kbd></dt><dd>Main Code</dd>
+        <dt><kbd>I</kbd></dt><dd>Extra Info</dd>
+        <dt><kbd>V</kbd></dt><dd>The View menu</dd>
+        <dt><kbd>R</kbd></dt><dd>Reset View</dd>
+        <dt><kbd>L</kbd></dt><dd>Switch between the dark and light themes</dd>
+        <dt><kbd>T</kbd></dt><dd>Turn the tooltip on or off</dd>
+        <dt><kbd>P</kbd></dt><dd>Pin the tooltip</dd>
+        <dt><kbd>M</kbd></dt><dd>Show or hide the metric bar</dd>
+        <dt><kbd>H</kbd></dt><dd>Show or hide the labels</dd>
+        <dt><kbd>W</kbd></dt><dd>Show or hide the writeback track</dd>
+        <dt><kbd>C</kbd></dt><dd>Copy Metrics</dd>
+        <dt><kbd>S</kbd></dt><dd>Screenshot, keeping the tooltip under the pointer</dd>
+        <dt><kbd>E</kbd></dt><dd>Save the diagram as a PNG</dd>
+        <dt><kbd>F</kbd></dt><dd>Figure Mode on and off</dd>
+      </dl>
+      <p>The letter keys work wherever the focus is, except while typing in a box, and each control's tooltip names its key. In the Load JSON panel, <kbd>↑</kbd> and <kbd>↓</kbd> choose a JSON, <kbd>Enter</kbd> loads it and <kbd>Esc</kbd> closes the panel.</p>
+    </div>
+  </div>
 
   <script>
     "use strict";
@@ -2374,13 +2899,9 @@
       commit: 1, execute: 0.85, decode: 0.65, frontEnd: 0.6, leadIn: 0.55,
     });
     const LANE_GAP = 2;
-    /* The memory strips over the execute bar, and the branch outcome badges, which fall back to a
-     * stripe on a cell too small for their text. */
+    /* The memory strips over the execute bar. */
     const MEM_STRIP_SHARE = 0.36;
     const MEM_STRIP_MIN_H = 6;
-    const BADGE_PAD_X = 2;
-    const BADGE_MIN_H = 7;
-    const BADGE_STRIPE_H = 3;
     /* The tick at the end of a flushed record's flush cycle. */
     const FLUSH_MARK_W = 2;
     /* A cell tag is written only when both the zoom and the cell are this wide. */
@@ -2388,7 +2909,7 @@
     const ARROW_LINE_W = 2.5;
     const ARROW_HEAD = 10;
     /* The square an arrow starts from, and how far apart the arrows of one producer start. */
-    const ARROW_START_PX = 5;
+    const ARROW_START_PX = 6;
     const ARROW_FAN_PX = 3;
     /* An arrow whose ends are this far off screen is still drawn, since its line
      * can cross the view. */
@@ -2413,9 +2934,9 @@
      * dark enough for white text at 3:1. */
     const COL_DARK = Object.freeze({
       preFetchWait: '#3a3445',
-      bubblePredTaken: 'rgb(160,110,225)',
-      bubbleUnpred: 'rgb(230,180,90)',
-      bubbleMispred: 'rgb(255,168,80)',
+      bubblePredTaken: 'rgb(138,205,247)',
+      bubbleUnpred: 'rgb(246,172,91)',
+      bubbleMispred: 'rgb(253,161,152)',
       bubbleFlush: 'rgb(90,160,170)',
       fe1Req: '#1e4a7a',
       feSynth: 'rgba(255,255,255,0.85)',
@@ -2457,51 +2978,51 @@
       memWbEviction: '#40c0ff',
     });
     /* The light look's own stage colours, in the dark look's hue families and three OKLCH tiers on
-     * white rows: a wait or bubble lightest, a stage mid-tone and an event strongest, each under
-     * dark text at 4.5:1. No two entries share a fill, which the repository check enforces. */
+     * the grey rows: a wait or bubble lightest, a stage mid-tone and an event strongest. Every tag
+     * reads at 4.5:1, white on the deepest, and the repository check keeps every fill distinct. */
     const COL_LIGHT = Object.freeze({
-      preFetchWait: '#e4e4f9',
-      bubblePredTaken: 'rgb(195,153,248)',
-      bubbleUnpred: 'rgb(240,191,44)',
-      bubbleMispred: 'rgb(253,155,75)',
-      bubbleFlush: 'rgb(75,211,191)',
-      fe1Req: '#89c5f7',
+      preFetchWait: '#ceceeb',
+      bubblePredTaken: 'rgb(24,157,247)',
+      bubbleUnpred: 'rgb(251,137,0)',
+      bubbleMispred: 'rgb(247,68,41)',
+      bubbleFlush: 'rgb(0,172,136)',
+      fe1Req: '#60aaf3',
       feSynth: 'rgba(29,29,31,0.55)',
-      fe1ReqMiss: '#e9615c',
-      icStall: '#f1a2a4',
-      fe2: '#9aadf4',
-      hiLineWait: '#cee9fd',
-      fe1ReqHi: '#79cfe8',
-      fe1ReqMissHi: '#e76d94',
-      icStallHi: '#edabc7',
-      fe2Hi: '#61c2e7',
-      bpCorrect: '#27a0dd',
-      feBuf: '#c7d8fb',
-      feOut: '#88b1cd',
-      dec: '#b391e6',
-      decBuf: '#e4d4f9',
-      is: '#8891de',
+      fe1ReqMiss: '#ba242d',
+      icStall: '#e17d7e',
+      fe2: '#7e90ee',
+      hiLineWait: '#afd5f0',
+      fe1ReqHi: '#55c4db',
+      fe1ReqMissHi: '#c02e64',
+      icStallHi: '#dc86ac',
+      fe2Hi: '#2eaad4',
+      bpCorrect: '#0075ad',
+      feBuf: '#b0c5f4',
+      feOut: '#6aa0c1',
+      dec: '#a176da',
+      decBuf: '#d5bdf0',
+      is: '#787cda',
       fwdWb: '#00748a',
       fwdSb: '#7a3c9c',
       flushedFwd: '#b23a44',
-      int: '#7dd58b',
-      fp: '#5acfd5',
-      mem: '#e3b160',
-      branch: '#d289d6',
-      bpMispred: '#ed4b40',
-      bpUnpred: '#df9418',
-      memReq: '#dbc553',
-      dcMiss: '#e66330',
-      dcStall: '#f4a485',
-      refillOverlap: '#e0a774',
-      coWait: '#c1ecd3',
-      amo: '#e888af',
-      fenceFlush: '#b3988e',
-      co: '#45b164',
-      flushed: '#fbd8d4',
+      int: '#53c16a',
+      fp: '#06b7bf',
+      mem: '#d79833',
+      branch: '#bd67c2',
+      bpMispred: '#ce2516',
+      bpUnpred: '#d38700',
+      memReq: '#d5b836',
+      dcMiss: '#b13c11',
+      dcStall: '#e78562',
+      refillOverlap: '#c97636',
+      coWait: '#97dabc',
+      amo: '#d36394',
+      fenceFlush: '#bb948a',
+      co: '#1fa551',
+      flushed: '#f0c0bc',
       pcFind: '255,184,0',
       stallBand: '72,70,170',
-      memWbQueued: '#e5c0e1',
+      memWbQueued: '#deaad8',
       memWbEviction: '#1f6fc0',
     });
     let COL = COL_DARK;
@@ -2527,11 +3048,10 @@
     /* Needs: none */
 
     /* The sentences both legends share, keyed like COL, so an entry for the same thing reads the
-     * same in both viewers. One short sentence each, what the cell is and when it shows, since
-     * how a figure is counted belongs in the metric's title and the README. */
+     * same in both viewers. One short sentence each, what the cell is and when it shows, as every
+     * figure's title says what it counts, and how it is counted belongs in the README. */
     const LEGEND_SHARED = Object.freeze({
-      preFetchWait: 'The wait before this fetch could start, a stall even while its View toggle '
-        + 'hides it.',
+      preFetchWait: 'The wait before this fetch could start, counted as a stall.',
       bubblePredTaken: 'Redirect to refetch after a correctly predicted taken branch, from the '
         + 'redirect reaching Fetch1. Nothing is flushed.',
       bubbleUnpred: 'Redirect to refetch after a branch with no prediction that had to be taken, '
@@ -2565,10 +3085,8 @@
 
     /* The Data-memory stall's title, the same rule in both viewers, which data-memory-stall
      * counts. */
-    const DATA_MEMORY_STALL_DESC = 'The miss wait of a load whose result a later instruction in '
-      + 'the range reads, each cycle counted once. A load\'s miss wait is its D-cache stall, from '
-      + 'the cycle after the miss to its data. A store\'s miss drains after commit, so it is never '
-      + 'one.';
+    const DATA_MEMORY_STALL_DESC = 'Cycles a load waited on a D-cache miss for data a later '
+      + 'instruction in the range reads.';
 
     /* SHARED END legend-text */
 
@@ -2708,7 +3226,7 @@
         desc: LEGEND_SHARED.bpMispred,
       },
       {
-        key: 'bpUnpred', label: 'Unpredicted (T!/N!)', swatch: COL.bpUnpred,
+        key: 'bpUnpred', label: 'Unpredicted (T!)', swatch: COL.bpUnpred,
         desc: LEGEND_SHARED.bpUnpred,
       },
       {
@@ -2773,115 +3291,94 @@
       {
         id: 'metric-cycles', label: 'Cycles', extraInfoLabel: 'total cycles', extraInfoRank: 1,
         mechanisms: ['icache'],
-        desc: 'Cycles in the current fetch range, counting every stall. The number in '
-          + 'parentheses, when shown, drops the lead-in before the range\'s first instruction: '
-          + 'a bubble caused outside the range, and the pre-fetch wait.',
+        desc: 'Cycles the range takes, and in parentheses those from its first fetch on.',
       },
       {
         id: 'metric-fetched', label: 'Fetched', extraInfoLabel: 'fetched instructions',
         extraInfoRank: 2, mechanisms: [],
-        desc: 'Instructions fetched into the front end in the current fetch range, committed and '
-          + 'flushed alike.',
+        desc: 'Instructions in the range that the front end handed to decode.',
       },
       {
         id: 'metric-committed', label: 'Committed', extraInfoLabel: 'committed instructions',
         extraInfoRank: 3, mechanisms: ['no_commits'],
-        desc: 'Committed instructions in the current fetch range.',
+        desc: 'Instructions in the range that committed.',
       },
       {
         id: 'metric-flushed', label: 'Flushed', extraInfoLabel: 'flushed instructions',
         extraInfoRank: 4, mechanisms: [],
-        desc: 'Wrong-path instructions in the current fetch range, discarded after a redirect or '
-          + 'flush. Also any instruction still in flight when the VCD ended.',
+        desc: 'Instructions in the range discarded on a wrong path, or in flight when the VCD '
+          + 'ended.',
       },
       {
         id: 'metric-compressed', label: 'Compressed', extraInfoLabel: 'compressed instructions',
         extraInfoRank: 5, mechanisms: [],
-        desc: '16-bit compressed (RVC) instructions in the current fetch range.',
+        desc: 'Instructions in the range that are 16-bit compressed (RVC).',
       },
       {
         id: 'metric-wrapping', label: 'Line-spanning',
         extraInfoLabel: 'line-spanning instructions', extraInfoRank: 6, mechanisms: [],
-        desc: 'Instructions in the current fetch range whose bytes span two fetch lines.',
+        desc: 'Instructions in the range whose bytes span two fetch lines.',
       },
       {
         id: 'metric-ic-misses', label: 'I-cache misses', extraInfoLabel: 'I-cache misses',
         extraInfoRank: 12, mechanisms: ['icache'],
-        desc: 'I-cache misses in the current fetch range, matching the RTL perf counter '
-          + '(perf event 1). The number in parentheses, when it differs, counts the records '
+        desc: 'I-cache misses as the core\'s counter counts them, in parentheses the fetches '
           + 'marked as a miss.',
       },
       {
         id: 'metric-dc-misses', label: 'D-cache misses', extraInfoLabel: 'D-cache misses',
         extraInfoRank: 14, mechanisms: ['dcache'],
-        desc: 'D-cache miss allocations in the current fetch range, prefetches left out, matching '
-          + 'the RTL perf counter (perf event 2). The parentheses split them into the load unit, '
-          + 'the store port and other sources.',
+        desc: 'D-cache misses as the core\'s counter counts them, split by where they came from.',
       },
       {
         id: 'metric-ic-accesses', label: 'I-cache accesses', extraInfoLabel: 'I-cache accesses',
         extraInfoRank: 13, mechanisms: [],
-        desc: 'Cycles in the current fetch range where the front end raised an I-cache request '
-          + '(perf event 16).',
+        desc: 'Cycles in the range in which the front end asked the I-cache for a line.',
       },
       {
         id: 'metric-dc-accesses', label: 'D-cache accesses', extraInfoLabel: 'D-cache accesses',
         extraInfoRank: 15, mechanisms: [],
-        desc: 'Cycles in the current fetch range where the load, page-table-walk or store port '
-          + 'raised a D-cache request (perf event 17). The parentheses count the load and store '
-          + 'records.',
+        desc: 'Cycles in which the D-cache took a request, in parentheses the loads and stores.',
       },
       {
         id: 'metric-branches', label: 'Branches', extraInfoLabel: 'branches', extraInfoRank: 7,
         mechanisms: [],
-        desc: 'Control-flow instructions in the current fetch range, committed and flushed alike. '
-          + 'The number in parentheses, when shown, is the committed subset.',
+        desc: 'Branches and jumps in the range, and in parentheses the committed ones.',
       },
       {
         id: 'metric-mispredicted', label: 'Mispredicted', extraInfoLabel: 'mispredicted branches',
         extraInfoRank: 8, mechanisms: ['bp_resolution'],
-        desc: 'Branches the predictor called wrong in direction or target, corrected by an '
-          + 'Execute redirect. The unpredicted ones are counted apart.',
+        desc: 'Branches the predictor got wrong, which Execute redirected.',
       },
       {
         id: 'metric-unpredicted', label: 'Unpredicted', extraInfoLabel: 'unpredicted branches',
         extraInfoRank: 9, mechanisms: ['bp_resolution'],
-        desc: 'Branches the predictor made no prediction for, where falling through was wrong, so '
-          + 'Execute redirected. Common on a control-flow instruction\'s first encounter.',
+        desc: 'Branches with no prediction that had to be taken, which Execute redirected.',
       },
       {
         id: 'metric-time', label: 'Time', extraInfoLabel: 'time (elapsed)', extraInfoRank: 11,
         mechanisms: ['icache'],
-        desc: 'Time for the current fetch range, from its cycle count and the clock period. At an '
-          + 'assumed 50 MHz clock.',
+        desc: 'The range\'s cycles at an assumed 50 MHz clock.',
       },
       {
         id: 'metric-ipc', label: 'IPC', extraInfoLabel: 'IPC', extraInfoRank: 10,
         mechanisms: ['icache', 'no_commits'],
-        desc: 'Instructions per cycle, committed divided by cycles.',
+        desc: 'Committed instructions per cycle.',
       },
       {
         id: 'metric-flush-stall', label: 'Flush stall', extraInfoLabel: 'flush stall',
         extraInfoRank: 16, mechanisms: ['bp_resolution', 'icache'],
-        desc: 'Flush recovery cycles: the bubble and pre-fetch wait of the instruction resuming '
-          + 'after a mispredict, an unpredicted branch or a flush. A flush is a CSR write, a '
-          + 'fence, an atomic commit or an exception entry.',
+        desc: 'Cycles spent refetching after a mispredict, an unpredicted branch or a flush.',
       },
       {
         id: 'metric-fetch-stall', label: 'Fetch stall', extraInfoLabel: 'fetch stall',
         extraInfoRank: 17, mechanisms: ['bp_resolution', 'dependences', 'icache'],
-        desc: 'Cycles in which some instruction waited in the front end: the pre-fetch wait when '
-          + 'not resuming from a flush, the I-cache wait, the high line of a line-spanning '
-          + 'instruction waiting for its slot, the front-end FIFO, an untagged decode register '
-          + 'wait, and a predicted-taken bubble. An instruction queued behind a busy stage counts '
-          + 'too.',
+        desc: 'Cycles in which some instruction waited in the front end.',
       },
       {
         id: 'metric-data-stall', label: 'Data stall', extraInfoLabel: 'data stall',
         extraInfoRank: 18, mechanisms: ['dependences', 'lsu_fsm'],
-        desc: 'Data stall cycles: a consumer held in the decode register before issue waiting for '
-          + 'its operands, a load\'s among them, and a load or store waiting for the LSU to admit '
-          + 'it.',
+        desc: 'Cycles in which some instruction waited for an operand or for the load-store unit.',
       },
       {
         id: 'metric-data-mem-stall', label: 'Data-memory stall',
@@ -2892,10 +3389,7 @@
       {
         id: 'metric-stall', label: 'Stall', extraInfoLabel: 'total stall', extraInfoRank: 20,
         mechanisms: ['bp_resolution', 'dcache', 'dependences', 'icache', 'lsu_fsm'],
-        desc: 'Cycles in which at least one instruction was waiting, anywhere from the front end '
-          + 'to commit: the union of the four stall figures to the left, each cycle counted once. '
-          + 'An instruction queued in the front end counts too, so most programs read close to '
-          + '100%. The percentage is of the range\'s cycles.',
+        desc: 'Cycles in which any instruction waited, the four stall figures together.',
       },
     ]);
 
@@ -2909,11 +3403,11 @@
     const METRIC_KEYS_NOT_ON_FLUSHED = new Set(['wb_cycle', 'co_cycle']);
     const RANGE_SCOPE = '(current fetch range)';
     const EMPTY_EXTENT = Object.freeze({ renderLo: 0, renderHi: 0, metricLo: 0, metricHi: 0,
-      intrinsicLo: 0, originLo: 0, noWaitLo: 0 });
+      intrinsicLo: 0 });
     const FWD_OPERANDS = Object.freeze(['rs1', 'rs2', 'rs3']);
 
-    /* Core facts. ariane_pkg.sv sets FETCH_FIFO_DEPTH to 4 in every build, and
-     * the HPDcache numbers its request sources, the load unit 1 and the store
+    /* Core facts. The core's package sets the front-end FIFO to 4 entries in every build,
+     * and the HPDcache numbers its request sources, the load unit 1 and the store
      * port 3. */
     const FETCH_FIFO_DEPTH = 4;
     const DC_SID_LOAD = 1;
@@ -2925,7 +3419,6 @@
     const MEM_WB_LANE_MAX_H = 40;
     const MEM_WB_MIN_H = 56;
     const MEM_WB_MAX_FRACTION = 0.5;
-    const MEM_WB_GUTTER_PAD = 6;
     const MEM_WB_TAG_MIN_W = 26;
     /* A writeback bar stands inside its lane by this much top and bottom. */
     const MEM_WB_BAR_INSET = 2;
@@ -2949,9 +3442,9 @@
     /* The panels over which the wheel scrolls the timeline. */
     const WHEEL_PANEL_IDS = Object.freeze(['label-panel', 'ruler', 'legend', 'mem-wb-panel']);
 
-    /* commit_stage.sv acks an atomic only on amo_resp_i.ack, so it touches memory
-     * at the commit head, and it acks a fence on no_st_pending_i before halting
-     * the commit stage while the D-cache flush walks every entry. */
+    /* The commit stage acknowledges an atomic only when its memory response arrives, so it
+     * touches memory at the commit head, and a fence once no store is pending, before
+     * halting while the D-cache flush walks every entry. */
     const RE_ATOMIC_OP = /^\s*(amo\w*|lr\.[wd]|sc\.[wd])\b/i;
     const RE_FENCE_OP = /^\s*fence(\.i)?\b/i;
     const COMMIT_TAGS = Object.freeze({ coWait: 'co wait', amo: 'amo', fenceFlush: 'fence flush' });
@@ -3045,15 +3538,13 @@
       'This program has no memory writebacks, so there is nothing to show.';
 
     const CONFIG_PARAM_NOTES = Object.freeze({
-      NrScoreboardEntries: 'In-flight instructions the scoreboard holds at once, read from its '
-        + 'slots in the VCD.',
+      NrScoreboardEntries: 'Instructions the scoreboard holds at once, read from the VCD.',
       NrWbPorts: 'Writeback ports into the scoreboard, counted in the VCD.',
-      NrCommitPorts: 'Instructions that can commit per cycle, read from the scoreboard\'s commit '
-        + 'pointers in the VCD, so it follows the actual build.',
+      NrCommitPorts: 'Instructions that can commit per cycle, read from the VCD.',
       TRANS_ID_BITS: 'Width of the scoreboard slot id, derived from the scoreboard depth.',
       FETCH_WIDTH: 'Bits the I-cache delivers per fetch request.',
       INSTR_PER_FETCH: 'Instructions one fetch can yield, 2 when RVC is on.',
-      DCACHE_NUM_SETS: 'D-cache sets, read from the width of its set index in the VCD.',
+      DCACHE_NUM_SETS: 'D-cache sets, read from the VCD.',
     });
     const FU_NOTES = Object.freeze({
       ALU: 'Integer arithmetic, logic, shifts and immediates.',
@@ -3068,7 +3559,6 @@
     const TOGGLES = Object.freeze([
       { id: 'tooltip-on', refresh: onTooltipToggle },
       { id: 'forwarding-on', refresh: onViewToggle },
-      { id: 'pre-fetch-wait-on', refresh: onViewToggle },
       { id: 'stall-band-on', refresh: onViewToggle },
     ]);
 
@@ -3083,9 +3573,8 @@
     let rowIndexById = new Map();
     let minId = 1;
     let maxId = 1;
-    /* renderLo and renderHi bound the drawing, metricLo and metricHi the figures, and intrinsicLo
-     * drops the lead-in caused before the range. originLo is cycle 1, where a shown pre-fetch wait
-     * starts the drawing, and noWaitLo the drawing's start while the toggle hides the wait. */
+    /* renderLo and renderHi bound the drawing, renderLo being cycle 1, metricLo and metricHi the
+     * figures, and intrinsicLo drops the lead-in caused before the range. */
     let extent = EMPTY_EXTENT;
     let clockPeriod;
     let timeUnit;
@@ -3152,7 +3641,6 @@
     const tooltip = document.getElementById('tooltip');
     const tooltipBox = document.getElementById('tooltip-on');
     const forwardingBox = document.getElementById('forwarding-on');
-    const preFetchWaitBox = document.getElementById('pre-fetch-wait-on');
     const stallBandBox = document.getElementById('stall-band-on');
 
     /* ==========================================================================
@@ -3480,11 +3968,11 @@
     }
 
     /* On dark every tag is white, and each fill that carries one is dark enough for white at 3:1.
-     * On light a tag takes its hue's ink, and white at the lane's alpha only on a fill deeper than
-     * TAG_WHITE_BELOW. */
+     * On light a tag takes its hue's dark ink where that reaches TAG_CONTRAST on the fill, and on a
+     * fill too deep for it white, from the lane's alpha up until it does. */
     const TAG_ALPHA = Object.freeze({ cell: 0.55, strip: 0.85, part: 0.92 });
     const TAG_INK_ON_DARK = 'rgba(255,255,255,0.92)';
-    const TAG_WHITE_BELOW = 0.58;
+    const TAG_CONTRAST = 4.5;
     const tagInks = new Map();
 
     function relativeLuminance(rgb) {
@@ -3503,18 +3991,25 @@
 
     function tagInk(fill, alpha) {
       if (currentTheme() !== THEME_LIGHT) return TAG_INK_ON_DARK;
-      const ground = INK.tagGround;
-      const key = `${fill}@${alpha}@${ground}`;
+      const key = `${fill}@${alpha}@${INK.tagGrounds.join('@')}`;
       let ink = tagInks.get(key);
       if (!ink) {
-        const light = `rgba(255,255,255,${alpha})`;
-        const base = parseColour(fill), floor = parseColour(ground);
-        if (!base || !floor) {
-          ink = light;
-        } else {
-          const under = layOver(base, floor);
-          ink = toOklab(under)[0] < TAG_WHITE_BELOW ? light
-            : `rgb(${hueInk(under, under).slice(0, 3).join(',')})`;
+        const base = parseColour(fill), floors = INK.tagGrounds.map(parseColour);
+        ink = `rgba(255,255,255,${alpha})`;
+        if (base && floors.every(Boolean)) {
+          /* A see-through fill shows each row's shade, so dark text must read on the deeper one
+           * and white on the paler. */
+          const [deep, pale] = floors.map(floor => layOver(base, floor))
+            .sort((first, second) => relativeLuminance(first) - relativeLuminance(second));
+          const dark = hueInk(deep, deep);
+          const whiteAt = level => contrastRatio(layOver([255, 255, 255, level], pale), pale);
+          let white = alpha;
+          while (white < 1 && whiteAt(white) < TAG_CONTRAST) {
+            white = Math.min(1, Math.round(white * 100 + 5) / 100);
+          }
+          /* Where neither reaches it, which the palette avoids, the clearer of the two. */
+          ink = contrastRatio(dark, deep) >= Math.min(TAG_CONTRAST, whiteAt(white))
+            ? `rgb(${dark.slice(0, 3).join(',')})` : `rgba(255,255,255,${white})`;
         }
         tagInks.set(key, ink);
       }
@@ -3531,7 +4026,7 @@
       return {
         rowEven: rowAlternate,
         rowOdd: row,
-        tagGround: row,
+        tagGrounds: [row, rowAlternate],
         rowEvenBanded: withAlpha(rowAlternate, BANDED_ROW_ALPHA[currentTheme()]),
         rowOddBanded: withAlpha(row, BANDED_ROW_ALPHA[currentTheme()]),
         belowRows: cssToken('--bg'),
@@ -3689,11 +4184,10 @@
 
     /* Needs: extent, escapeHtml */
 
-    /* Cycles show relative to the current fetch range, whose first cycle is 1 whether or not the
-     * drawing starts there. A null cycle stays null, so a caller can tell a missing cycle from a
-     * number. */
+    /* Cycles show relative to the current fetch range, whose first drawn cycle is 1. A null cycle
+     * stays null, so a caller can tell a missing cycle from a number. */
     function cycDisp(cycle) {
-      return cycle == null ? null : cycle - extent.originLo + 1;
+      return cycle == null ? null : cycle - extent.renderLo + 1;
     }
 
     function cycTip(cycle) {
@@ -3850,12 +4344,16 @@
     }
 
     /* A disabled box keeps the choice stored for it, since a JSON with nothing for it to draw is no
-     * reason to forget the reader's preference. fresh drops every stored choice first. */
+     * reason to forget the reader's preference. A choice for a box the page no longer has goes, and
+     * fresh drops every stored choice. */
     function saveViewSettings(fresh = false) {
       const stored = fresh ? null : readViewSettings().checks;
-      const checks = stored && typeof stored === 'object' ? { ...stored } : {};
+      const kept = stored && typeof stored === 'object' ? stored : {};
+      const checks = {};
       for (const box of document.querySelectorAll(REMEMBERED_CHECKBOXES)) {
-        if (box.id && !box.disabled) checks[box.id] = box.checked;
+        if (!box.id) continue;
+        if (!box.disabled) checks[box.id] = box.checked;
+        else if (typeof kept[box.id] === 'boolean') checks[box.id] = kept[box.id];
       }
       const values = {};
       for (const select of document.querySelectorAll(REMEMBERED_SELECTS)) {
@@ -3943,12 +4441,17 @@
       applyMemWbToggle();
     }
 
-    /* Reset view shows the track again at the stylesheet's height. */
+    /* Reset View shows the track again at the stylesheet's height. */
     function resetExtraView() {
       memWbHidden = false;
       memWbHeight = parseFloat(cssToken('--mem-wb-h'));
       applyMemWbHeight();
       applyMemWbToggle();
+    }
+
+    /* W shows and hides the memory writeback track, as its button does. */
+    function extraActionKeys(press) {
+      return { w: press('mem-wb-toggle') };
     }
 
     /* ==========================================================================
@@ -4080,11 +4583,11 @@
     /* SHARED BEGIN file-open */
 
     /* Needs: ranged-load, validate-json, notice, loading, format, escape-html, limits, ingestJson,
-     * resetForNewJson, VIEWER_NAME */
+     * resetForNewJson, openJsonBrowser, closeJsonBrowser, noteJsonShown, VIEWER_NAME */
 
-    /* Chromium's picker opens in the last JSON's folder: the handle steers it within a session,
-     * and the picker's id makes Chromium remember the folder across reloads. Firefox has no such
-     * picker, and its own file dialog decides where it opens. */
+    /* Open a Single File uses Chromium's picker, which opens in the last JSON's folder: the handle
+     * steers it within a session, and the picker's id across reloads. Firefox has no such picker,
+     * and its own file dialog decides where it opens, which is why Load JSON lists a folder. */
     let lastJsonHandle = null;
 
     const JSON_NAME_MAX = 30;
@@ -4108,7 +4611,7 @@
 
     /* The single door into the page: validate, cap, ingest, and reset the
      * view if drawing throws. Returns true when the JSON is shown. */
-    function acceptJson(json, { name, title, label }) {
+    function acceptJson(json, { name, title, label, file = null }) {
       const verdict = validateJson(json, label);
       if (verdict !== null) {
         failLoad(verdict.title, verdict.html);
@@ -4134,6 +4637,7 @@
       }
       setJsonName(name, title);
       syncMainCodeButton();
+      noteJsonShown(file);
       return true;
     }
 
@@ -4161,8 +4665,10 @@
       }
     }
 
+    /* A JSON chosen any way closes the Load JSON panel, which has done its work. */
     function loadJsonFile(file) {
       if (!file) return;
+      closeJsonBrowser();
       cancelRangedLoad();
       if (file.size > MAX_JSON_BYTES) return promptSizeCheck(file);
       const token = rangedLoad.token;
@@ -4172,7 +4678,8 @@
       reader.onerror = () => {
         if (token !== rangedLoad.token) return;
         failLoad('Could not read the JSON', `<p>The browser could not read <b>"`
-          + `${escapeHtml(file.name)}"</b>. It may be unreadable, or larger than the browser can `
+          + `${escapeHtml(file.name)}"</b>. It may have changed on disk since it was chosen, so `
+          + 'choose it or its folder again, or it may be unreadable or larger than the browser can '
           + 'hold as one string.</p><p>The current view has not been changed.</p>');
       };
       reader.onload = () => {
@@ -4197,7 +4704,7 @@
             return promptRangedLoad(file, null);
           }
           const base = file.name.replace(/\.json$/i, '');
-          acceptJson(json, { name: base, title: base, label: file.name });
+          acceptJson(json, { name: base, title: base, label: file.name, file });
           hideLoading();
         };
         if (slow) nextPaint().then(parse);
@@ -4213,13 +4720,13 @@
         ev.target.value = '';
         if (file) loadJsonFile(file);
       });
-      document.getElementById('load-json-button').addEventListener('click', openJsonFile);
+      document.getElementById('load-json-button').addEventListener('click', openJsonBrowser);
     }
 
     function wireDropLoad() {
       const zone = document.getElementById('drop-zone');
       zone.addEventListener('click', ev => {
-        if (!ev.target.closest('#sample-picker')) openJsonFile();
+        if (!ev.target.closest('#sample-picker')) openJsonBrowser();
       });
       document.addEventListener('dragover', ev => {
         ev.preventDefault();
@@ -4246,6 +4753,375 @@
     }
 
     /* SHARED END file-open */
+
+    /* SHARED BEGIN json-browser */
+
+    /* Needs: loadJsonFile, openJsonFile, escapeHtml, fmtBytes, fmtCount, plural, MAX_JSON_BYTES,
+     * VIEWER_NAME, closeMenus, hideTip, tooltip, noticeOpen, css-json-browser,
+     * markup-json-browser */
+
+    /* Load JSON lists every JSON under a folder chosen once, by subfolder, and keeps the folder,
+     * the filter and the JSON last loaded until the page is reloaded. Nothing is read before a
+     * click, and only the rows in view are built, so a folder of thousands lists at once. */
+    const JSON_ROW_H = 24;
+    const JSON_ROW_SLACK = 6;
+    const JSON_FOLDER_KEY = `${VIEWER_NAME}.json-folder`;
+    const JSON_NAME_ORDER = new Intl.Collator('en', { numeric: true, sensitivity: 'base' });
+    const JSON_DATE = new Intl.DateTimeFormat('en-GB',
+      { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+    const JSON_DATE_OLD = new Intl.DateTimeFormat('en-GB',
+      { day: 'numeric', month: 'short', year: 'numeric' });
+    const jsonFolder = { name: null, entries: [], dirs: 0, items: [], selected: -1, lastKey: null,
+      lastDir: null, pendingFile: null, pendingKey: null, pendingDir: null };
+    let jsonBrowserReturnFocus = null;
+    let jsonListFrame = 0;
+
+    function jsonBrowserOpen() {
+      return document.getElementById('json-browser-backdrop').classList.contains('show');
+    }
+
+    /* Tab and Shift+Tab go round the controls of an open panel rather than behind it. */
+    function trapTab(ev, box) {
+      const stops = [...box.querySelectorAll('button, a[href], select, input')]
+        .filter(el => !el.disabled && el.type !== 'file' && el.offsetParent !== null);
+      if (!stops.length) return;
+      const at = stops.indexOf(document.activeElement);
+      const next = ev.shiftKey ? (at <= 0 ? stops.length - 1 : at - 1)
+        : (at < 0 || at === stops.length - 1 ? 0 : at + 1);
+      stops[next].focus();
+      ev.preventDefault();
+    }
+
+    /* Folders compare name by name, so a subfolder follows its parent and precedes its siblings,
+     * and a JSON's name without its extension first, so daxpy.json precedes daxpy_unrolled.json. */
+    function compareJsonDirs(first, second) {
+      const a = first.split('/'), b = second.split('/');
+      for (let i = 0; i < Math.min(a.length, b.length); i++) {
+        const order = JSON_NAME_ORDER.compare(a[i], b[i]);
+        if (order) return order;
+      }
+      return a.length - b.length;
+    }
+
+    function compareJsonNames(first, second) {
+      const bare = name => name.replace(/\.json$/i, '');
+      return JSON_NAME_ORDER.compare(bare(first), bare(second))
+        || JSON_NAME_ORDER.compare(first, second);
+    }
+
+    /* The JSONs among a folder input's files, by subfolder and then name, leaving out a hidden
+     * folder's. Each keeps its File, which the browser reads only when it is loaded. */
+    function indexJsonFolder(files) {
+      const entries = [];
+      let name = null;
+      for (const file of files) {
+        const parts = (file.webkitRelativePath || file.name).split('/');
+        if (name === null) name = parts.length > 1 ? parts[0] : '';
+        if (!/\.json$/i.test(file.name)) continue;
+        const dirs = parts.slice(1, -1);
+        if (dirs.some(part => part.startsWith('.'))) continue;
+        const dir = dirs.join('/');
+        entries.push({ file, dir, name: file.name, key: `${dir}/${file.name}`,
+          words: [name, dir, file.name].filter(Boolean).join('/').toLowerCase() });
+      }
+      entries.sort((a, b) => compareJsonDirs(a.dir, b.dir) || compareJsonNames(a.name, b.name));
+      return { name: name ?? '', entries, dirs: new Set(entries.map(entry => entry.dir)).size };
+    }
+
+    function jsonFilterText() {
+      return document.getElementById('json-browser-filter').value.trim();
+    }
+
+    /* A heading for each subfolder, then its JSONs, of those holding every word of the filter. */
+    function buildJsonItems() {
+      const words = jsonFilterText().toLowerCase().split(/\s+/).filter(Boolean);
+      const items = [];
+      let heading = null;
+      for (const entry of jsonFolder.entries) {
+        if (!words.every(word => entry.words.includes(word))) continue;
+        if (!heading || heading.dir !== entry.dir) {
+          heading = { dir: entry.dir, count: 0 };
+          items.push(heading);
+        }
+        heading.count++;
+        items.push(entry);
+      }
+      jsonFolder.items = items;
+    }
+
+    function jsonDate(ms) {
+      const date = new Date(ms);
+      const recent = date.getFullYear() === new Date().getFullYear();
+      return (recent ? JSON_DATE : JSON_DATE_OLD).format(date);
+    }
+
+    /* A JSON past the whole-file limit is marked as Load JSON's notice words it, since it is
+     * counted before it loads and may need a range. */
+    function jsonRowHtml(item, index) {
+      const top = `top:${index * JSON_ROW_H}px`;
+      if (!item.file) {
+        const path = [jsonFolder.name, item.dir].filter(Boolean).join('/');
+        return `<div class="json-row json-dir" style="${top}"><span class="json-dir-name">`
+          + `${escapeHtml(path || '.')}/</span><span class="json-date">`
+          + `${escapeHtml(plural(item.count, 'JSON'))}</span></div>`;
+      }
+      const selected = index === jsonFolder.selected;
+      const big = item.file.size > MAX_JSON_BYTES;
+      const last = item.key === jsonFolder.lastKey;
+      const tags = (big ? '<span class="json-tag" title="Past the '
+        + `${escapeHtml(fmtBytes(MAX_JSON_BYTES))} a browser can hold as one string, so it is `
+        + 'counted first, then loaded whole if it holds few enough instructions, or else a range '
+        + 'of them.">past the whole-file limit</span>' : '')
+        + (last ? '<span class="json-tag">last loaded</span>' : '');
+      const classes = ['json-row', 'json-file', selected ? 'selected' : '', big ? 'json-big' : '',
+        last ? 'json-last' : ''].filter(Boolean).join(' ');
+      const path = [jsonFolder.name, item.dir, item.name].filter(Boolean).join('/');
+      return `<div class="${classes}" style="${top}" id="json-item-${index}" role="option" `
+        + `aria-selected="${selected}" data-item="${index}" title="${escapeHtml(path)}">`
+        + `<span class="json-name">${escapeHtml(item.name)}</span>${tags}`
+        + `<span class="json-date">${escapeHtml(jsonDate(item.file.lastModified))}</span>`
+        + `<span class="json-size">${escapeHtml(fmtBytes(item.file.size))}</span></div>`;
+    }
+
+    /* What the list says when it has no row: no folder yet, nothing in it, or nothing matching. */
+    function jsonEmptyHtml() {
+      if (jsonFolder.name === null) {
+        let before = null;
+        try {
+          before = sessionStorage.getItem(JSON_FOLDER_KEY);
+        } catch (err) {
+          before = null;
+        }
+        return before ? `<b>This tab listed ${escapeHtml(before)} before the page was `
+          + 'reloaded.</b> A page cannot open a folder again by itself, so Choose a Folder… asks '
+          + 'for it again.'
+          : '<b>No folder chosen yet.</b> Choose a Folder… lists every JSON under the folder you '
+          + 'choose, by subfolder, with its date and size, and a click loads one. Until the page '
+          + 'is reloaded, the next Load JSON opens the list where that JSON came from.';
+      }
+      const where = escapeHtml(jsonFolder.name || 'the chosen folder');
+      if (!jsonFolder.entries.length) {
+        return `<b>No JSON under ${where}.</b> Choose another folder, or open a single file.`;
+      }
+      return `<b>No JSON under ${where} matches "${escapeHtml(jsonFilterText())}".</b> Each word `
+        + 'typed must appear in the folder or the name.';
+    }
+
+    /* Only the rows in view and a few either side are in the page, rebuilt as the list scrolls. */
+    function renderJsonList() {
+      const list = document.getElementById('json-browser-list');
+      const items = jsonFolder.items;
+      const spacer = document.getElementById('json-browser-spacer');
+      spacer.style.height = `${items.length * JSON_ROW_H}px`;
+      for (const row of list.querySelectorAll('.json-row, #json-browser-empty')) row.remove();
+      if (!items.length) {
+        list.insertAdjacentHTML('beforeend',
+          `<div id="json-browser-empty">${jsonEmptyHtml()}</div>`);
+        return;
+      }
+      const first = Math.max(0, Math.floor(list.scrollTop / JSON_ROW_H) - JSON_ROW_SLACK);
+      const last = Math.min(items.length - 1,
+        Math.ceil((list.scrollTop + list.clientHeight) / JSON_ROW_H) + JSON_ROW_SLACK);
+      let html = '';
+      for (let i = first; i <= last; i++) html += jsonRowHtml(items[i], i);
+      list.insertAdjacentHTML('beforeend', html);
+    }
+
+    function updateJsonWhere() {
+      const where = document.getElementById('json-browser-where');
+      if (jsonFolder.name === null) {
+        where.textContent = 'Choose a folder once, then load any JSON under it with a click.';
+        return;
+      }
+      const shown = jsonFolder.items.filter(item => item.file).length;
+      let text = `${plural(jsonFolder.entries.length, 'JSON')} under `
+        + `${jsonFolder.name || 'the chosen folder'}`;
+      if (jsonFolder.dirs > 1) text += `, in ${plural(jsonFolder.dirs, 'folder')}`;
+      if (shown < jsonFolder.entries.length) text += `, ${fmtCount(shown)} shown`;
+      where.textContent = `${text}.`;
+    }
+
+    /* The chosen JSON scrolled into view, with its subfolder's heading when that is just above. */
+    function selectJsonItem(index) {
+      const items = jsonFolder.items;
+      if (!items[index] || !items[index].file) return;
+      jsonFolder.selected = index;
+      const list = document.getElementById('json-browser-list');
+      const top = (items[index - 1] && !items[index - 1].file ? index - 1 : index) * JSON_ROW_H;
+      const bottom = (index + 1) * JSON_ROW_H;
+      if (top < list.scrollTop) list.scrollTop = top;
+      else if (bottom > list.scrollTop + list.clientHeight) {
+        list.scrollTop = bottom - list.clientHeight;
+      }
+      renderJsonList();
+      document.getElementById('json-browser-filter')
+        .setAttribute('aria-activedescendant', `json-item-${index}`);
+    }
+
+    /* The choice moved step rows down, or up when negative, to the nearest JSON past a heading. */
+    function stepJsonSelection(step) {
+      const items = jsonFolder.items;
+      if (!items.length) return;
+      const from = jsonFolder.selected < 0 ? (step > 0 ? -1 : items.length) : jsonFolder.selected;
+      let target = Math.max(0, Math.min(items.length - 1, from + step));
+      const way = step > 0 ? 1 : -1;
+      while (items[target] && !items[target].file) target += way;
+      if (!items[target]) {
+        target = Math.max(0, Math.min(items.length - 1, from + step));
+        while (items[target] && !items[target].file) target -= way;
+      }
+      if (items[target]) selectJsonItem(target);
+    }
+
+    /* Opens where the JSON last loaded came from: its subfolder's heading at the top with that JSON
+     * chosen, else the first JSON of that subfolder, else the list's first. */
+    function revealLastJson() {
+      const items = jsonFolder.items;
+      let index = items.findIndex(item => item.file && item.key === jsonFolder.lastKey);
+      if (index < 0) index = items.findIndex(item => item.file && item.dir === jsonFolder.lastDir);
+      if (index < 0) index = items.findIndex(item => item.file);
+      jsonFolder.selected = index;
+      const list = document.getElementById('json-browser-list');
+      if (index < 0) {
+        list.scrollTop = 0;
+        return;
+      }
+      let heading = index;
+      while (heading > 0 && items[heading].file) heading--;
+      const fits = (index - heading + 1) * JSON_ROW_H <= list.clientHeight;
+      list.scrollTop = fits ? heading * JSON_ROW_H
+        : (index + 0.5) * JSON_ROW_H - list.clientHeight / 2;
+    }
+
+    function refreshJsonBrowser(reveal) {
+      const chosen = jsonFolder.name !== null;
+      const filter = document.getElementById('json-browser-filter');
+      document.getElementById('json-browser-folder').textContent = chosen
+        ? 'Choose Another Folder…' : 'Choose a Folder…';
+      filter.disabled = !chosen;
+      buildJsonItems();
+      updateJsonWhere();
+      if (reveal) revealLastJson();
+      renderJsonList();
+      if (jsonFolder.selected >= 0) selectJsonItem(jsonFolder.selected);
+    }
+
+    /* Load JSON and a click on the empty page open the panel. The filter has the keyboard once a
+     * folder is listed, so typing filters and the arrows choose at once. */
+    function openJsonBrowser() {
+      if (jsonBrowserOpen()) return;
+      closeMenus();
+      hideTip(tooltip);
+      jsonBrowserReturnFocus = document.activeElement;
+      document.getElementById('json-browser-backdrop').classList.add('show');
+      refreshJsonBrowser(true);
+      document.getElementById(jsonFolder.name !== null ? 'json-browser-filter'
+        : 'json-browser-folder').focus();
+    }
+
+    function closeJsonBrowser() {
+      if (!jsonBrowserOpen()) return;
+      document.getElementById('json-browser-backdrop').classList.remove('show');
+      const back = jsonBrowserReturnFocus;
+      jsonBrowserReturnFocus = null;
+      if (back && back.focus && back.isConnected) back.focus();
+    }
+
+    /* A new folder clears the filter and the JSON last loaded, and an empty one lists nothing. Its
+     * name outlives a reload in this tab, so the panel can say which folder to choose again. */
+    function onJsonFolderChosen(input) {
+      const files = [...input.files];
+      input.value = '';
+      Object.assign(jsonFolder, indexJsonFolder(files), { selected: -1, lastKey: null,
+        lastDir: null, pendingFile: null });
+      document.getElementById('json-browser-filter').value = '';
+      try {
+        sessionStorage.setItem(JSON_FOLDER_KEY, jsonFolder.name);
+      } catch (err) {
+        /* Blocked, so a reload only says no folder is chosen. */
+      }
+      document.getElementById('json-browser-list').scrollTop = 0;
+      refreshJsonBrowser(true);
+      document.getElementById('json-browser-filter').focus();
+    }
+
+    function loadJsonEntry(index) {
+      const item = jsonFolder.items[index];
+      if (!item || !item.file) return;
+      Object.assign(jsonFolder, { pendingFile: item.file, pendingKey: item.key,
+        pendingDir: item.dir });
+      closeJsonBrowser();
+      loadJsonFile(item.file);
+    }
+
+    /* Told the File behind each JSON the viewer shows, none for a sample, so a pick the viewer
+     * refuses, or whose range prompt is cancelled, is never marked as last loaded. */
+    function noteJsonShown(file) {
+      if (file && file === jsonFolder.pendingFile) {
+        jsonFolder.lastKey = jsonFolder.pendingKey;
+        jsonFolder.lastDir = jsonFolder.pendingDir;
+      }
+      jsonFolder.pendingFile = null;
+    }
+
+    /* While the panel is open it has the keys, the page's own waiting until it closes. Enter on one
+     * of its buttons stays that button's. */
+    function onJsonBrowserKey(ev) {
+      if (!jsonBrowserOpen() || noticeOpen()) return;
+      const active = document.activeElement;
+      const inFilter = active && active.id === 'json-browser-filter';
+      const page = Math.max(1,
+        Math.floor(document.getElementById('json-browser-list').clientHeight / JSON_ROW_H) - 1);
+      const moves = { ArrowDown: 1, ArrowUp: -1, PageDown: page, PageUp: -page };
+      let handled = true;
+      if (ev.key === 'Escape') closeJsonBrowser();
+      else if (Object.hasOwn(moves, ev.key)) stepJsonSelection(moves[ev.key]);
+      else if ((ev.key === 'Home' || ev.key === 'End') && !inFilter) {
+        stepJsonSelection(ev.key === 'Home' ? -Infinity : Infinity);
+      } else if (ev.key === 'Enter' && (inFilter || !active || !active.closest('button'))) {
+        loadJsonEntry(jsonFolder.selected);
+      } else if (ev.key === 'Tab') trapTab(ev, document.getElementById('json-browser'));
+      else handled = false;
+      if (handled) ev.preventDefault();
+      ev.stopImmediatePropagation();
+    }
+
+    function wireJsonBrowser() {
+      const backdrop = document.getElementById('json-browser-backdrop');
+      const list = document.getElementById('json-browser-list');
+      const folderInput = document.getElementById('folder-input');
+      backdrop.addEventListener('click', ev => {
+        if (ev.target === backdrop) closeJsonBrowser();
+      });
+      document.getElementById('json-browser-close').addEventListener('click', closeJsonBrowser);
+      document.getElementById('json-browser-folder')
+        .addEventListener('click', () => folderInput.click());
+      document.getElementById('json-browser-file').addEventListener('click', openJsonFile);
+      folderInput.addEventListener('change', () => onJsonFolderChosen(folderInput));
+      document.getElementById('json-browser-filter').addEventListener('input', () => {
+        list.scrollTop = 0;
+        jsonFolder.selected = -1;
+        refreshJsonBrowser(false);
+        stepJsonSelection(1);
+      });
+      list.addEventListener('click', ev => {
+        const row = ev.target instanceof Element ? ev.target.closest('.json-file') : null;
+        if (row) loadJsonEntry(Number(row.dataset.item));
+      });
+      list.addEventListener('scroll', () => {
+        if (jsonListFrame) return;
+        jsonListFrame = requestAnimationFrame(() => {
+          jsonListFrame = 0;
+          renderJsonList();
+        });
+      });
+      window.addEventListener('resize', () => {
+        if (jsonBrowserOpen()) renderJsonList();
+      });
+      window.addEventListener('keydown', onJsonBrowserKey, true);
+    }
+
+    /* SHARED END json-browser */
 
     /* SHARED BEGIN json-stream */
 
@@ -4739,7 +5615,7 @@
         + '<p class="notice-actions">From <input id="range-prompt-from" class="range-prompt-input" '
         + `inputmode="numeric" value="${escapeHtml(from)}"> to <input id="range-prompt-to" `
         + `class="range-prompt-input" inputmode="numeric" value="${escapeHtml(to)}"> `
-        + '<button class="tool-button" id="range-prompt-load">Load range</button> '
+        + '<button class="tool-button" id="range-prompt-load">Load Range</button> '
         + '<button class="tool-button" id="range-prompt-cancel">Cancel</button></p>'
         + '<p id="range-prompt-error" class="notice-error"></p>',
         { onDismiss: cancelRangedLoad, ignoreBackdrop: true });
@@ -4827,7 +5703,9 @@
       }
       const base = file.name.replace(/\.json$/i, '');
       const name = whole ? base : `${base} [${fromN}-${Math.min(toN, result.total)}]`;
-      if (acceptJson(result.json, { name, title: name, label: file.name })) rangedLoad.file = null;
+      if (acceptJson(result.json, { name, title: name, label: file.name, file })) {
+        rangedLoad.file = null;
+      }
       hideLoading();
     }
 
@@ -4884,7 +5762,7 @@
       select.hidden = sampleEntries.length < 2;
       button.hidden = sampleEntries.length === 0;
       button.textContent = sampleEntries.length === 1 ? `Load ${sampleEntries[0].label}`
-        : 'Load sample';
+        : 'Load Sample';
     }
 
     function chosenSample() {
@@ -5547,7 +6425,7 @@
       const region = findMainRegion(records, rec => rec.disasm,
         Boolean(loadedJson.metadata.clipped));
       if (region === null) {
-        showNotice('Main code not found', '<p>This JSON has neither of the markers that bracket '
+        showNotice('Main Code not found', '<p>This JSON has neither of the markers that bracket '
           + 'the main program: the statistics markers of the test templates, or a pair of mcycle '
           + 'reads.</p><p>Showing every instruction instead.</p>');
         resetRange();
@@ -5623,7 +6501,7 @@
       }
       const decKind = decBufKind(rec);
       if (decKind !== null) {
-        add('decBuf', rec.dec_cycle + 1, rec.is_cycle, { band: BAND.decode },
+        add('decBuf', rec.dec_cycle + 1, decWaitEnd(rec), { band: BAND.decode },
           { colour: ink(COL.decBuf), label: DEC_BUF_TAGS[decKind], stall: DEC_BUF_STALLS[decKind],
             stage: decKind === 'backpressure' ? null
               : `Decode register (${decKind === 'mem_hazard' ? 'mem' : 'reg'})` });
@@ -5647,7 +6525,7 @@
       const flushKind = FLUSH_BUBBLE_KINDS.has(rec.bubble_kind);
       if (wait !== null) {
         add('preFetchWait', wait.c0, wait.c1, { band: BAND.leadIn },
-          { colour: ink(COL.preFetchWait), label: 'pre-fetch', toggle: preFetchWaitBox,
+          { colour: ink(COL.preFetchWait), label: 'pre-fetch',
             stall: flushKind ? 'flushStall' : 'fetchStall' });
       }
       if (rec.n_bubble_cycles >= 1 && rec.fe1_req_lo_cycle != null && rec.bubble_kind != null) {
@@ -5767,21 +6645,19 @@
         hostLabel: wrapped ? `fe2 hi${synth}` : `fe2${synth}` });
     }
 
-    /* wb_cycle is the last cycle of execution. */
+    /* wb_cycle is the last cycle of execution. A flushed record that never wrote back was still in
+     * its unit when it was flushed, so its execution runs to the flush tick. */
     function executeEnd(rec) {
-      return rec.wb_cycle != null && rec.wb_cycle >= rec.ex_cycle ? rec.wb_cycle + 1
-        : rec.ex_cycle + 1;
+      if (rec.wb_cycle != null && rec.wb_cycle >= rec.ex_cycle) return rec.wb_cycle + 1;
+      if (rec.flushed && rec.wb_cycle == null && rec.flush_cycle > rec.ex_cycle) {
+        return rec.flush_cycle + 1;
+      }
+      return rec.ex_cycle + 1;
     }
 
     /* A line-spanning instruction with both lines fetched takes two lanes. */
     function twoLaneFetch(rec) {
       return rec.wraps_line && rec.fe1_req_hi_cycle != null && rec.fe1_resp_hi_cycle != null;
-    }
-
-    /* The pre-fetch cell draws only while its toggle is on. Every other cell is
-     * always drawn, and the wait counts either way. */
-    function cellShown(cell) {
-      return !cell.toggle || cell.toggle.checked;
     }
 
     function lastFetchCycle(rec) {
@@ -5805,29 +6681,37 @@
      * still being produced waits here, and of the producers dep_producer_ids names, the one
      * writing back last names the wait. */
     function decBufKind(rec) {
-      if (rec.dec_cycle == null || rec.is_cycle == null || rec.is_cycle <= rec.dec_cycle + 1) {
-        return null;
-      }
+      const end = decWaitEnd(rec);
+      if (rec.dec_cycle == null || end == null || end <= rec.dec_cycle + 1) return null;
       let blocker = null;
       for (const id of rec.dep_producer_ids ?? []) {
         const producer = recordById.get(id);
         if (producer && producer.wb_cycle != null
           && (blocker === null || producer.wb_cycle > blocker.wb_cycle)) blocker = producer;
       }
-      if (blocker !== null && blocker.wb_cycle >= rec.is_cycle - 1) {
+      if (blocker !== null && blocker.wb_cycle >= end - 1) {
         return blocker.fu === 'LOAD' ? 'mem_hazard' : 'reg_hazard';
       }
       return 'backpressure';
     }
 
-    /* The commit window, from the cycle after writeback to commit, cut by cause.
-     * An atomic's window is its memory access and a fence flush halts the commit
-     * stage (commit_stage.sv), so only what is left over is a wait. */
+    /* The decode register is left at issue, or by a flushed record never issued at the end of the
+     * cycle it was flushed in, so its row runs up to the flush tick. */
+    function decWaitEnd(rec) {
+      if (rec.is_cycle != null) return rec.is_cycle;
+      return rec.flushed && rec.flush_cycle != null ? rec.flush_cycle + 1 : null;
+    }
+
+    /* The commit window, from the cycle after writeback to commit, cut by cause. An atomic's window
+     * is its memory access and a fence flush halts the commit stage, so only what is left over is a
+     * wait. A flushed record waits until its flush tick, never reaching the access. */
     function commitWaitParts(rec) {
-      if (rec.co_cycle == null || rec.wb_cycle == null) return [];
-      const lo = rec.wb_cycle + 1, hi = rec.co_cycle;
+      const end = rec.co_cycle ?? (rec.flushed && rec.flush_cycle != null ? rec.flush_cycle + 1
+        : null);
+      if (end == null || rec.wb_cycle == null) return [];
+      const lo = rec.wb_cycle + 1, hi = end;
       if (hi <= lo) return [];
-      if (isAtomicOp(rec)) return [{ c0: lo, c1: hi, kind: 'amo' }];
+      if (isAtomicOp(rec) && !rec.flushed) return [{ c0: lo, c1: hi, kind: 'amo' }];
       if (!fenceFlushWindows.length) return [{ c0: lo, c1: hi, kind: 'coWait' }];
       const parts = [];
       for (let cycle = lo; cycle < hi;) {
@@ -5949,9 +6833,8 @@
       }
     }
 
-    /* The render extent spans every cycle field and every lead-in, the metric extent the stages
-     * Cycles counts, the bubble and the pre-fetch wait. Only the drawing's start follows the
-     * Pre-fetch wait toggle, so no figure and no cycle number moves with it. */
+    /* The render extent spans every cycle field and every lead-in, the pre-fetch wait included, and
+     * the metric extent the stages Cycles counts, the bubble and the pre-fetch wait. */
     function computeExtents() {
       if (!rows.length) {
         extent = EMPTY_EXTENT;
@@ -5959,7 +6842,7 @@
       }
       const fields = loadedJson.metadata.cycle_fields;
       let renderLo = Infinity, renderHi = -Infinity, metricLo = Infinity, metricHi = -Infinity;
-      let intrinsicLo = Infinity, originLo = Infinity;
+      let intrinsicLo = Infinity;
       for (const rec of rows) {
         for (const key of fields) {
           const cycle = rec[key];
@@ -5982,19 +6865,16 @@
         }
         const wait = preFetchWaitSpan(rec);
         if (wait !== null) {
-          originLo = Math.min(originLo, wait.c0);
+          renderLo = Math.min(renderLo, wait.c0);
           metricLo = Math.min(metricLo, wait.c0);
         }
       }
-      const noWaitLo = renderLo;
-      originLo = Math.min(originLo, noWaitLo);
       if (metricLo === Infinity) {
-        metricLo = originLo;
+        metricLo = renderLo;
         metricHi = renderHi;
       }
       intrinsicLo = Math.max(metricLo, intrinsicLo === Infinity ? metricLo : intrinsicLo);
-      extent = { renderLo: preFetchWaitBox.checked ? originLo : noWaitLo, renderHi, metricLo,
-        metricHi, intrinsicLo, originLo, noWaitLo };
+      extent = { renderLo, renderHi, metricLo, metricHi, intrinsicLo };
     }
 
     /* SHARED BEGIN data-memory-stall */
@@ -6232,9 +7112,8 @@
 
     function setExtraInfoSubtitle(clipped) {
       document.querySelector('#extra-info-head .modal-subtitle').textContent =
-        `Configuration sections come first and describe ${clipped ? 'the loaded records'
-          : 'the whole JSON'}. Every other section describes the current fetch range, so its `
-        + 'figures move with the range. Each title says which.';
+        `The configuration sections describe ${clipped ? 'the loaded records' : 'the whole JSON'}, `
+        + 'and every other section the current fetch range, as each title says.';
     }
 
     function extraInfoOpen() {
@@ -6262,8 +7141,7 @@
         const clip = md.clipped;
         tail.push(['loaded records', `${fmtCount(clip.first_record)} to `
           + `${fmtCount(clip.last_record)} of ${fmtCount(clip.n_records_source)}`,
-        `Records of ${clip.source}, loaded with the events in their cycle span, so figures of `
-          + 'the whole run cover these records only.']);
+        `The records of ${clip.source} that are loaded, all a whole-run figure covers.`]);
       }
       return tail;
     }
@@ -6391,18 +7269,15 @@
       const frequency = Number((1e-6 / cycleSeconds()).toFixed(1));
       const assumed = md.clock_period_source === 'assumed' ? ` (assumed ${frequency} MHz)` : '';
       const rows = [
-        ['clock period', `${periodNs} ns${assumed}`, 'Time is reported at this period. A '
-          + 'Verilator VCD advances its timescale by a fixed step per cycle, whatever the '
-          + 'design\'s clock, so its own period is no time.'],
+        ['clock period', `${periodNs} ns${assumed}`, 'The period time is reported at, assumed '
+          + 'since a VCD\'s step is not the clock.'],
         ['clock frequency', fmtClockFrequency(), 'The reciprocal of the clock period.'],
-        ['configuration name', md.config_name, 'The --config-name label the tracer was given, '
-          + 'or its default. A VCD does not name its own build, so this is a label, not a '
-          + 'measurement.'],
-        ['VCD', md.vcd_path, 'The VCD the tracer read, as it was given.'],
+        ['configuration name', md.config_name, 'The configuration the tracer was told, a label '
+          + 'rather than a measurement.'],
+        ['VCD', md.vcd_path, 'The VCD the tracer read.'],
         ['VCD time step', md.vcd_clock_period == null ? '-'
           : `${fmtCount(md.vcd_clock_period)} × ${md.vcd_timescale ?? '-'} per cycle`,
-        'Timescale units between the first two rising edges, the VCD\'s own step, which is why '
-          + 'the clock period above is assumed.'],
+        'The VCD\'s own step per cycle, which says nothing of the clock.'],
         ['disassembly listing', md.disasm_list_path ?? '-',
           'The objdump listing that gave each record its instruction text.'],
       ];
@@ -6415,8 +7290,8 @@
       ];
       for (const [label, n, what] of missing) {
         if (n > 0) {
-          rows.push([label, fmtCount(n), `${what} the tracer could not tie to a record, so the `
-            + 'records behind them are missing from this JSON or carry null fields.']);
+          rows.push([label, fmtCount(n), `${what} the tracer could not tie to a record, whose `
+            + 'records are missing or incomplete.']);
         }
       }
       return { title: `Simulation ${wholeScope()}`, rows: rows.concat(simulationTailRows()) };
@@ -6427,20 +7302,15 @@
         title: `Pipeline structure ${wholeScope()}`,
         rows: [
           ['pipeline stages', 'FE1, FE2, DEC, IS, EX, WB, CO',
-            'Stages in program order: the I-cache request, the delivery and the prediction, '
-              + 'decode, issue, execute, writeback to the scoreboard, and commit.'],
-          ['front-end depth', 'FE1 + FE2',
-            'One cycle to request the cache line, one to take the response on a hit.'],
-          ['branch prediction point', 'FE2',
-            'The prediction is made on the delivery, so a taken prediction redirects the next '
-              + 'Fetch1 request.'],
-          ['issue model', 'in order',
-            'Instructions enter the scoreboard in program order, one handshake at a time from the '
-              + 'decode register, so a stalled instruction holds back every younger one.'],
-          ['execute model', 'out of order',
-            'Functional units run in parallel with different latencies, so instructions finish '
-              + 'out of program order and the scoreboard tracks those still in flight.'],
-          ['commit model', 'in order', 'Commit drains the scoreboard in program order.'],
+            'Fetch request, delivery, decode, issue, execute, writeback and commit.'],
+          ['front-end depth', 'FE1 + FE2', 'A cycle to request the line, and one to take it on a '
+            + 'hit.'],
+          ['branch prediction point', 'FE2', 'The prediction is made on the delivery and steers '
+            + 'the next request.'],
+          ['issue model', 'in order', 'Instructions enter the scoreboard in program order.'],
+          ['execute model', 'out of order', 'The units run in parallel, so instructions finish in '
+            + 'any order.'],
+          ['commit model', 'in order', 'Instructions commit in program order.'],
         ],
       };
     }
@@ -6451,15 +7321,11 @@
         title: `Buffer and queue sizes ${wholeScope()}`,
         rows: [
           ['front-end FIFO', `${FETCH_FIFO_DEPTH} instructions per FIFO`,
-            'The front end\'s instruction queue, between Fetch2 and the decode register: one FIFO '
-              + 'per instruction a fetch can deliver, two with compressed instructions. The fe '
-              + 'buf cells are these FIFOs filling while decode is busy.'],
-          ['decode register', '1 instruction',
-            'Decode keeps its output in one register. While issue cannot take the instruction, '
-              + 'the register keeps it and holds the FIFO behind it.'],
+            'Instructions waiting for decode, one FIFO per instruction a fetch can deliver.'],
+          ['decode register', '1 instruction', 'Holds a decoded instruction until issue takes '
+            + 'it.'],
           ['scoreboard', entries == null ? '-' : plural(entries, 'instruction'),
-            'The issue buffer and the in-flight tracker in one. An instruction holds a slot from '
-              + 'issue until commit.'],
+            'Holds an instruction from issue until it commits.'],
         ],
       };
     }
@@ -6527,13 +7393,11 @@
         title: `Buffer peak occupancy ${RANGE_SCOPE}`,
         rows: [
           extraInfoRow('front-end FIFO peak', plural(peaks.frontEnd, 'instruction'),
-            'Most instructions waiting in the front-end FIFOs at once, bounded by the FIFO depth '
-              + 'times the instructions one fetch can deliver.', ['icache']),
+            'The most instructions waiting in the front-end FIFOs at once.', ['icache']),
           ['decode register peak', plural(peaks.decode, 'instruction'),
-            'Most instructions waiting in the decode register at once.'],
+            'The most instructions waiting in the decode register at once.'],
           ['scoreboard peak', plural(peaks.scoreboard, 'instruction'),
-            'Most instructions in flight between issue and commit at once, bounded by the '
-              + 'scoreboard depth.'],
+            'The most instructions between issue and commit at once.'],
         ],
       };
     }
@@ -6582,17 +7446,14 @@
       return {
         title: `I-cache ${RANGE_SCOPE}`,
         rows: [
-          row('hit latency', plainCycles(minHitLatency(hits)), 'The quickest Fetch1 request to '
-            + 'Fetch2 response over the range\'s fetches that hit.'),
-          row('misses', document.getElementById('metric-ic-misses').textContent, 'Cycles the '
-            + 'I-cache signalled a miss, one per line fill, as the metric bar counts them, a '
-            + 'wrong-path fill squashed before delivery included. The number in parentheses counts '
-            + 'the records marked as a miss.'),
+          row('hit latency', plainCycles(minHitLatency(hits)), 'The quickest fetch that hit, from '
+            + 'request to response.'),
+          row('misses', document.getElementById('metric-ic-misses').textContent, 'Line fills the '
+            + 'I-cache started, as the metric bar counts them.'),
           ['accesses', document.getElementById('metric-ic-accesses').textContent,
-            'Cycles the front end requested the I-cache, the input of perf event 16.'],
+            'Cycles in which the front end asked the I-cache for a line.'],
           row('missed deliveries', fmtCount(countInRange(icMissedDeliveryCycles, lo, hi)),
-            'Delivered fetches whose line missed. A miss holds the request over several cycles, '
-              + 'and a fetch killed before delivery is not among them.'),
+            'Delivered fetches whose line missed.'),
         ],
       };
     }
@@ -6607,14 +7468,11 @@
         title: `D-cache ${RANGE_SCOPE}`,
         rows: [
           extraInfoRow('hit latency', plainCycles(minHitLatency(hits)), 'The quickest load that '
-            + 'hit, from Execute to writeback with both cycles counted, as Functional units counts '
-            + 'it.', ['dcache', 'lsu_fsm']),
-          row('misses', document.getElementById('metric-dc-misses').textContent, 'Miss '
-            + 'allocations in the MSHR, prefetches left out, as the metric bar counts them. '
-            + 'Page-table walks and cache maintenance allocate too.'),
+            + 'hit, from Execute to writeback.', ['dcache', 'lsu_fsm']),
+          row('misses', document.getElementById('metric-dc-misses').textContent, 'Misses, as the '
+            + 'metric bar counts them.'),
           ['accesses', document.getElementById('metric-dc-accesses').textContent,
-            'Cycles the load, page-table-walk or store port requested the D-cache, the input of '
-              + 'perf event 17.'],
+            'Cycles in which the D-cache took a request.'],
           row('load unit miss allocations', fmtCount(misses.load),
             'Miss allocations for the load unit.'),
           row('store port miss allocations', fmtCount(misses.store),
@@ -6637,24 +7495,22 @@
       return {
         title: `Branch behaviour ${RANGE_SCOPE}`,
         rows: [
-          ['total branches', withSubset(branches.length, committed), 'Control-flow instructions, '
-            + 'committed and flushed alike, as the metric bar counts them. The number in '
-            + 'parentheses, when shown, is the committed subset.'],
-          row('correctly predicted', fmtCount(correct), 'Resolved with no Execute redirect: the '
-            + 'prediction stood, or a branch with no prediction fell through correctly.'),
-          row('mispredicted', fmtCount(mispred), 'The predictor called the direction or the '
-            + 'target wrong, so Execute redirected.'),
-          row('unpredicted', fmtCount(unpred), 'The predictor made no prediction and falling '
-            + 'through was wrong, so Execute redirected.'),
-          row('unresolved branches', fmtCount(branches.length - resolved), `Flushed before they `
-            + `resolved, or still unresolved when the ${INPUT_NOUN} ended, so they have no `
-            + 'outcome. With the three rows above, they add up to total branches.'),
+          ['total branches', withSubset(branches.length, committed), 'Branches and jumps, and in '
+            + 'parentheses the committed ones.'],
+          row('correctly predicted', fmtCount(correct), 'Resolved with no redirect from '
+            + 'Execute.'),
+          row('mispredicted', fmtCount(mispred), 'The predictor got the direction or the target '
+            + 'wrong.'),
+          row('unpredicted', fmtCount(unpred), 'No prediction was made, and falling through was '
+            + 'wrong.'),
+          row('unresolved branches', fmtCount(branches.length - resolved), 'Flushed, or cut off by '
+            + `the end of the ${INPUT_NOUN}, before they resolved.`),
           row('prediction accuracy', fmtPercent(resolved ? correct / resolved : null), 'Correctly '
-            + 'predicted over resolved branches, counting unpredicted as not correct.'),
+            + 'predicted over resolved branches.'),
           row('predictor coverage', fmtPercent(resolved ? predicted / resolved : null), 'Resolved '
-            + 'branches the predictor made a prediction for, whatever the outcome.'),
+            + 'branches that had a prediction.'),
           row('taken / not taken', `${fmtCount(taken)} / ${fmtCount(resolved - taken)}`,
-            'Resolved direction over resolved branches.'),
+            'The direction the resolved branches took.'),
         ],
       };
     }
@@ -6673,19 +7529,16 @@
         rows: [
           row('writebacks', cmo ? `${fmtCount(rangeMemWritebacks.length)} (${fmtCount(cmo)} CMO `
             + `${cmo === 1 ? 'flush' : 'flushes'})` : fmtCount(rangeMemWritebacks.length),
-          'Dirty D-cache lines written back to memory during the range, from allocation to '
-            + 'acknowledgement.'),
+          'Dirty D-cache lines written back to memory in the range.'),
           row('linked to evictions', `${fmtCount(linked)} of `
             + `${fmtCount(rangeMemWritebacks.length - cmo)}`,
-          'Writebacks joined to the miss whose refill evicted the line, by set and way, over the '
-            + 'writebacks no CMO flush produced, as the tracer counts them.'),
+          'Writebacks tied to the miss whose refill evicted the line.'),
           row('sends without an acknowledgement', fmtCount(stats.n_sends_without_ack),
-            'Counted by the tracer over the whole VCD, since an unpaired send is not a writeback.'),
+            'Sends never acknowledged, over the whole VCD.'),
           row('acknowledgements without a send', fmtCount(stats.n_acks_without_send),
-            'Counted by the tracer over the whole VCD, since an unpaired acknowledgement is not a '
-              + 'writeback.'),
+            'Acknowledgements with no send, over the whole VCD.'),
           row('negative latencies', fmtCount(negative),
-            'Writebacks acknowledged before they were sent, which a correct pairing never gives.'),
+            'Writebacks acknowledged before they were sent, a broken pairing.'),
         ],
       };
     }
@@ -6716,8 +7569,8 @@
         title,
         rows: [
           ['min / median / max', `${min}, ${median}, ${max} cycles`,
-            'Send to acknowledgement across the memory-side AXI.'],
-          ['samples', fmtCount(samples), 'Writebacks that completed an acknowledgement.'],
+            'From send to acknowledgement on the memory bus.'],
+          ['samples', fmtCount(samples), 'Writebacks that were acknowledged.'],
         ],
         html: `<div class="histogram-card"><div class="histogram">${bars}</div></div>`,
       };
@@ -6921,7 +7774,6 @@
      * while its toggle is on. */
     function buildLegend() {
       const present = new Set(rangeCellKinds);
-      if (!preFetchWaitBox.checked) present.delete('preFetchWait');
       if (!forwardingBox.checked) {
         present.delete('fwdWb');
         present.delete('fwdSb');
@@ -7120,7 +7972,9 @@
       }
     }
 
-    /* Digits and one decimal point with at most two decimals, the precision setZoomTo applies. */
+    /* Digits and one decimal point with at most two decimals, the precision setZoomTo applies. A
+     * value past the range's maximum becomes it while it is typed, since more digits can only make
+     * it larger, as in the Fetch Range boxes. */
     function onZoomInput(el) {
       let value = el.value.replace(/[^0-9.]/g, '');
       const dot = value.indexOf('.');
@@ -7128,27 +7982,28 @@
         value = value.slice(0, dot + 1) + value.slice(dot + 1).replace(/\./g, '');
         value = value.slice(0, dot + 3);
       }
+      if (parseFloat(value) > sliderCeiling()) value = String(sliderCeiling());
       if (value !== el.value) el.value = value;
     }
 
-    /* The floor admits what Fit All sets, which is under MIN_CELL on a long range, or the box would
-     * refuse the value that button just applied. The target is rounded to the box's two decimals,
-     * so what is applied is exactly what the box shows. */
+    /* On Enter or when the box loses the focus, a value past either end becomes that end, and the
+     * box shows the zoom applied to two decimals. The floor is what Fit All sets, under MIN_CELL on
+     * a long range, or the box would refuse the value that button just applied. */
     function setZoomTo(raw) {
       const value = parseFloat(String(raw));
-      if (!Number.isFinite(value) || value <= 0) {
-        showZoomValue(cellW, '');
-        return;
+      if (Number.isFinite(value)) {
+        const ceiling = sliderCeiling();
+        const floor = Math.min(MIN_CELL, fitAllCellW());
+        const target = Math.max(floor, Math.min(ceiling, Math.round(value * 100) / 100));
+        const slider = document.getElementById('zoom-slider');
+        if (slider) {
+          slider.max = String(ceiling);
+          slider.value = String(Math.max(MIN_CELL, Math.min(ceiling, Math.round(target))));
+        }
+        setZoom(target);
       }
-      const ceiling = sliderCeiling();
-      const floor = Math.min(MIN_CELL, fitAllCellW());
-      const target = Math.round(Math.max(floor, Math.min(value, ceiling)) * 100) / 100;
-      const slider = document.getElementById('zoom-slider');
-      if (slider) {
-        slider.max = String(ceiling);
-        slider.value = String(Math.max(MIN_CELL, Math.min(ceiling, Math.round(target))));
-      }
-      setZoom(target);
+      const box = document.getElementById('zoom-value');
+      if (box) box.value = String(Math.round(cellW * 100) / 100);
     }
 
     /* SHARED END typed-zoom */
@@ -7189,20 +8044,6 @@
       scrollY = Math.max(0, Math.min(maxScrollY(), Math.round(row)));
       writeScroll();
       redraw();
-    }
-
-    /* The Pre-fetch wait toggle moves the drawing's first cycle, and the origin moves by as much, so
-     * the same cycles stay in view. */
-    function moveRenderLo(lo) {
-      if (lo === extent.renderLo) return;
-      scrollX += extent.renderLo - lo;
-      extent = { ...extent, renderLo: lo };
-      zoomAnchorCycle = null;
-      zoomAnchorScrollX = null;
-      clampZoomToWindow();
-      setupGeometry();
-      scrollX = Math.max(0, Math.min(maxScrollX(), scrollX));
-      writeScroll();
     }
 
     /* centre false puts the row at the top with its first cycle a third of the way in, and true,
@@ -7587,6 +8428,16 @@
       ctx.restore();
     }
 
+    /* SHARED BEGIN outcome-badge */
+
+    /* Needs: cellW, CELL_TAG_MIN_W, FONT_SANS, TAG_ALPHA, tagInk */
+
+    /* A badge's padding, the height below which it falls back to a stripe along its cell's top, and
+     * that stripe's height. */
+    const BADGE_PAD_X = 2;
+    const BADGE_MIN_H = 7;
+    const BADGE_STRIPE_H = 3;
+
     /* A branch outcome as a badge at the right end of the cell it sits in, in white at the cell
      * tag's size, with the cell's own tag left of it when the tag fits whole. On a cell too small
      * for the text it is a stripe along the cell's top. */
@@ -7618,6 +8469,8 @@
       ctx.textBaseline = 'alphabetic';
     }
 
+    /* SHARED END outcome-badge */
+
     function drawBars(rec, row, cells = cellsOf(rec)) {
       const ctx = timelineCanvas.getContext('2d');
       const rh = rowHeight();
@@ -7627,7 +8480,7 @@
       const fetchAt = cells.findIndex(cell => cell.group === 'fetch');
       cells.forEach((cell, index) => {
         if (index === fetchAt) drawFetchLanes(rec, row, cells);
-        if (cell.group === 'fetch' || !cellShown(cell)) return;
+        if (cell.group === 'fetch') return;
         paintCell(ctx, cell, rowTop, rh, firstCycle, viewportW);
       });
       if (rec.flushed && rec.flush_cycle != null) {
@@ -7667,7 +8520,6 @@
       const rh = rowHeight();
       const width = timelineCanvas.clientWidth, height = timelineCanvas.clientHeight;
       const firstCycle = firstVisibleCycle();
-      ctx.lineWidth = ARROW_LINE_W;
       for (let row = firstRow; row <= lastRow; row++) {
         const consumer = rows[row];
         if (consumer.is_cycle == null) continue;
@@ -7688,7 +8540,7 @@
            * the forward happened but belongs to the wrong-path row. */
           const colour = consumer.flushed ? COL.flushedFwd
             : consumer[`fwd_${edge.operand}_via`] === 'wb' ? COL.fwdWb : COL.fwdSb;
-          drawArrow(ctx, fromX, fromY, toX, toY, colour, colour);
+          drawArrow(ctx, fromX, fromY, toX, toY, colour);
         });
       }
     }
@@ -7728,19 +8580,46 @@
 
     /* SHARED BEGIN forward-arrow */
 
-    /* Needs: ARROW_START_PX, ARROW_HEAD */
+    /* Needs: ARROW_START_PX, ARROW_HEAD, ARROW_LINE_W, parseColour */
 
-    /* A forwarding arrow: a line from a square at its start to a head at its end. */
-    function drawArrow(ctx, fromX, fromY, toX, toY, line, head) {
-      ctx.strokeStyle = line;
-      ctx.beginPath();
-      ctx.moveTo(fromX, fromY);
-      ctx.lineTo(toX, toY);
-      ctx.stroke();
-      ctx.fillStyle = head;
-      ctx.fillRect(fromX - ARROW_START_PX / 2, fromY - ARROW_START_PX / 2, ARROW_START_PX,
-        ARROW_START_PX);
+    /* Every part of an arrow is outlined in near black, and its square and head are filled with its
+     * colour mixed far towards white, so both ends stand out from any cell in either theme. */
+    const ARROW_EDGE = 'rgba(14,14,16,0.92)';
+    const ARROW_EDGE_W = 1.25;
+    const ARROW_CORE_WHITE = 0.72;
+
+    function arrowCore(colour) {
+      const rgb = parseColour(colour);
+      if (!rgb) return '#ffffff';
+      const mix = rgb.slice(0, 3).map(c => Math.round(c + (255 - c) * ARROW_CORE_WHITE));
+      return `rgb(${mix.join(',')})`;
+    }
+
+    /* A forwarding arrow: a line in its colour from a square at its start to a head at its end. The
+     * line stops at the head's base, where the head's outline closes it. */
+    function drawArrow(ctx, fromX, fromY, toX, toY, colour) {
       const angle = Math.atan2(toY - fromY, toX - fromX);
+      const back = ARROW_HEAD * Math.cos(Math.PI / 6);
+      const core = arrowCore(colour);
+      ctx.save();
+      ctx.lineJoin = 'round';
+      if (Math.hypot(toX - fromX, toY - fromY) > back) {
+        ctx.beginPath();
+        ctx.moveTo(fromX, fromY);
+        ctx.lineTo(toX - back * Math.cos(angle), toY - back * Math.sin(angle));
+        ctx.strokeStyle = ARROW_EDGE;
+        ctx.lineWidth = ARROW_LINE_W + 2 * ARROW_EDGE_W;
+        ctx.stroke();
+        ctx.strokeStyle = colour;
+        ctx.lineWidth = ARROW_LINE_W;
+        ctx.stroke();
+      }
+      const half = ARROW_START_PX / 2;
+      ctx.fillStyle = ARROW_EDGE;
+      ctx.fillRect(fromX - half - ARROW_EDGE_W, fromY - half - ARROW_EDGE_W,
+        ARROW_START_PX + 2 * ARROW_EDGE_W, ARROW_START_PX + 2 * ARROW_EDGE_W);
+      ctx.fillStyle = core;
+      ctx.fillRect(fromX - half, fromY - half, ARROW_START_PX, ARROW_START_PX);
       ctx.beginPath();
       ctx.moveTo(toX, toY);
       ctx.lineTo(toX - ARROW_HEAD * Math.cos(angle - Math.PI / 6),
@@ -7748,7 +8627,12 @@
       ctx.lineTo(toX - ARROW_HEAD * Math.cos(angle + Math.PI / 6),
         toY - ARROW_HEAD * Math.sin(angle + Math.PI / 6));
       ctx.closePath();
+      ctx.strokeStyle = ARROW_EDGE;
+      ctx.lineWidth = 2 * ARROW_EDGE_W;
+      ctx.stroke();
+      ctx.fillStyle = core;
       ctx.fill();
+      ctx.restore();
     }
 
     /* SHARED END forward-arrow */
@@ -7807,6 +8691,7 @@
       ctx.fillRect(0, 0, width, height);
       ctx.font = `${Math.max(MEM_WB_FONT_PX, Math.min(12, laneH - 7))}px ${FONT_MONO}`;
       ctx.textBaseline = 'middle';
+      placeMemWbLaneNames();
       if (!rangeMemWritebacks.length) {
         ctx.fillStyle = INK.memWbLaneText;
         ctx.font = `${MEM_WB_NOTE_FONT_PX}px ${FONT_SANS}`;
@@ -7825,12 +8710,6 @@
         ctx.lineTo(width, lane * laneH + 0.5);
         ctx.stroke();
       }
-      /* The lane names take a gutter no bar paints over. */
-      const gutter = Math.ceil(ctx.measureText(`slot ${memWbLanes - 1}`).width) + MEM_WB_GUTTER_PAD;
-      ctx.fillStyle = INK.memWbLaneText;
-      for (let lane = 0; lane < memWbLanes; lane++) {
-        ctx.fillText(`slot ${lane}`, 3, (lane + 0.5) * laneH);
-      }
       for (const wb of rangeMemWritebacks) {
         const lane = wb.flush_slot ?? 0;
         const y = lane * laneH + MEM_WB_BAR_INSET, h = laneH - 2 * MEM_WB_BAR_INSET;
@@ -7839,18 +8718,18 @@
         const allocX = (allocated - firstCycle) * cellW;
         const sendX = (wb.send_cycle - firstCycle) * cellW;
         const ackEndX = (wb.ack_cycle - firstCycle + 1) * cellW;
-        if (ackEndX < gutter || allocX > width) continue;
-        const queuedFrom = Math.max(gutter, allocX), queuedTo = Math.max(gutter, sendX);
+        if (ackEndX < 0 || allocX > width) continue;
+        const queuedFrom = Math.max(0, allocX), queuedTo = Math.max(0, sendX);
         if (queuedTo > queuedFrom) {
           ctx.fillStyle = COL.memWbQueued;
           ctx.fillRect(queuedFrom, y, queuedTo - queuedFrom, h);
         }
-        const writeFrom = Math.max(gutter, sendX);
+        const writeFrom = Math.max(0, sendX);
         ctx.fillStyle = COL.memReq;
         ctx.fillRect(writeFrom, y, Math.max(2, ackEndX - writeFrom), h);
         if (wb.is_linked && wb.evict_cycle != null) {
           const evictX = (wb.evict_cycle - firstCycle) * cellW + 0.5;
-          if (evictX >= gutter && evictX <= width) {
+          if (evictX >= 0 && evictX <= width) {
             ctx.strokeStyle = COL.memWbEviction;
             ctx.beginPath();
             ctx.moveTo(evictX, y - 1);
@@ -7865,6 +8744,21 @@
         memWbRender.push({ wb, x0: Math.max(0, allocX), x1: ackEndX, y, h });
       }
       ctx.textBaseline = 'alphabetic';
+    }
+
+    /* The slot names in the track's header, each level with its lane as the lanes scroll, and none
+     * while the range draws no writeback. */
+    function placeMemWbLaneNames() {
+      const box = document.getElementById('mem-wb-lanes');
+      const laneH = memWbLaneH();
+      const font = Math.max(MEM_WB_FONT_PX, Math.min(12, laneH - 7));
+      const top = lane => (lane + 0.5) * laneH - memWbWrap.scrollTop;
+      const sig = rangeMemWritebacks.length ? `${memWbLanes}|${laneH}|${memWbWrap.scrollTop}` : '';
+      if (box.dataset.sig === sig) return;
+      box.dataset.sig = sig;
+      box.innerHTML = !sig ? '' : Array.from({ length: memWbLanes }, (_, lane) =>
+        `<div class="mem-wb-lane" style="top:${top(lane)}px;font-size:${font}px">slot ${lane}</div>`)
+        .join('');
     }
 
     function memWbHitTest(x, y) {
@@ -8254,7 +9148,7 @@
     function getStages(rec, cycle) {
       const names = [];
       for (const cell of cellsOf(rec)) {
-        if (cell.outline || !cellShown(cell) || cycle < cell.c0 || cycle >= cell.c1) continue;
+        if (cell.outline || cycle < cell.c0 || cycle >= cell.c1) continue;
         const name = cell.stage ?? LEGEND_BY_KEY.get(cell.kind).label;
         if (!names.includes(name)) names.push(name);
       }
@@ -8704,11 +9598,8 @@
     /* SHARED BEGIN pins */
 
     /* Needs: pins, tipRecordId, tipTitle, tooltip, rows, rowIndexById, recordById, COL, BAND_LOOK,
-     * scrollToRow, redraw, recordTipHtml, saveViewSettings, typingIn, escapeHtml, flashButtonLabel */
+     * scrollToRow, redraw, recordTipHtml, saveViewSettings, typingIn, escapeHtml, css-pins */
 
-    /* A reference that cannot be followed says why in its card's title for this long. The title is
-     * replaced rather than a line added, so the dock does not reflow under the pointer. */
-    const PIN_NOTE_MS = 2500;
     /* The dock's height is the reader's, from the grip on its top edge, and hidden it keeps only its
      * head. A null height is the stylesheet's, which fits the cards up to a share of the window. */
     const PIN_DOCK_MIN_H = 80;
@@ -8750,6 +9641,22 @@
           + `<span class="pin-close" data-pin-close="${index}" title="Unpin.">×</span></div>`
           + `<div class="pin-body">${body}</div></div>`;
       }).join('');
+      settlePinRefs(pinRow);
+    }
+
+    /* A reference to an instruction outside the current fetch range has no row to go to, so it is
+     * plain text whose title says why, and a card outside the range drops its "(max N)" notes, the
+     * maxima of a range it is no longer in. */
+    function settlePinRefs(pinRow) {
+      for (const note of pinRow.querySelectorAll('.pin-out .max-ref')) note.remove();
+      for (const ref of pinRow.querySelectorAll('[data-goto]')) {
+        const id = Number.parseInt(ref.getAttribute('data-goto'), 10);
+        if (rowOfId(id) >= 0) continue;
+        ref.removeAttribute('data-goto');
+        ref.classList.add('goto-off');
+        ref.title = recordById.has(id) ? `#${id} is outside the current fetch range.`
+          : `#${id} is not among the loaded records.`;
+      }
     }
 
     /* One card per record, so pinning an instruction twice does not add a copy to compare against
@@ -8815,24 +9722,14 @@
       return `<span class="goto-ref" data-goto="${escapeHtml(id)}">#${escapeHtml(id)}</span>`;
     }
 
-    /* Follows the record id in el's data-goto. The row is resolved now, at click time, and when
-     * there is none the card el sits in says why. Returns whether it scrolled. */
+    /* Follows the record id in el's data-goto, resolving the row at click time. A pinned reference
+     * outside the range has no data-goto, see settlePinRefs. Returns whether it scrolled. */
     function gotoRef(el) {
-      const id = Number.parseInt(el.getAttribute('data-goto'), 10);
-      if (Number.isNaN(id)) return false;
-      const row = rowOfId(id);
-      if (row >= 0) {
-        scrollToRow(row, false);
-        flashJump(row);
-        return true;
-      }
-      const card = el.closest('.pin-card');
-      const title = card ? card.querySelector('.pin-go') : null;
-      const note = recordById.has(id)
-        ? `#${id} is outside the current fetch range`
-        : `#${id} is not among the loaded records`;
-      if (title) flashButtonLabel(title, note, PIN_NOTE_MS);
-      return false;
+      const row = rowOfId(Number.parseInt(el.getAttribute('data-goto'), 10));
+      if (row < 0) return false;
+      scrollToRow(row, false);
+      flashJump(row);
+      return true;
     }
 
     /* How much of the jump flash is left on row, from 1 as it starts down to 0. */
@@ -8924,14 +9821,8 @@
         if (ev.ctrlKey || ev.metaKey || ev.altKey) return;
         if (!typingIn(document.activeElement) && addPin()) ev.preventDefault();
       });
-      /* Turning tooltips off clears the pins, each being a copy of a tooltip, and so does Clear
-       * all. Esc only hides them, so a stray key cannot throw away a comparison in progress. */
-      const tooltipOn = document.getElementById('tooltip-on');
-      if (tooltipOn) {
-        tooltipOn.addEventListener('change', () => {
-          if (!tooltipOn.checked) clearPins();
-        });
-      }
+      /* Only Clear All clears the pins. Esc hides them and the Tooltip box, or T, leaves them be,
+       * so a stray key cannot throw away a comparison in progress. */
     }
 
     /* SHARED END pins */
@@ -9415,14 +10306,12 @@
 
     /* SHARED BEGIN view-toggles */
 
-    /* Needs: records, rows, extent, preFetchWaitBox, moveRenderLo, buildLegend, redraw */
+    /* Needs: records, buildLegend, redraw */
 
-    /* A toggle that changes only what is drawn: the forwarding arrows, the pre-fetch wait's cell or
-     * a band. No figure and no cycle number follows it, so the legend, the canvases and where the
-     * drawing starts are all that change. */
+    /* A toggle that changes only what is drawn, the forwarding arrows or a band. No figure and no
+     * cycle number follows it, so the legend and the canvases are all that change. */
     function onViewToggle() {
       if (!records.length) return;
-      if (rows.length) moveRenderLo(preFetchWaitBox.checked ? extent.originLo : extent.noWaitLo);
       buildLegend();
       redraw();
     }
@@ -9472,7 +10361,7 @@
 
     /* Needs: closeMenus, hideTip, tooltip, typingIn, css-figure-mode */
 
-    /* Figure mode is a class on the body, and the resize observer redraws the canvases into the room
+    /* Figure Mode is a class on the body, and the resize observer redraws the canvases into the room
      * the hidden parts leave. The hint says how to come back, then goes. */
     const FIGURE_HINT_MS = 2600;
 
@@ -9503,6 +10392,92 @@
     }
 
     /* SHARED END figure-mode */
+
+    /* SHARED BEGIN help */
+
+    /* Needs: VIEWER_NAME, currentTheme, closeMenus, extraInfoOpen, toggleExtraInfo, hideTip,
+     * tooltip, noticeOpen, closeJsonBrowser, trapTab, css-help */
+
+    /* The pictures sit in docs/help/ beside the page, each made in both themes at HELP_SHOT_SCALE
+     * times its size by scripts/make_*_help.py, which reads the scale from here. */
+    const HELP_SHOT_DIR = 'docs/help/';
+    const HELP_SHOT_SCALE = 2;
+    let helpReturnFocus = null;
+
+    function helpOpen() {
+      return !document.getElementById('help').hidden;
+    }
+
+    /* Each picture in the theme on screen. One that cannot be loaded hides with its caption, and
+     * the text reads on without it. */
+    function showHelpShots() {
+      const theme = currentTheme();
+      for (const img of document.querySelectorAll('#help-box img[data-shot]')) {
+        const src = `${HELP_SHOT_DIR}${VIEWER_NAME}_${img.dataset.shot}_${theme}.png`;
+        if (img.dataset.src === src) continue;
+        img.dataset.src = src;
+        img.closest('figure').hidden = false;
+        img.srcset = `${src} ${HELP_SHOT_SCALE}x`;
+      }
+    }
+
+    /* Help covers the page, so whatever else is open closes first. The box takes the focus, so the
+     * arrows and Page Up and Page Down scroll it, and the focus goes back where it was after. */
+    function setHelp(open) {
+      if (open === helpOpen()) return;
+      if (open) {
+        closeMenus();
+        if (extraInfoOpen()) toggleExtraInfo();
+        closeJsonBrowser();
+        hideTip(tooltip);
+        showHelpShots();
+        helpReturnFocus = document.activeElement;
+      }
+      document.getElementById('help').hidden = !open;
+      if (open) document.getElementById('help-box').focus();
+      else if (helpReturnFocus && helpReturnFocus.focus && helpReturnFocus.isConnected) {
+        helpReturnFocus.focus();
+      }
+    }
+
+    /* While Help is open, ? and Esc close it and the page's own keys wait. A notice raised over it
+     * keeps its keys. */
+    function onHelpKey(ev) {
+      if (!helpOpen() || noticeOpen()) return;
+      const plain = !ev.ctrlKey && !ev.metaKey && !ev.altKey;
+      if (ev.key === 'Escape' || (ev.key === '?' && plain)) {
+        setHelp(false);
+        ev.preventDefault();
+      } else if (ev.key === 'Tab') {
+        trapTab(ev, document.getElementById('help-box'));
+      }
+      ev.stopImmediatePropagation();
+    }
+
+    function wireHelp() {
+      const help = document.getElementById('help');
+      document.getElementById('help-button').addEventListener('click', () => setHelp(true));
+      document.getElementById('help-close').addEventListener('click', () => setHelp(false));
+      help.addEventListener('click', ev => {
+        if (ev.target === help) setHelp(false);
+      });
+      for (const img of help.querySelectorAll('img[data-shot]')) {
+        img.addEventListener('error', () => {
+          img.closest('figure').hidden = true;
+        });
+      }
+      /* The contents scroll the box to a section and leave the address as it is. */
+      for (const link of help.querySelectorAll('#help-contents a')) {
+        link.addEventListener('click', ev => {
+          ev.preventDefault();
+          const section = document.getElementById(link.getAttribute('href').slice(1));
+          if (section) section.scrollIntoView({ block: 'start' });
+        });
+      }
+      window.addEventListener('keydown', onHelpKey, true);
+    }
+
+    /* SHARED END help */
 
     function applyMemWbToggle() {
       const button = document.getElementById('mem-wb-toggle');
@@ -9564,8 +10539,9 @@
 
     /* SHARED BEGIN keyboard */
 
-    /* Needs: records, scrollX, scrollY, pcFind, ENTER_OWNERS, ZOOM_KEY_STEP, handleEscape,
-     * noticeOpen, pcFindStep, zoomBy, setScrollX, setScrollY, maxScrollX, geometry */
+    /* Needs: records, scrollX, scrollY, pcFind, ENTER_OWNERS, ZOOM_KEY_STEP, THEME_LIGHT,
+     * handleEscape, noticeOpen, pcFindStep, zoomBy, setScrollX, setScrollY, maxScrollX,
+     * currentTheme, extraInfoOpen, toggleExtraInfo, extraActionKeys, geometry, menus, help */
 
     /* A box being typed into keeps its keys. A select, a checkbox, a button or a slider does not,
      * so every key works wherever the reader last clicked. */
@@ -9574,6 +10550,36 @@
       if (el.isContentEditable || el.tagName === 'TEXTAREA') return true;
       return el.tagName === 'INPUT'
         && !/^(checkbox|radio|range|button|submit|reset|color|file|image)$/.test(el.type);
+    }
+
+    /* The keys that stand for a control, each a click on it, so a disabled one stays inert and a
+     * key does what its control does. extraActionKeys adds a page's own controls. */
+    function actionKeys() {
+      const press = id => () => document.getElementById(id)?.click();
+      const copy = () => {
+        if (records.length) press('copy-metrics')();
+      };
+      return {
+        i: press('extra-info-toggle'), v: toggleViewMenu, r: press('reset-view'), l: switchTheme,
+        t: press('tooltip-on'), m: press('metric-bar-toggle'), h: press('labels-toggle'), c: copy,
+        0: press('fit-all-button'), g: press('main-code-button'), '?': press('help-button'),
+        ...extraActionKeys(press),
+      };
+    }
+
+    /* A click on the View button closes an open Extra Info by landing on its backdrop, so V closes
+     * it too, or the menu would open behind it. */
+    function toggleViewMenu() {
+      const menu = document.getElementById('view-menu');
+      if (!menu.open && extraInfoOpen()) toggleExtraInfo();
+      menu.open = !menu.open;
+    }
+
+    /* Through the theme select, so it shows the theme and the choice is remembered. */
+    function switchTheme() {
+      const select = document.getElementById('theme-select');
+      select.value = currentTheme() === THEME_LIGHT ? 'dark' : THEME_LIGHT;
+      select.dispatchEvent(new Event('change', { bubbles: true }));
     }
 
     function onKeyDown(ev) {
@@ -9588,7 +10594,16 @@
       }
       /* Browser chords, such as Ctrl and + for page zoom, are the browser's, and a key under an
        * open notice is the notice's, such as Enter in the range prompt. */
-      if (ev.ctrlKey || ev.metaKey || ev.altKey || !records.length || noticeOpen()) return;
+      if (ev.ctrlKey || ev.metaKey || ev.altKey || noticeOpen()) return;
+      /* A control's key works before a JSON loads, as the control does. A held key acts once, and
+       * the default is stopped, so a focused select does not take the letter as a choice. */
+      const actions = actionKeys(), name = ev.key.toLowerCase();
+      if (!typingIn(active) && Object.hasOwn(actions, name)) {
+        if (!ev.repeat) actions[name]();
+        ev.preventDefault();
+        return;
+      }
+      if (!records.length) return;
       const ownsEnter = active && (ENTER_OWNERS.includes(active.id)
         || /^(BUTTON|SUMMARY|SELECT)$/.test(active.tagName));
       if (ev.key === 'Enter' && pcFind.matches.length && !ownsEnter) {
@@ -9705,6 +10720,7 @@
       timelineScroll.addEventListener('mouseleave', onTimelineMouseLeave);
       labelList.addEventListener('click', onLabelClick);
       memWbWrap.addEventListener('mousemove', onMemWbMouseMove);
+      memWbWrap.addEventListener('scroll', placeMemWbLaneNames);
       memWbWrap.addEventListener('mouseleave', () => {
         memWbPointer = null;
         hideTip(tooltip);
@@ -9716,6 +10732,8 @@
       wireNotice();
       wireFileInput();
       wireDropLoad();
+      wireJsonBrowser();
+      wireHelp();
       wireRangeInputs();
       wireViewSettings();
       wireToolbar();

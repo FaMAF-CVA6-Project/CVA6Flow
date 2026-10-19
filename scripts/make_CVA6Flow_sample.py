@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build a sample JSON for the viewer's "Load sample" button.
+"""Build a sample JSON for the viewer's "Load Sample" button.
 
 Keeps a run of records from a full tracer JSON, clips every event array to
 the cycles those records span, by the rule the viewer's streamed loader
@@ -260,8 +260,9 @@ def read_page_schema():
 JS_GLOBAL = "window.__SAMPLE_JSON__"
 MANIFEST_GLOBAL = "window.__SAMPLE_MANIFEST__"
 MANIFEST_FILE = "samples.js"
-# A sample is meant to open at once, and past this it no longer does.
-MAX_SAMPLE_BYTES = 40 * 1024 * 1024
+# A sample is committed beside its page, so it stays under the 50 MB GitHub
+# warns about for a file, which the long programs' cut samples fill.
+MAX_SAMPLE_BYTES = 50 * 1000 * 1000
 
 
 def sample_label(out_base):
@@ -410,8 +411,8 @@ def main():
         print(f"[WARN] The page reads the manifest in tests/ only, so it "
               f"does not offer a sample listed in {manifest}.")
     if size > MAX_SAMPLE_BYTES:
-        print(f"[WARN] {human(size)} is past {human(MAX_SAMPLE_BYTES)}, and "
-              f"a sample is meant to open at once. Try a smaller -i.")
+        print(f"[WARN] {human(size)} is past {human(MAX_SAMPLE_BYTES)}, the "
+              f"50 MB GitHub warns about for a file. Try a smaller -i.")
     return 0
 
 

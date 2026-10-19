@@ -815,8 +815,8 @@ def check_formatter():
 # Needs: re, owned, read
 
 # A page's stage colour tables, one per look, and how far apart in OKLab two
-# light fills must sit on a white row, so a printed figure keeps every legend
-# entry apart. The dark look is held to distinct values only.
+# light fills must sit on white, as a see-through figure prints, so every
+# legend entry stays apart. The dark look is held to distinct values only.
 PALETTE_TABLES = ("COL_DARK", "COL_LIGHT")
 PALETTE_LIGHT_MIN_DISTANCE = 0.02
 PALETTE_TABLE = re.compile(r"const (COL_DARK|COL_LIGHT) = Object\.freeze\(\{"
@@ -844,7 +844,7 @@ def palette_rgba(text):
 
 
 def palette_oklab(rgba):
-    """OKLab of a colour laid over a white row."""
+    """OKLab of a colour laid over white, as a see-through figure prints."""
     def linear(channel):
         c = (channel * rgba[3] + 255 * (1 - rgba[3])) / 255
         return c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4

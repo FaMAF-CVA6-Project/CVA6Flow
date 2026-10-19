@@ -550,7 +550,7 @@ def check_target(source_pkg, target, live_given):
     """Refuse a swept package cut for another target, since the live package
     it is written over is the target's own. --live-config-pkg overrides."""
     name = os.path.basename(source_pkg)
-    if not live_given and not name.startswith(target + "_"):
+    if not live_given and not name.startswith(target + "_config"):
         raise SweepRefused(
             f"{name} is not a package for {target}, so it would be written "
             f"over that target's live package. Pass --config-pkg with one "
